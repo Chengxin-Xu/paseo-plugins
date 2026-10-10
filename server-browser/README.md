@@ -87,8 +87,10 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
 ```
 
 - 在插件目录里运行。目录安装就是你的源码目录；从 Git 或插件市场安装时，路径见 `paseo plugin ls --json` 输出的 `path`。
-- 脚本把 `@playwright/mcp@0.0.82`、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、`turndown@7.2.4` 装进运行时目录，
-  来源是主机 npm 配置的 registry，禁用安装脚本。它不下载 Chromium，也不修改 Agent 配置或创建浏览器 Profile。
+- 脚本把插件附带的 `runtime-deps/package.json` 和锁文件 `runtime-deps/package-lock.json` 复制到运行时目录，再用
+  `npm ci --ignore-scripts` 按锁文件安装 `@playwright/mcp@0.0.82`、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、`turndown@7.2.4`
+  及其全部下层依赖，每台主机装出同一棵依赖树。来源是主机 npm 配置的 registry，禁用安装脚本；运行时目录原有的 `package.json` 会被替换。
+  它不下载 Chromium，也不修改 Agent 配置或创建浏览器 Profile。
 - **Chromium**：插件依次使用 `PASEO_SERVER_BROWSER_EXECUTABLE`、Playwright 缓存（`~/.cache/ms-playwright` 或 `PLAYWRIGHT_BROWSERS_PATH`）
   中最新的 `chromium-headless-shell`、运行时 Playwright 自带版本。没有时可以用运行时里的 Playwright 安装 headless shell
   （从 Playwright 的下载源获取）：`node <运行时目录>/node_modules/playwright/cli.js install chromium-headless-shell`。

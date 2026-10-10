@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 — 2026-10-10
+
+- The host runtime is a locked dependency tree. `runtime-deps/package.json` and `runtime-deps/package-lock.json` ship with the plugin; `scripts/setup-runtime.mjs` copies them into the runtime directory and runs `npm ci --ignore-scripts --no-audit --no-fund`, so every host installs the same transitive dependencies. Before, only the four direct versions were pinned and `npm install` resolved the rest afresh. Setup stays manual and install scripts stay disabled; the runtime directory's `package.json` is replaced by the shipped one.
+
 ## 0.9.0 — 2026-10-10 (ready to publish)
 
 - Require Paseo 0.11.1 and pin the 0.11.1 plugin, client and protocol SDKs. The manifest gains an English display name, a description, an icon and four screenshots for the plugin registry, and an `OVERVIEW.md` describes setup, data, network access and limits.

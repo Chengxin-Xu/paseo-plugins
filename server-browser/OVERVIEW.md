@@ -16,7 +16,7 @@ Pages arrive over Paseo's connection as JPEG frames sized to each screen, not as
 
 The plugin needs a Linux daemon host and Paseo 0.11.1 or later. It never downloads or installs software by itself. Prepare the host once:
 
-- Run `node scripts/setup-runtime.mjs` in the plugin folder on the daemon host (`paseo plugin ls --json` shows the folder). It installs pinned versions of Playwright MCP 0.0.82, Mozilla Readability, jsdom and Turndown from the host's configured npm registry, with install scripts disabled, into `~/.local/share/paseo-server-browser` or `PASEO_SERVER_BROWSER_RUNTIME`. It does not download Chromium.
+- Run `node scripts/setup-runtime.mjs` in the plugin folder on the daemon host (`paseo plugin ls --json` shows the folder). It installs the locked tree in `runtime-deps/` (Playwright MCP 0.0.82, Mozilla Readability, jsdom, Turndown) into `~/.local/share/paseo-server-browser` or `PASEO_SERVER_BROWSER_RUNTIME` with `npm ci` from the host's npm registry, install scripts disabled. It does not download Chromium.
 - Provide Chromium: Playwright's `chromium-headless-shell` in the standard Playwright browser cache, or a Chromium or Chrome binary set in `PASEO_SERVER_BROWSER_EXECUTABLE`.
 - Chromium uses the host's libraries and fonts. Missing libraries can go in the runtime's `lib/` folder, and a `fonts.conf` there is used for fonts. Chinese pages need Chinese fonts.
 

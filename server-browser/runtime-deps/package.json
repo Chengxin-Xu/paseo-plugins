@@ -1,0 +1,13 @@
+{
+  "name": "paseo-server-browser-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Host runtime for the Server Browser Paseo plugin. scripts/setup-runtime.mjs copies this file and its lockfile into the runtime directory and runs npm ci there with install scripts disabled.",
+  "license": "MIT",
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "@playwright/mcp": "0.0.82",
+    "jsdom": "26.1.0",
+    "turndown": "7.2.4"
+  }
+}
