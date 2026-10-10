@@ -451,6 +451,21 @@ describe("colorful activity presentation", () => {
     });
   });
 
+  it("looks for embedded JSON from a few starts only, so crafted output cannot stall the app or the daemon (0.4.1)", () => {
+    // Retrying from every bracket was quadratic: 100 000 nested brackets kept the parser busy for minutes.
+    const crafted = "{" + "[".repeat(99_990) + "x";
+    const started = performance.now();
+    expect(parsePiShellResult(crafted)).toBeUndefined();
+    expect(unwrapPaseoToolOutput({ content: [{ type: "text", text: crafted }] })).toBe(crafted);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // A short prefix with brackets of its own still finds the result.
+    expect(unwrapPaseoToolOutput({ content: [{ type: "text", text: 'note [1] [2] (3):\n{"agentId":"a1"}' }] })).toEqual({ agentId: "a1" });
+    // Longer text is only taken when the whole text is JSON.
+    const long = "x".repeat(100_001) + '{"agentId":"a1"}';
+    expect(unwrapPaseoToolOutput({ content: [{ type: "text", text: long }] })).toBe(long);
+    expect(unwrapPaseoToolOutput({ content: [{ type: "text", text: JSON.stringify({ log: "y".repeat(200_000) }) }] })).toEqual({ log: "y".repeat(200_000) });
+  });
+
   it("unwraps Pi 0.99 bash structured results", () => {
     const envelope = {
       content: [{ type: "text", text: "copied\nvalid json\n" }],

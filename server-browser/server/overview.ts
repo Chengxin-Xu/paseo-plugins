@@ -49,7 +49,7 @@ export class BrowserOverviewService {
     const worker=async()=>{
       while(cursor<targets.length){
         const source=targets[cursor++];
-        const workspace:BrowserWorkspace={id:source.id,title:source.title??source.name??source.projectDisplayName,cwd:source.workspaceDirectory??source.projectRootPath,projectId:source.projectId??null,projectTitle:source.projectDisplayName};
+        const workspace:BrowserWorkspace={id:source.id,title:source.title??source.name??source.projectDisplayName,projectId:source.projectId??null,projectTitle:source.projectDisplayName};
         let session:BrowserSession;
         try{session=overviewSession(await bounded(this.manager.state(workspace.id),3500));}
         catch{session={workspaceId:workspace.id,status:'error',title:'状态暂不可用',url:'',mode:'manual',width:1120,height:720,tabs:[],agentId:null,error:'此工作区浏览器状态暂时无法读取，请稍后刷新。',agentBusy:false,activity:[]};}

@@ -1,6 +1,6 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import { RUN_WINDOWS, cadenceLabel, findChangeRequest, getScheduleRun, listSched
 import { contentRevision } from "./revision";
 import type { StatsDirectoryAgent } from "./stats-types";
 import { telemetryDirectory } from "./telemetry";
+import { ensurePrivateDirectory, resolvePaseoHome } from "./paseo-home";
 
 /**
  * 定时运行 index. The plugin SDK has no schedules API, so the daemon's own records are read (read-only):
@@ -20,8 +21,9 @@ import { telemetryDirectory } from "./telemetry";
  * so the records under `$PASEO_HOME/agents/` fill the gaps for Agents a schedule created or points at.
  *
  * A schedule's file disappears with the schedule, and its run history with it. The observatory keeps a small
- * metadata ledger (no replies, no prompts) so a deleted schedule's runs stay listed, and rebuilds runs it never saw
- * from the labels Paseo stamps on every Agent a schedule creates.
+ * metadata ledger (no replies, no prompts: a schedule without a name or title is stored as 未命名定时任务 plus its short
+ * id) so a deleted schedule's runs stay listed, and rebuilds runs it never saw from the labels Paseo stamps on every
+ * Agent a schedule creates.
  */
 
 const LOG = "[agent-observatory:schedules]";
@@ -31,15 +33,15 @@ const OUTPUT_MAX = 60_000, PROMPT_MAX = 8000, ERROR_MAX = 2000;
 const DAY_MS = 86_400_000, WINDOW_STEP_MS = 10 * 60_000;
 /** Agent records are listed at most once a minute (like the directory walk) and parsed only when they change. */
 const AGENT_SCAN_MS = 60_000, AGENT_RECORD_MAX_BYTES = 1024 * 1024;
-/** Temporary ledger files are unique per write, so two indexes on one directory (tests, an overlapping reload) cannot collide. */
-let temporarySequence = 0;
-
-/** Mirrors the daemon's resolvePaseoHome, `~` included, so the plugin reads the directory the daemon writes. */
-export function paseoHome(): string {
-  const raw = process.env.PASEO_HOME?.trim() || "~/.paseo";
-  if (raw === "~") return homedir();
-  return resolve(raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw);
-}
+/**
+ * Budgets of one scan, kept in memory as parsed files: schedule files and their total size, Agent records, their total
+ * size and the directory entries listed for them. Far above a heavy host (October 2026: one schedule file of 3 KB and
+ * 432 Agent records of 1.3 MB in 69 folders); past a budget the rest is skipped and the page says so.
+ */
+export interface ScheduleScanLimits { scheduleFiles: number; scheduleBytes: number; agentRecords: number; agentBytes: number; entries: number }
+export const SCHEDULE_SCAN_LIMITS: ScheduleScanLimits = { scheduleFiles: 2000, scheduleBytes: 256 * 1024 * 1024, agentRecords: 50_000, agentBytes: 256 * 1024 * 1024, entries: 100_000 };
+/** A schedule file that does not fit in what is left of the scan's byte budget. */
+class OverBudget extends Error {}
 
 // Loose mirrors of Paseo's StoredScheduleSchema / workspace registry: unknown keys pass, ids are plain strings.
 const runSchema = z.object({ id: z.string(), scheduledFor: z.string().nullable().optional(), startedAt: z.string(), endedAt: z.string().nullable().optional(),
@@ -65,9 +67,10 @@ const ledgerSchema = z.object({ version: z.literal(1), schedules: z.record(z.str
 export type ScheduleLedger = z.infer<typeof ledgerSchema>;
 
 interface Cached<Value> { mtimeMs: number; size: number; value: Value }
-async function readCached<Value>(path: string, cached: Cached<Value> | undefined, parse: (raw: unknown) => Value, maxBytes = MAX_FILE_BYTES): Promise<Cached<Value> | null> {
+async function readCached<Value>(path: string, cached: Cached<Value> | undefined, parse: (raw: unknown) => Value, maxBytes = MAX_FILE_BYTES, budget = Infinity): Promise<Cached<Value> | null> {
   let info;
   try { info = await stat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  if (info.size > budget) throw new OverBudget();
   if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) return cached;
   if (info.size > maxBytes) throw new Error(`${basename(path)} is larger than ${maxBytes} bytes`);
   let raw: unknown;
@@ -115,14 +118,21 @@ export interface ScheduleDirectory { agents: StatsDirectoryAgent[]; digest: stri
 export interface ScheduleIndexOptions {
   home?: string; dataDirectory?: string; directory: ScheduleDirectory; now?: () => number; writeDelayMs?: number;
   /** Test overrides for the 32 MB schedule-file and 8 MB ledger ceilings. */ maxFileBytes?: number; maxLedgerBytes?: number;
+  /** Test overrides for the scan budgets (SCHEDULE_SCAN_LIMITS). */ limits?: Partial<ScheduleScanLimits>;
   /** Where warnings go (console.warn); tests collect them. */ log?: (message: string) => void;
 }
 interface Base { rows: ScheduleRunRow[]; summaries: ScheduleSummary[]; reconstructed: number; error: string | null }
 
 const clip = (value: string | null | undefined, max: number) => value ? value.length > max ? `${value.slice(0, max - 1)}…` : value : null;
+/** The schedule's own name or title; without either, a neutral 未命名定时任务 plus its short id. This is what the ledger keeps. */
+function storedNameOf(schedule: StoredSchedule): string {
+  const config = schedule.target.type === "new-agent" ? schedule.target.config : null;
+  return clip(schedule.name?.trim() || config?.title?.trim() || `未命名定时任务 ${schedule.id.slice(0, 8)}`, 200)!;
+}
+/** What the live list shows: as stored, except that an unnamed schedule is recognised by its prompt's start (never saved). */
 function nameOf(schedule: StoredSchedule): string {
   const config = schedule.target.type === "new-agent" ? schedule.target.config : null;
-  return clip(schedule.name?.trim() || config?.title?.trim() || previewOf(schedule.prompt, 40) || `定时任务 ${schedule.id}`, 200)!;
+  return schedule.name?.trim() || config?.title?.trim() ? storedNameOf(schedule) : clip(previewOf(schedule.prompt, 40), 200) ?? storedNameOf(schedule);
 }
 /** Paseo runs a cron without a zone in UTC; intervals have none. */
 const zoneOf = (schedule: StoredSchedule) => schedule.cadence.type === "cron" ? schedule.cadence.timezone?.trim() || "UTC" : null;
@@ -161,13 +171,17 @@ export class ScheduleIndex {
   private agentScanAt = -Infinity;
   private agentScan: { agents: StatsDirectoryAgent[] } = { agents: [] };
   private readonly warn: (message: string) => void;
+  private readonly limits: ScheduleScanLimits;
+  /** Which part of the last scans hit its budget: shown with the ledger notices. */
+  private cut = { schedules: false, agents: false };
 
   constructor(private readonly options: ScheduleIndexOptions) {
-    this.home = options.home ?? paseoHome();
+    this.home = options.home ?? resolvePaseoHome();
     this.ledgerFile = join(options.dataDirectory ?? telemetryDirectory(), "schedule-ledger.json");
     this.now = options.now ?? Date.now;
     this.writeDelayMs = options.writeDelayMs ?? 2000;
     this.warn = options.log ?? (message => console.warn(`${LOG} ${message}`));
+    this.limits = { ...SCHEDULE_SCAN_LIMITS, ...options.limits };
     this.ready = this.loadLedger();
   }
 
@@ -196,20 +210,26 @@ export class ScheduleIndex {
     const directory = join(this.home, "schedules");
     let names: string[];
     try { names = (await readdir(directory, { withFileTypes: true })).filter(entry => entry.isFile() && entry.name.endsWith(".json")).map(entry => entry.name).sort(); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.files.clear(); return { schedules: [], stamps: [], error: null }; } return { schedules: [], stamps: ["unreadable"], error: "定时任务目录无法读取，只显示观测台记下的运行。" }; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.files.clear(); this.cut.schedules = false; return { schedules: [], stamps: [], error: null }; } return { schedules: [], stamps: ["unreadable"], error: "定时任务目录无法读取，只显示观测台记下的运行。" }; }
+    let over = names.length > this.limits.scheduleFiles, budget = this.limits.scheduleBytes;
+    if (over) names = names.slice(0, this.limits.scheduleFiles);
     const schedules: StoredSchedule[] = [], stamps: string[] = [], seen = new Set<string>();
     for (const name of names) {
       const path = join(directory, name);
       seen.add(path);
       try {
-        const file = await readCached(path, this.files.get(path), raw => parseSchedule(raw, name, this.warn), this.options.maxFileBytes);
+        const file = await readCached(path, this.files.get(path), raw => parseSchedule(raw, name, this.warn), this.options.maxFileBytes, budget);
         if (!file) { this.files.delete(path); continue; }
-        this.files.set(path, file);
+        this.files.set(path, file); budget -= file.size;
         stamps.push(`${name}:${file.mtimeMs}:${file.size}`);
         if (file.value) schedules.push(file.value);
-      } catch (error) { stamps.push(`${name}:error`); this.warn(`could not read ${name}: ${String(error)}`); }
+      } catch (error) {
+        if (error instanceof OverBudget) { over = true; seen.delete(path); stamps.push(`${name}:over`); continue; }
+        stamps.push(`${name}:error`); this.warn(`could not read ${name}: ${String(error)}`);
+      }
     }
     for (const path of this.files.keys()) if (!seen.has(path)) this.files.delete(path);
+    this.cut.schedules = over;
     return { schedules, stamps, error: null };
   }
 
@@ -239,19 +259,24 @@ export class ScheduleIndex {
     try { folders = (await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name).sort(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.warn(`could not list Agent records: ${String(error)}`);
-      else { this.agentFiles.clear(); this.agentScan = { agents: [] }; }
+      else { this.agentFiles.clear(); this.agentScan = { agents: [] }; this.cut.agents = false; }
       return this.agentScan;
     }
     const agents: StatsDirectoryAgent[] = [], seen = new Set<string>();
-    for (const folder of folders) {
+    let entries = 0, records = 0, bytes = 0, over = false;
+    scan: for (const folder of folders) {
+      if (++entries > this.limits.entries) { over = true; break; }
       let names: string[];
       try { names = (await readdir(join(root, folder), { withFileTypes: true })).filter(entry => entry.isFile() && entry.name.endsWith(".json")).map(entry => entry.name).sort(); }
       catch { continue; }
       for (const name of names) {
+        if (++entries > this.limits.entries || records >= this.limits.agentRecords) { over = true; break scan; }
         const path = join(root, folder, name);
-        seen.add(path);
         try {
-          const info = await stat(path);
+          // Only records small enough to parse (1 MB) are held in memory, so only they count against the byte budget.
+          const info = await stat(path), cost = info.size <= AGENT_RECORD_MAX_BYTES ? info.size : 0;
+          if (bytes + cost > this.limits.agentBytes) { over = true; continue; }
+          records++; bytes += cost; seen.add(path);
           let file = this.agentFiles.get(path);
           if (!file || file.mtimeMs !== info.mtimeMs || file.size !== info.size) {
             let agent: StatsDirectoryAgent | null = null;
@@ -265,6 +290,7 @@ export class ScheduleIndex {
       }
     }
     for (const path of this.agentFiles.keys()) if (!seen.has(path)) this.agentFiles.delete(path);
+    this.cut.agents = over;
     this.agentScan = { agents };
     return this.agentScan;
   }
@@ -297,7 +323,9 @@ export class ScheduleIndex {
     // Window edges move in 10-minute steps; a step that moves no run keeps the revision, so polls stay a few bytes.
     const bucket = Math.floor(this.now() / WINDOW_STEP_MS) * WINDOW_STEP_MS;
     const cutoff = limits.days === null ? null : bucket - limits.days * DAY_MS;
-    const cacheKey = `${bucket}:${this.notice ?? ""}`;
+    const notice = [this.notice, this.cut.schedules ? `定时任务文件超过上限（${this.limits.scheduleFiles} 个或 ${Math.round(this.limits.scheduleBytes / 1024 ** 2)} MB），只读取了一部分。` : null,
+      this.cut.agents ? `Agent 记录超过上限（${this.limits.agentRecords} 个、${Math.round(this.limits.agentBytes / 1024 ** 2)} MB 或 ${this.limits.entries} 个目录条目），只读取了一部分。` : null].filter(Boolean).join(" ").slice(0, 500) || null;
+    const cacheKey = `${bucket}:${notice ?? ""}`;
     let state = this.windows.get(window)?.key === cacheKey ? this.windows.get(window)!.state : undefined;
     if (!state) {
       let runs = 0, heartbeats = 0;
@@ -314,7 +342,7 @@ export class ScheduleIndex {
       const keptHeartbeats = kept.filter(row => row.kind === "heartbeat").length, allHeartbeats = base.rows.filter(row => row.kind === "heartbeat").length;
       const body = { window, schedules: base.summaries.slice(0, 400), runs: kept, older: base.rows.length - allHeartbeats - (kept.length - keptHeartbeats), olderHeartbeats: allHeartbeats - keptHeartbeats,
         truncated: kept.length < base.rows.length, week,
-        reconstructed: base.reconstructed, error: base.error, notice: this.notice };
+        reconstructed: base.reconstructed, error: base.error, notice };
       state = { mode: "full", unchanged: false, revision: contentRevision(body), generatedAt: new Date(this.now()).toISOString(), ...body };
       this.windows.set(window, { key: cacheKey, state });
     }
@@ -354,7 +382,7 @@ export class ScheduleIndex {
       const provider = clip(config?.provider ?? targetAgent?.provider ?? null, 120);
       summaries.set(schedule.id, { id: schedule.id, name, kind, status: schedule.status, cadence: cadenceLabel(schedule.cadence), timezone, target: clip(targetAgent?.title ?? (config?.cwd ? basename(config.cwd) : null), 240),
         nextRunAt: schedule.nextRunAt ?? null, lastRunAt: schedule.lastRunAt ?? null, provider });
-      this.ledger.schedules[schedule.id] = { name, kind, cadence: cadenceLabel(schedule.cadence), timezone, provider, projectName: clip(projectName, 240), lastSeenAt: nowIso, deletedAt: null };
+      this.ledger.schedules[schedule.id] = { name: storedNameOf(schedule), kind, cadence: cadenceLabel(schedule.cadence), timezone, provider, projectName: clip(projectName, 240), lastSeenAt: nowIso, deletedAt: null };
       for (const run of schedule.runs) {
         // A failed heartbeat never records its Agent; the schedule's own target is the Agent it prompted.
         const agent = (run.agentId ? byId.get(run.agentId) : undefined) ?? byRun.get(run.id) ?? targetAgent;
@@ -443,17 +471,21 @@ export class ScheduleIndex {
     this.writeTimer.unref?.();
   }
 
-  /** Writes the ledger now (atomically: a unique temporary file, then rename); writes run one after another. */
+  /**
+   * Writes the ledger now, atomically and privately: the data directory is 0700 (an existing wider one is tightened), the
+   * temporary file has a random name and is created exclusively with mode 0600 (`wx`), then renamed; writes run one after another.
+   */
   flush(): Promise<void> {
     if (this.writeTimer) { clearTimeout(this.writeTimer); this.writeTimer = null; }
     if (!this.ledgerWritable) return this.writes;
     const snapshot = JSON.stringify(this.ledger);
     this.dirty = false;
     this.writes = this.writes.then(async () => {
-      await mkdir(dirname(this.ledgerFile), { recursive: true });
-      const temporary = `${this.ledgerFile}.${process.pid}.${(++temporarySequence).toString(36)}.tmp`;
+      await ensurePrivateDirectory(dirname(this.ledgerFile));
+      const temporary = `${this.ledgerFile}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, snapshot, { mode: 0o600 });
+        const handle = await open(temporary, "wx", 0o600);
+        try { await handle.writeFile(snapshot, "utf8"); } finally { await handle.close(); }
         await rename(temporary, this.ledgerFile);
       } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error; }
       if (this.notice?.startsWith("定时运行账本无法保存")) this.notice = null;

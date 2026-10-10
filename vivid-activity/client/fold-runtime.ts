@@ -12,7 +12,7 @@ import type { TakeoverScope } from "../shared/settings";
  *
  * 1. 每个正在显示的 Agent 一个索引：插件服务端在 daemon 本机读投影时间线，只回传位置、种类、状态和类别（`fold-index` RPC）。
  *    第一行出现时读尾部，之后只读增量；有新行、行状态变化、Agent 文字或用户消息到来时（转换器顺带「戳」一下）再读，
- *    运行中每 15 秒兜底一次；所有行卸载 30 秒后停止。
+ *    运行中每 15 秒兜底一次；所有行卸载 30 秒后停止，10 分钟后连索引和角色一起丢掉（0.4.1）。
  * 2. 由索引算出每一行的角色（显示 / 折叠 / 摘要），合成一张按折叠键（工具行 callId、思考行文本哈希）查的全局表，供转换器同步查询。
  * 3. 已经画出来的行角色变了，就让 Paseo 重新投影：增删一个空的渲染器，Paseo 会换一个新的组合转换函数，投影缓存随之失效。
  *    用户点击立即重投影；段结束折叠稍等 0.1 秒；运行中的「前面 N 步」最多每 2.5 秒一次，长对话里不会一直重算。
@@ -38,6 +38,12 @@ export const FOLD_TIMING = {
   rowDelay: 200,
   pollMs: 15_000,
   releaseGraceMs: 30_000,
+  /**
+   * 0.4.1: an Agent none of whose rows has been on screen for this long is dropped (index, timings, roles). Coming back
+   * later reads it afresh, and until that read lands its rows show unfolded, so this is minutes rather than the
+   * 30 s after which polling stops: switching between a few Agents keeps their folds.
+   */
+  forgetMs: 10 * 60_000,
   retryMs: [2_000, 5_000, 15_000],
   /** Smallest gap between two re-projections, by priority. */
   minGap: { now: 0, soon: 600, auto: 2_500 } as Record<NudgePriority, number>,
@@ -487,7 +493,8 @@ export function createFoldRuntime(): FoldRuntime {
     publishRoles(agent, plan.roles, priority);
   }
 
-  function publishRoles(agent: AgentFolds, roles: Map<string, FoldRole>, priority: NudgePriority): void {
+  /** `quiet`: none of the agent's rows is on screen, so a changed role needs no re-projection. */
+  function publishRoles(agent: AgentFolds, roles: Map<string, FoldRole>, priority: NudgePriority, quiet = false): void {
     const touched = new Set<string>();
     for (const key of agent.roles.keys()) if (!roles.has(key)) touched.add(key);
     const next = new Map<string, string>();
@@ -527,7 +534,29 @@ export function createFoldRuntime(): FoldRuntime {
         if (agreed?.role.kind === "fold" && agreed.role.summary.mode === "done" && !previous.startsWith("f|")) urgent = true;
       }
     }
-    if (dirty) runtime.scheduleNudge(urgent && priority === "auto" ? "soon" : priority);
+    if (dirty && !quiet) runtime.scheduleNudge(urgent && priority === "auto" ? "soon" : priority);
+  }
+
+  /**
+   * 0.4.1: drops an Agent nobody has looked at for `forgetMs`: its index, timings and the roles it claims. A read still
+   * in flight, or a row still listening for its timing, puts it off.
+   */
+  function forget(agent: AgentFolds): void {
+    if (agent.refs > 0 || agents.get(agent.agentId) !== agent) return;
+    if (agent.inflight || agent.timingListeners.size > 0) {
+      agent.releaseTimer = setTimer(() => {
+        agent.releaseTimer = null;
+        forget(agent);
+      }, FOLD_TIMING.releaseGraceMs);
+      return;
+    }
+    clearTimer(agent.timer);
+    clearTimer(agent.poll);
+    agent.timer = null;
+    agent.poll = null;
+    recomputeQueue.delete(agent);
+    publishRoles(agent, new Map(), "auto", true);
+    agents.delete(agent.agentId);
   }
 
   const runtime: FoldRuntime = {
@@ -596,6 +625,11 @@ export function createFoldRuntime(): FoldRuntime {
         agent.timer = null;
         agent.timerDue = Infinity;
         syncPoll(agent);
+        // acquire() cancels this second stage too.
+        agent.releaseTimer = setTimer(() => {
+          agent.releaseTimer = null;
+          forget(agent);
+        }, FOLD_TIMING.forgetMs - FOLD_TIMING.releaseGraceMs);
       }, FOLD_TIMING.releaseGraceMs);
     },
     noteRow(agentId, key, status, at) {

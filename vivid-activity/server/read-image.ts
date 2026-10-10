@@ -1,15 +1,34 @@
 import { constants } from "node:fs";
-import { open, realpath, stat, type FileHandle } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { open, readlink, realpath, stat, type FileHandle } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
+  IMAGE_HEADER_BYTES,
   MAX_READ_IMAGE_BYTES,
   detectImageMimeType,
   type ReadImageResult,
 } from "../shared/read-image.js";
 
-type ReadImageInput = { filePath: string; agentId?: string };
+type ReadImageInput = { filePath: string; agentId: string };
+
+/** The part of an open file the preview uses. */
+export type ImageFile = Pick<FileHandle, "fd" | "stat" | "read" | "close">;
+
+/** File access of the preview; tests replace it to simulate races. */
+export interface ReadImageIo {
+  open(path: string, flags: number): Promise<ImageFile>;
+  /** The path the kernel holds for an open descriptor; null where the platform cannot tell. */
+  fdPath(fd: number): Promise<string | null>;
+}
+
+const NODE_IO: ReadImageIo = {
+  open: (path, flags) => open(path, flags),
+  fdPath: (fd) => (process.platform === "linux" ? readlink(`/proc/self/fd/${fd}`).catch(() => null) : Promise.resolve(null)),
+};
+
+/** Reads are made in pieces of this size, so a file that grows while it is read cannot make one read bigger. */
+const READ_CHUNK_BYTES = 64 * 1024;
 
 /** Resolves a read detail path against the agent cwd. Returns null when unresolvable. */
 export function resolveAbsolutePath(
@@ -29,9 +48,25 @@ export function isInside(root: string, target: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-/** The system temp directories every agent may write screenshots to. */
-export function defaultTempRoots(): string[] {
-  return [...new Set([tmpdir(), "/tmp"])];
+/**
+ * The system temp directory, where agents and the tools they run put screenshots: `os.tmpdir()`, which is $TMPDIR and
+ * otherwise /tmp on Linux. 0.4.1: /tmp is no longer added everywhere. macOS keeps it: os.tmpdir() is the per-user
+ * /var/folders/…/T there, while agents and browser tools write their screenshots to /tmp (/private/tmp), and those
+ * previews would stop working without it. A temp directory that is the file system root or holds the home directory
+ * would open that whole tree, so such a $TMPDIR is ignored.
+ */
+export function defaultTempRoots(
+  platform: NodeJS.Platform = process.platform,
+  temp: string = tmpdir(),
+  home: string = homedir(),
+): string[] {
+  const candidates = platform === "darwin" ? [temp, "/tmp"] : [temp];
+  const homeDir = isAbsolute(home) && resolve(home) !== parse(resolve(home)).root ? resolve(home) : null;
+  const roots = candidates
+    .filter((root) => isAbsolute(root))
+    .map((root) => resolve(root))
+    .filter((root) => root !== parse(root).root && !(homeDir && isInside(root, homeDir)));
+  return [...new Set(roots)];
 }
 
 /**
@@ -47,17 +82,68 @@ export async function imageRoots(agentCwd: string | null, tempRoots: readonly st
   };
 }
 
+/**
+ * The Agent whose working directory bounds a preview. 0.4.1: Paseo shows a provider subagent (a Claude Code background
+ * task, say) in a pane of its own and gives its rows the id `provider:<parent agent id>:<subagent id>`, both
+ * URI-encoded. The daemon has no Agent by that id; the subagent works in its parent's directory, so the parent stands in.
+ */
+export function previewAgentId(agentId: string): string {
+  const match = /^provider:([^:]+):([^:]+)$/.exec(agentId);
+  if (!match) return agentId;
+  try {
+    return decodeURIComponent(match[1]!);
+  } catch {
+    return agentId;
+  }
+}
+
 async function resolveAgentCwd(
   paseo: PluginHandlerContext["paseo"],
   agentId: string | undefined,
 ): Promise<string | null> {
-  if (!agentId) return null;
+  const id = typeof agentId === "string" ? agentId.trim() : "";
+  if (!id) return null;
   try {
-    const ref = paseo.agents.ref(agentId);
+    // fetch_agent reads the stored record of an Agent that is not loaded; it does not load it.
+    const ref = paseo.agents.ref(previewAgentId(id));
     await ref.refresh();
-    return ref.cwd;
+    const cwd = ref.cwd;
+    return typeof cwd === "string" && isAbsolute(cwd) ? cwd : null;
   } catch {
     return null;
+  }
+}
+
+/** Reads from the start of the file, at most `maxBytes` (0.4.1: never the whole file at once). */
+export async function readUpTo(file: Pick<FileHandle, "read">, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total < maxBytes) {
+    const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes - total));
+    const { bytesRead } = await file.read(chunk, 0, chunk.length, total);
+    if (bytesRead === 0) break;
+    chunks.push(bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  return chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, total);
+}
+
+/**
+ * 0.4.1: whether the file that was opened is still inside the allowed roots. realpath() and open() are separate steps,
+ * and O_NOFOLLOW covers only the last component: a directory on the path could be swapped for a link in between. Linux
+ * names the file a descriptor really points at (/proc/self/fd). Elsewhere the path that was checked must still be
+ * canonical and name the very file that is open (same device and inode); that narrows the window but cannot close it.
+ */
+async function openedInside(file: ImageFile, realPath: string, realRoots: readonly string[], io: ReadImageIo): Promise<boolean> {
+  const kernelPath = await io.fdPath(file.fd);
+  if (kernelPath !== null) return isAbsolute(kernelPath) && realRoots.some((root) => isInside(root, kernelPath));
+  try {
+    const opened = await file.stat();
+    if ((await realpath(realPath)) !== realPath) return false;
+    const named = await stat(realPath);
+    return named.dev === opened.dev && named.ino === opened.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -65,8 +151,12 @@ export async function handleReadImage(
   input: ReadImageInput,
   context: PluginHandlerContext,
   tempRoots: readonly string[] = defaultTempRoots(),
+  io: ReadImageIo = NODE_IO,
 ): Promise<ReadImageResult> {
+  // 0.4.1: an Agent the daemon knows is required. Its working directory and the temp directories are the only places
+  // a preview reads; without one nothing is read, not even the temp directory.
   const agentCwd = await resolveAgentCwd(context.paseo, input.agentId);
+  if (!agentCwd) return { status: "unavailable" };
   const absolutePath = resolveAbsolutePath(input.filePath, agentCwd);
   if (!absolutePath) return { status: "unavailable" };
 
@@ -85,33 +175,37 @@ export async function handleReadImage(
   try {
     const fileStat = await stat(realPath);
     if (!fileStat.isFile()) return { status: "not-found" };
-    if (fileStat.size > MAX_READ_IMAGE_BYTES) return { status: "too-large", byteSize: fileStat.size };
+    if (fileStat.size > MAX_READ_IMAGE_BYTES) return { status: "too-large" };
   } catch {
     return { status: "not-found" };
   }
-  // One handle for the final check and the read; O_NOFOLLOW / O_NONBLOCK refuse a last component swapped
+  // One handle for the final checks and the read; O_NOFOLLOW / O_NONBLOCK refuse a last component swapped
   // for a link or a FIFO after the checks above.
-  let handle: FileHandle;
+  let file: ImageFile;
   try {
-    handle = await open(realPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    file = await io.open(realPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   } catch {
     return { status: "not-found" };
   }
   let bytes: Buffer;
   try {
-    const fileStat = await handle.stat();
+    const fileStat = await file.stat();
     if (!fileStat.isFile()) return { status: "not-found" };
-    if (fileStat.size > MAX_READ_IMAGE_BYTES) return { status: "too-large", byteSize: fileStat.size };
-    if (fileStat.size === 0) return { status: "not-image", byteSize: 0 };
-    bytes = await handle.readFile();
+    if (fileStat.size > MAX_READ_IMAGE_BYTES) return { status: "too-large" };
+    if (!(await openedInside(file, realPath, roots.real, io))) return { status: "outside" };
+    // 0.4.1: look at the first bytes first; a file that does not start like an image is not read any further.
+    const head = await readUpTo(file, IMAGE_HEADER_BYTES);
+    if (!detectImageMimeType(head, fileStat.size)) return { status: "not-image" };
+    // Never more than the limit and one byte, even if the file grew since fstat.
+    bytes = await readUpTo(file, MAX_READ_IMAGE_BYTES + 1);
   } catch {
     return { status: "not-found" };
   } finally {
-    await handle.close().catch(() => undefined);
+    await file.close().catch(() => undefined);
   }
-  if (bytes.byteLength > MAX_READ_IMAGE_BYTES) return { status: "too-large", byteSize: bytes.byteLength };
+  if (bytes.byteLength > MAX_READ_IMAGE_BYTES) return { status: "too-large" };
 
   const mimeType = detectImageMimeType(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
-  if (!mimeType) return { status: "not-image", byteSize: bytes.byteLength };
+  if (!mimeType) return { status: "not-image" };
   return { status: "ok", data: bytes.toString("base64"), mimeType, byteSize: bytes.byteLength };
 }

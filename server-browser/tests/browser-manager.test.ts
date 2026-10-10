@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -176,5 +176,44 @@ test('MCP form login retains HttpOnly authentication after browser restart and i
     await writeFile('artifacts/login-verification.json',JSON.stringify({passed:true,verifiedAt:new Date().toISOString(),kind:'Controlled local HTTP login fixture; synthetic credentials only',browserTools:'Actual server_browser MCP bridge with no Desktop host or viewer client',checks:{formLogin:true,authenticatedPageRead:true,httpOnlyCookie:true,browserRestartRetainsLogin:true,secondWorkspaceRequiresOwnLogin:true},successfulLogins:logins,authenticatedPageReads:protectedReads,realExternalAccountsTested:false},null,2)+'\n');
   }finally{
     await client?.close();await manager.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dataRoot,{recursive:true,force:true});
+  }
+});
+
+test('real Playwright MCP: the allowlisted tools exist, uploads come only from the workspace, saved files stay in it, navigation follows the panel rules', {timeout:120000}, async()=>{
+  const dataRoot=await mkdtemp(path.join(tmpdir(),'paseo-browser-upload-test-'));
+  const workspace=await realpath(await mkdtemp(path.join(tmpdir(),'paseo-browser-workspace-')));
+  const server=createServer((request,response)=>{response.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});response.end('<!doctype html><title>Upload form</title><input id="file" type="file" multiple>');});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();assert(address&&typeof address!=='string');
+  const origin=`http://127.0.0.1:${address.port}`;
+  const manager=new BrowserManager({dataRoot});
+  let client:Awaited<ReturnType<typeof mcp>>|undefined;
+  try{
+    await writeFile(path.join(workspace,'upload.txt'),'synthetic upload');await writeFile(path.join(dataRoot,'outside.txt'),'outside the workspace');
+    manager.setWorkspaceDirectory('upload-test',workspace);
+    await manager.start('upload-test');await manager.action('upload-test',{kind:'navigate',url:`${origin}/form`});await manager.action('upload-test',{kind:'mode',mode:'agent'});
+    assert.equal(JSON.parse(await readFile(manager.metadataPath('upload-test'),'utf8')).workspaceDirectory,workspace);
+    client=await mcp(manager.bridgePath,manager.metadataPath('upload-test'));
+    assert.deepEqual(new Set(await client.tools()),new Set(['browser_snapshot','browser_find','browser_wait_for','browser_take_screenshot','browser_console_messages','browser_network_requests','browser_network_request',
+      'browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_drop','browser_file_upload','browser_handle_dialog','browser_evaluate','browser_resize','browser_emulate_media','browser_tabs',
+      'browser_read_page','browser_diagnostics']),'every allowlisted tool exists in this Playwright MCP and nothing else is offered');
+    const chooser=await client.call('browser_click',{target:'#file',element:'file input'});assert(!chooser.isError,text(chooser));
+    const refused=await client.call('browser_file_upload',{paths:[path.join(dataRoot,'outside.txt')]});
+    assert.equal(refused.isError,true);assert.match(text(refused),/只能上传当前工作区目录里的文件/);
+    const uploaded=await client.call('browser_file_upload',{paths:['upload.txt']});assert(!uploaded.isError,text(uploaded));
+    assert.match(text(await client.call('browser_evaluate',{function:"() => [...document.querySelector('#file').files].map(file => file.name + ':' + file.size).join(',')"})),/upload\.txt:16/);
+    const escaped=await client.call('browser_take_screenshot',{filename:path.join(dataRoot,'escape.png'),type:'png',scale:'css'});
+    assert.equal(escaped.isError,true,text(escaped));await assert.rejects(access(path.join(dataRoot,'escape.png')));
+    const saved=await client.call('browser_take_screenshot',{filename:'shot.png',type:'png',scale:'css'});assert(!saved.isError,text(saved));
+    await access(path.join(workspace,'shot.png'));
+    const metadataAddress=await client.call('browser_navigate',{url:'http://169.254.169.254/latest/meta-data/'});
+    assert.equal(metadataAddress.isError,true);assert.match(text(metadataAddress),/链路本地或云服务器元数据/);
+    const credentials=await client.call('browser_navigate',{url:`http://user:secret@127.0.0.1:${address.port}/form`});
+    assert.equal(credentials.isError,true);assert.match(text(credentials),/不要在地址中填写密码/);
+    const navigated=await client.call('browser_navigate',{url:` ${origin}/form?next=1 `});assert(!navigated.isError,text(navigated));
+    assert.equal((await manager.state('upload-test')).url,`${origin}/form?next=1`);
+  }finally{
+    await client?.close();await manager.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
+    await rm(dataRoot,{recursive:true,force:true});await rm(workspace,{recursive:true,force:true});
   }
 });

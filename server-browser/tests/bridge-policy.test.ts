@@ -1,0 +1,129 @@
+import assert from 'node:assert/strict';
+import { test, type TestContext } from 'node:test';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createInterface } from 'node:readline';
+import { bridgeScript } from '../server/bridge-source';
+
+// A stand-in for Playwright MCP that records what reaches it: its environment, working directory and every request.
+const fakeMcp=(log:string)=>`import {appendFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+const record=value=>appendFileSync(${JSON.stringify(log)},JSON.stringify(value)+'\\n');
+const tools=['browser_click','browser_file_upload','browser_drop','browser_navigate','browser_network_request','browser_tabs','browser_close','browser_run_code_unsafe','browser_pdf_save','browser_mouse_click_xy'].map(name=>({name,description:name,inputSchema:{type:'object',properties:{}}}));
+createInterface({input:process.stdin}).on('line',line=>{const message=JSON.parse(line);record({method:message.method,params:message.params,...(message.method==='initialize'?{cwd:process.cwd(),env:process.env}:{})});if(message.id===undefined)return;
+const result=message.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fake',version:'1'}}:message.method==='tools/list'?{tools}:{content:[{type:'text',text:JSON.stringify(message.params)}]};
+process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:message.id,result})+'\\n');});`;
+
+type Control={route:string;body:Record<string,unknown>};
+async function fixture(t:TestContext,options:{workspaceDirectory?:boolean}={}){
+  const root=await realpath(await mkdtemp(path.join(tmpdir(),'paseo-browser-policy-')));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const runtime=path.join(root,'runtime'),cli=path.join(runtime,'node_modules','@playwright','mcp','cli.js'),log=path.join(root,'mcp.log');
+  const workspace=path.join(root,'workspace'),data=path.join(root,'data');
+  await mkdir(path.dirname(cli),{recursive:true});await mkdir(path.join(workspace,'nested'),{recursive:true});await mkdir(data);
+  await writeFile(cli,fakeMcp(log));await writeFile(path.join(root,'bridge.mjs'),bridgeScript(runtime));
+  await writeFile(path.join(workspace,'report.txt'),'synthetic report');await writeFile(path.join(root,'outside.txt'),'outside the workspace');
+  await symlink(path.join(workspace,'report.txt'),path.join(workspace,'link-inside.txt'));await symlink(path.join(root,'outside.txt'),path.join(workspace,'link-outside.txt'));
+  // The control endpoint: it answers like the plugin and normalizes navigation to a value the bridge cannot have made up itself.
+  const controls:Control[]=[];
+  const server=createServer(async(request:IncomingMessage,response)=>{
+    let body='';for await(const chunk of request)body+=chunk;const input=JSON.parse(body||'{}');controls.push({route:request.url!.slice(1),body:input});
+    const answer=(status:number,value:unknown)=>{response.writeHead(status,{'content-type':'application/json'});response.end(JSON.stringify(value));};
+    if(request.headers.authorization!=='Bearer test-token')return answer(401,{error:'Unauthorized'});
+    const view={leaseId:'lease-1',activeTargetId:'target-1',activeIndex:0,epoch:1,targets:[],maxTabs:20,tabCount:1};
+    if(request.url==='/acquire'){if(input.url!==undefined&&String(input.url).includes('@'))return answer(409,{error:'请在网页内登录，不要在地址中填写密码。'});return answer(200,{...view,...(input.url!==undefined?{url:'https://normalized.example/'}:{})});}
+    if(request.url==='/validate')return answer(200,view);
+    return answer(200,{ok:true});
+  });
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise<void>(resolve=>{server.closeAllConnections();server.close(()=>resolve());}));
+  const port=(server.address() as {port:number}).port;
+  const metadata=path.join(data,'session.json');
+  await writeFile(metadata,JSON.stringify({version:2,workspaceId:'workspace',endpoint:`http://127.0.0.1:${port}`,token:'test-token',cdpEndpoint:'http://127.0.0.1:9',mcpCli:cli,artifactDir:path.join(data,'artifacts'),workspaceDirectory:options.workspaceDirectory===false?null:workspace,epoch:1}));
+  const child=spawn(process.execPath,[path.join(root,'bridge.mjs'),metadata],{stdio:['pipe','pipe','pipe'],env:{...process.env,SERVER_BROWSER_TEST_SECRET:'must-not-reach-mcp',NODE_OPTIONS:'--no-warnings',PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS:'1',HTTP_PROXY:'http://proxy.invalid:3128',LANG:'C.UTF-8',XDG_CACHE_HOME:path.join(root,'cache')}});
+  t.after(async()=>{if(child.exitCode===null&&child.signalCode===null){child.stdin.end();const timer=setTimeout(()=>child.kill('SIGKILL'),5000);await once(child,'exit');clearTimeout(timer);}});
+  let id=0;const pending=new Map<number,(value:any)=>void>();
+  createInterface({input:child.stdout}).on('line',line=>{const message=JSON.parse(line);pending.get(message.id)?.(message);pending.delete(message.id);});
+  const request=(method:string,params:unknown={})=>new Promise<any>(resolve=>{const next=++id;pending.set(next,resolve);child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:next,method,params})+'\n');});
+  const call=async(name:string,args:Record<string,unknown>)=>(await request('tools/call',{name,arguments:args})).result;
+  const mcpLog=async()=>(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  const forwarded=async(name:string)=>(await mcpLog()).filter(entry=>entry.method==='tools/call'&&entry.params.name===name).map(entry=>entry.params.arguments);
+  return {root,workspace,controls,request,call,mcpLog,forwarded};
+}
+const text=(result:any)=>(result.content??[]).map((item:any)=>item.text).join('\n');
+
+test('Playwright MCP gets the workspace as its file root and only harmless environment variables', {timeout:30000}, async t=>{
+  const {workspace,request,mcpLog}=await fixture(t);
+  const reply=await request('initialize',{protocolVersion:'2025-03-26',capabilities:{roots:{listChanged:true},elicitation:{}},clientInfo:{name:'test',version:'1'}});
+  assert.equal(reply.error,undefined);
+  const started=(await mcpLog()).find(entry=>entry.method==='initialize');
+  assert.equal(started.cwd,workspace,'relative file names resolve inside the workspace');
+  assert.equal(started.params.capabilities.roots,undefined,'client roots cannot widen Playwright MCP file access');
+  assert.deepEqual(started.params.capabilities.elicitation,{});
+  for(const name of ['SERVER_BROWSER_TEST_SECRET','NODE_OPTIONS','PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS','HTTP_PROXY'])assert.equal(started.env[name],undefined,`${name} stays out of the MCP process`);
+  for(const name of ['PATH','HOME','LANG','XDG_CACHE_HOME'])assert.ok(started.env[name],`${name} is inherited`);
+});
+
+test('only the allowlisted Playwright MCP tools are listed and callable', {timeout:30000}, async t=>{
+  const {request,call,controls,forwarded}=await fixture(t);
+  await request('initialize',{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'test',version:'1'}});
+  const listed=((await request('tools/list')).result.tools as {name:string}[]).map(tool=>tool.name);
+  assert.deepEqual(listed,['browser_click','browser_file_upload','browser_drop','browser_navigate','browser_network_request','browser_tabs','browser_read_page','browser_diagnostics']);
+  for(const name of ['browser_pdf_save','browser_mouse_click_xy','browser_run_code_unsafe','browser_close','browser_install']){
+    const result=await call(name,{});
+    assert.equal(result.isError,true,name);
+  }
+  assert.match(text(await call('browser_pdf_save',{})),/不提供工具 browser_pdf_save/);
+  assert.equal(controls.filter(item=>item.route==='acquire').length,0,'a refused tool never takes a lease');
+  assert.deepEqual(await forwarded('browser_pdf_save'),[]);
+  const clicked=await call('browser_click',{target:'#go'});
+  assert.equal(clicked.isError,undefined,text(clicked));
+  assert.deepEqual(await forwarded('browser_click'),[{target:'#go'}]);
+  assert.equal(controls.filter(item=>item.route==='release').length,1);
+});
+
+test('uploads and drops accept only regular files inside the workspace, passed on as real paths', {timeout:30000}, async t=>{
+  const {root,workspace,call,request,controls,forwarded}=await fixture(t);
+  await request('initialize',{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'test',version:'1'}});
+  const report=path.join(workspace,'report.txt');
+  assert.equal((await call('browser_file_upload',{paths:['report.txt']})).isError,undefined);
+  assert.equal((await call('browser_file_upload',{paths:[report,'./nested/../report.txt']})).isError,undefined);
+  assert.deepEqual(await forwarded('browser_file_upload'),[{paths:[report]},{paths:[report,report]}]);
+  const refused:[unknown,RegExp][]=[
+    [['../outside.txt'],/只能上传当前工作区目录里的文件/],[[path.join(root,'outside.txt')],/只能上传当前工作区目录里的文件/],['/etc/hostname',/路径数组/],
+    [['link-inside.txt'],/不能上传符号链接/],[['link-outside.txt'],/不能上传符号链接/],[['nested'],/只能上传普通文件/],[['missing.txt'],/找不到要上传的文件/],[[''],/上传路径无效/],
+  ];
+  const acquiredBefore=controls.filter(item=>item.route==='acquire').length;
+  for(const [paths,message] of refused){const result=await call('browser_file_upload',{paths});assert.equal(result.isError,true,String(paths));assert.match(text(result),message);}
+  const outside=await call('browser_drop',{target:'#zone',paths:['report.txt','../outside.txt']});
+  assert.equal(outside.isError,true);assert.match(text(outside),/只能上传当前工作区目录里的文件/);
+  assert.equal(controls.filter(item=>item.route==='acquire').length,acquiredBefore,'refused paths never take a lease');
+  assert.equal((await forwarded('browser_file_upload')).length,2);
+  assert.equal((await call('browser_drop',{target:'#zone',paths:['report.txt']})).isError,undefined);
+  assert.equal((await call('browser_drop',{target:'#zone',data:{'text/plain':'hello'}})).isError,undefined);
+  assert.deepEqual(await forwarded('browser_drop'),[{target:'#zone',paths:[report]},{target:'#zone',data:{'text/plain':'hello'}}]);
+  assert.equal((await call('browser_file_upload',{})).isError,undefined,'cancelling a file chooser needs no paths');
+});
+
+test('without a known workspace directory no file is uploaded', {timeout:30000}, async t=>{
+  const {call,request,forwarded}=await fixture(t,{workspaceDirectory:false});
+  await request('initialize',{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'test',version:'1'}});
+  const result=await call('browser_file_upload',{paths:['/etc/hostname']});
+  assert.equal(result.isError,true);assert.match(text(result),/没有这个工作区的目录信息/);
+  assert.deepEqual(await forwarded('browser_file_upload'),[]);
+});
+
+test('Agent navigation goes through the server and Playwright MCP receives only the normalized address', {timeout:30000}, async t=>{
+  const {call,request,controls,forwarded}=await fixture(t);
+  await request('initialize',{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'test',version:'1'}});
+  assert.equal((await call('browser_navigate',{url:'example.com/start'})).isError,undefined);
+  assert.equal(controls.find(item=>item.route==='acquire')?.body.url,'example.com/start');
+  assert.deepEqual(await forwarded('browser_navigate'),[{url:'https://normalized.example/'}]);
+  const refused=await call('browser_navigate',{url:'https://user:secret@example.com/'});
+  assert.equal(refused.isError,true);assert.match(text(refused),/不要在地址中填写密码/);
+  assert.equal((await forwarded('browser_navigate')).length,1,'a refused address never reaches Playwright MCP');
+});

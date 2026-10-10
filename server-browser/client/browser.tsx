@@ -86,7 +86,7 @@ function BrowserShell(props: PluginSurfaceProps & { fixedWorkspaceId?: string; o
     setSelectedId(live?.workspace.id || workspaces[0].id);
   }, [props.fixedWorkspaceId, overview.data, workspaces, selectedId]);
   const workspaceId = selectedId || props.fixedWorkspaceId || '';
-  const workspace = workspaces.find((item) => item.id === workspaceId) || { id: workspaceId, title: '工作区', cwd: '' };
+  const workspace = workspaces.find((item) => item.id === workspaceId) || { id: workspaceId, title: '工作区' };
   const items = overview.data?.items ?? noItems;
   const overviewItem = items.find((item) => item.workspace.id === workspaceId);
   const select = useCallback((id: string) => { setSelectedId(id); setView('browser'); setPicking(false); }, []);

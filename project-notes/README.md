@@ -1,6 +1,6 @@
 # 拾页 · 项目手记（Project Notes）
 
-Paseo 项目看板，版本 **0.8.0**，插件 ID `project-notes`。按项目记录任务、提示词和想法，并能从一条手记直接开工：新建工作区和 Agent，把手记作为第一条消息发出去。需要 Paseo 0.11.1 或更新版本（daemon 与 App 都要满足，旧版本会拒绝加载）。界面为简体中文。
+Paseo 项目看板，版本 **0.8.1**，插件 ID `project-notes`。按项目记录任务、提示词和想法，并能从一条手记直接开工：新建工作区和 Agent，把手记作为第一条消息发出去。需要 Paseo 0.11.1 或更新版本（daemon 与 App 都要满足，旧版本会拒绝加载）。界面为简体中文。
 
 插件市场的说明页见 [OVERVIEW.md](OVERVIEW.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -61,10 +61,20 @@ node bin/notes.mjs done ITEM_ID
 - `--kind task|prompt|idea`，`--status todo|doing|done`，`--high` 重点，`--pinned` 置顶，`--body-file -` 从 stdin 读正文。`--json` 输出机器可读结果。
 - `list` 默认排除已完成任务和回收站；`--all` 含已完成，`--trash` 只看回收站。
 - `--request-id` 可选，同一 ID 重放时幂等返回原记录。参数错误退出码为 2。
-- 项目列表来自 `paseo project ls --json`，不可用时回退读取 `$PASEO_HOME/projects/projects.json`。
+- 项目列表来自 `paseo project ls --json`，不可用时回退读取 `$PASEO_HOME/projects/projects.json`（最多 8 MB，与前者的输出上限相同）。
 - 界面在前台时约 5 秒（空闲后 15 秒）内看到 CLI 新记录：版本号由看板文件内容计算，其他进程写入同样生效。
+- 读取有上限：正文最多 32000 字，在 UTF-8 下最多 96000 字节。`--body-file` 只读普通文件，先按大小拒绝超过 96000 字节的文件再读；目录、管道和 `/dev/zero` 这类设备不打开就拒绝。`-` 或 `/dev/stdin` 读 stdin，读到同样的上限即停。不限制路径：命令行在 Agent 自己的 shell 里运行，它本来就能读这些文件，路径白名单挡不住什么。
+- 人读输出里，来自手记、项目名和路径的控制字符（ESC 序列、回车、退格、C1 控制字符）显示为 `\xNN`，换行和制表符保留；`--json` 输出不变。时间按 UTC 显示并标明 `UTC`。
+- 不带 `--project` 的 `list` 与界面总览使用同一套体积上限：超限的看板不读取，在输出末尾列出（`--json` 里是 `unavailable`），其余项目照常列出。只因合计超限而略过的项目，仍可用 `--project` 单独查看。
 
-CLI 和界面使用同一 `BoardStore`。`server/store.ts` 用 `<board>.json.lock` 排他锁串行化写入，30 秒以上的残留锁视为崩溃遗留并清理。CLI 只依赖 zod 和本插件源码（`shared/schema.ts`、`server/store.ts`、`server/cli.ts`），所以只装生产依赖也能构建。
+CLI 和界面使用同一 `BoardStore`。`server/store.ts` 用 `<board>.json.lock` 排他锁串行化写入。锁文件记录持有者的 pid、随机令牌、主机名和 PID 命名空间，Linux 上另记进程启动时间：
+
+- 等待者只在持有进程已经退出时接管，pid 被别的进程复用也算已退出；
+- 无法核对的锁（内容读不出、来自别的主机或 PID 命名空间）超过 60 秒才清理；
+- 几个写入者同时发现同一把残留锁时，经 `.reclaim` 守护文件逐个重新判断，只有一个接管；
+- 持有者只删除自己的锁，提交前再确认锁仍是自己的，否则放弃这次写入并报错，不会覆盖别人的修改。
+
+CLI 只依赖 zod 和本插件源码（`shared/schema.ts`、`server/store.ts`、`server/cli.ts`），所以只装生产依赖也能构建。
 
 ## 数据与隐私
 
@@ -75,7 +85,9 @@ $PASEO_HOME/plugin-data/project-notes/launches/<launchId>.json
 
 未设置 `PASEO_HOME` 时默认 `~/.paseo`；源码目录不参与数据路径计算。移动、更新或卸载源码不等于迁移或删除笔记，请单独备份上述数据目录。
 
-笔记没有额外静态加密，不适合存密码或 API key。回收站不会自动清空，界面也没有永久删除。启动任务时，用户确认的提示词会发送给所选 provider；启动记录只保存阶段和创建的工作区、Agent 标识，不保存提示词。其他手记的增删改只写插件自己的数据文件，插件不发网络请求、不启动子进程。拥有该 daemon 访问权的客户端都可以使用此插件。
+单个看板文件最多 32 MB。总览（界面和 CLI 的 `list`）一次最多带合计 32 MB 的看板，从小到大装入；单个超限或装不下的看板标为「暂时无法显示」，界面给出提示、项目列表标「不可用」，其余项目照常显示。合计上限取 32 MB，是因为总览回复是一个 WebSocket 帧：经 relay 时按 base64 密文传输，体积增大约三分之一，而宿主在客户端出站队列将超过 64 MB 时会断开连接。
+
+笔记没有额外静态加密，不适合存密码或 API key。回收站不会自动清空，界面也没有永久删除。启动任务时，用户确认的提示词会发送给所选 provider；启动记录只保存阶段和创建的工作区、Agent 标识，不保存提示词；provider 报告的错误和启动失败的原因来自 daemon 与 provider，发给界面前截到 500 字。其他手记的增删改只写插件自己的数据文件，插件不发网络请求、不启动子进程。拥有该 daemon 访问权的客户端都可以使用此插件。
 
 ## 开发
 
@@ -87,13 +99,13 @@ npm run build
 npm run typecheck
 npm test
 npm run test:ui          # Playwright：桌面 1120×760 与手机 390×844 各跑一遍主要流程
-npm run preview:build    # 模拟数据预览：preview/dist/index.html（加 --serve 在 127.0.0.1:4693 提供）
+npm run preview:build    # 模拟数据预览：preview/dist/index.html（加 --serve 在 127.0.0.1:4693 提供；PROJECT_NOTES_PREVIEW_PORT 可改端口，Playwright 读同一个值）
 npm run preview:shots -- --out /tmp/notes-shots   # 各视图 × 桌面/手机 × 深色/浅色截图（--timezone 默认 UTC）
 ```
 
 预览不连接任何 daemon：`preview/fixtures.js` 用内存里的虚构数据模拟全部 RPC（版本号、revision 校验、启动阶段），`preview/adapter.jsx` 按宿主方式提供图标（lucide）、弹窗（桌面 520 px 对话框、手机 65 % 底部弹层）、提示与剪贴板。`?theme=light`、`?scenario=empty|slow|error|stale|many|write-error|slow-write|copy-error|options-error|launch-hold|launch-reject` 切换状态，`?panel=1` 显示工作区面板，`?nav=0` 模拟不能跳转的客户端（启动完成后停在弹层里）。缺少系统 Chromium 依赖的主机需先设置 `LD_LIBRARY_PATH`。Playwright 与单元测试固定使用 UTC 时区。
 
-测试使用系统临时目录（`tests/setup.ts` 把 `PASEO_HOME` 指向临时目录，绝不读写真实数据），覆盖：存储缓存与失效（含同大小原地修改）、损坏文件与体积上限、跨进程锁等待/超时/残留锁、真实 CLI 进程与插件并发写入；看板版本号、增量与项目列表失效；全部 RPC（用模拟 PaseoApi，按宿主方式双向校验）；启动流程的幂等键、重复点击、跨进程重复、失败分级与中断找回；界面轮询与交互（react-test-renderer + 假时钟）；打包约定（Git 安装只装生产依赖、CLI 打包只含 zod 与本地源码、SDK 版本与 manifest 下限一致、图标与截图）；Playwright 在真实浏览器里跑新建、编辑、状态、删除与恢复、复制、开始处理、项目范围、首屏位置与无横向溢出、加载与错误状态。开发依赖的 `react-dom`、`react-test-renderer` 与 React 均固定为 `19.1.0`。
+测试使用系统临时目录（`tests/setup.ts` 把 `PASEO_HOME` 指向临时目录，绝不读写真实数据），覆盖：存储缓存与失效（含同大小原地修改）、损坏文件、体积上限与总览降级、跨进程锁（等待、超时、持有者存活与 pid 复用、无法核对的残留锁、两个写入者同时接管残留锁的确定性交错、锁被接管后拒绝提交）、真实 CLI 进程与插件并发写入；命令行输入上限（普通文件、FIFO、设备、stdin）、终端控制字符转义与 UTC 时间；看板版本号、增量与项目列表失效；全部 RPC（用模拟 PaseoApi，按宿主方式双向校验）；启动流程的幂等键、重复点击、跨进程重复、失败分级与中断找回；界面轮询与交互（react-test-renderer + 假时钟）；打包约定（Git 安装只装生产依赖、CLI 打包只含 zod 与本地源码、SDK 版本与 manifest 下限一致、图标与截图）；Playwright 在真实浏览器里跑新建、编辑、状态、删除与恢复、复制、开始处理、项目范围、首屏位置与无横向溢出、加载与错误状态。开发依赖的 `react-dom`、`react-test-renderer` 与 React 均固定为 `19.1.0`。
 
 ## 来源与许可
 

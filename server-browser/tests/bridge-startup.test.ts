@@ -6,20 +6,22 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { bridgeSource } from '../server/bridge-source';
+import { bridgeScript } from '../server/bridge-source';
 
 // A stand-in for the Playwright MCP CLI: it only answers JSON-RPC requests, no browser involved.
 const fakeMcp=`import {createInterface} from 'node:readline';
 createInterface({input:process.stdin}).on('line',line=>{const message=JSON.parse(line);if(message.id===undefined)return;
 process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:message.id,result:message.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fake',version:'1'},instructions:'fake child'}:{}})+'\\n');});`;
 
-async function fixture(state:Record<string,unknown>|null){
+// The bridge only starts node_modules/@playwright/mcp/cli.js from its runtime directory, so the stand-in lives there.
+async function fixture(state:Record<string,unknown>|null,mcpCli?:(root:string)=>string){
   const root=await mkdtemp(path.join(tmpdir(),'paseo-browser-bridge-'));
-  const workspace=path.join(root,'workspace');await mkdir(workspace);
-  await writeFile(path.join(root,'bridge.mjs'),bridgeSource);await writeFile(path.join(root,'fake-mcp.mjs'),fakeMcp);
+  const workspace=path.join(root,'workspace'),runtime=path.join(root,'runtime'),cli=path.join(runtime,'node_modules','@playwright','mcp','cli.js');
+  await mkdir(workspace);await mkdir(path.dirname(cli),{recursive:true});
+  await writeFile(path.join(root,'bridge.mjs'),bridgeScript(runtime));await writeFile(cli,fakeMcp);await writeFile(path.join(root,'elsewhere.mjs'),fakeMcp);
   if(state)await writeFile(path.join(workspace,'state.json'),JSON.stringify(state));
   const metadata=path.join(workspace,'session.json');
-  const connect=()=>writeFile(metadata,JSON.stringify({version:2,workspaceId:'workspace',endpoint:'http://127.0.0.1:9',token:'test',cdpEndpoint:'http://127.0.0.1:9',mcpCli:path.join(root,'fake-mcp.mjs'),artifactDir:root,epoch:1}));
+  const connect=()=>writeFile(metadata,JSON.stringify({version:2,workspaceId:'workspace',endpoint:'http://127.0.0.1:9',token:'test',cdpEndpoint:'http://127.0.0.1:9',mcpCli:mcpCli?mcpCli(root):cli,artifactDir:root,epoch:1}));
   return {root,metadata,connect};
 }
 async function initialize(root:string,metadata:string,env:Record<string,string>={}){
@@ -60,4 +62,15 @@ test('the startup wait is bounded',{timeout:30000},async()=>{
     const reply=await initialize(root,metadata,{PASEO_SERVER_BROWSER_BRIDGE_WAIT_MS:'400'});
     assert.match(reply.error?.message??'',/服务器浏览器尚未启动或正在恢复/);
   }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('MCP startup refuses a Playwright MCP script outside the runtime directory',{timeout:30000},async()=>{
+  for(const mcpCli of [(root:string)=>path.join(root,'elsewhere.mjs'),(root:string)=>`${root}/runtime/node_modules/@playwright/mcp/../../../../elsewhere.mjs`]){
+    const {root,metadata,connect}=await fixture(null,mcpCli);
+    try{
+      await connect();
+      const reply=await initialize(root,metadata);
+      assert.match(reply.error?.message??'',/只能启动运行时目录里的 node_modules\/@playwright\/mcp\/cli\.js/);
+    }finally{await rm(root,{recursive:true,force:true});}
+  }
 });

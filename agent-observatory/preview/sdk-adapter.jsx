@@ -73,7 +73,12 @@ export function useRpc(contract) {
         const jobs=fixtureInsightState.jobs.filter(job=>!input.agentId||job.agentId===input.agentId).map(({report,evidence,...job})=>({...job,reportAvailable:!!report,summary:report?.summary??null,health:report?.health??null,findings:report?.findings.length??0,resolvedFindings:Object.values(job.findingFeedback??{}).filter(f=>f.status==="resolved").length}));
         result={...fixtureInsightState,runnerLabel:runnerLabelFor(fixtureInsightState.settings.runner),jobs,revision:insightSequence,unchanged:false,activeCount:jobs.filter(j=>["queued","collecting","analyzing"].includes(j.status)).length,nextScheduledAt:null};break;
       }
-      case "observatory.insights.runners": result = fixtureRunners; break;
+      case "observatory.insights.runners": {
+        // Like the server: the built-in Grok option carries the saved model and effort while it is the configured runner.
+        const saved = fixtureInsightState.settings.runner;
+        result = saved?.kind === "grok" ? { ...fixtureRunners, builtin: { ...fixtureRunners.builtin, runner: saved, label: runnerLabelFor(saved), modelLabel: saved.model ?? fixtureRunners.builtin.modelLabel, thinkingLabel: saved.effort ?? fixtureRunners.builtin.thinkingLabel } } : fixtureRunners;
+        break;
+      }
       case "observatory.insights.models": result = fixtureModels(input.provider); break;
       case "observatory.insights.overview": result = fixtureOverview(input.days, input.utcOffsetMinutes, scenarioName(), fixtureInsightState.settings, runnerLabelFor(fixtureInsightState.settings.runner)); break;
       case "observatory.insights.suggestions": {

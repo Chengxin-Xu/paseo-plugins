@@ -18,10 +18,13 @@ const record = (value: unknown): Record<string, unknown> => value !== null && ty
   && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const REQUEST_PREFIX = "observatory-read-";
+/** Requests in flight, and those held while the host session is closed (a separate, smaller cap). */
+const MAX_PENDING = 24, MAX_WAITING = 16;
 export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 8000) {
   const pending = new Map<string, { type: string; resolve(value: Record<string, unknown>): void;
     reject(error: Error): void; timer: ReturnType<typeof setTimeout>; sent: boolean }>();
-  const waiting: Array<() => void> = [];
+  /** Sends held until the session re-attaches, by request id: a timeout removes its own entry. */
+  const waiting = new Map<string, () => void>();
   let disposed = false, hostOpen = true;
   const unsubscribe = port.listen((raw) => {
     const envelope = record(raw);
@@ -31,7 +34,7 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
       return;
     }
     if (envelope.type !== "paseo_frame" || envelope.isBinary !== false || typeof envelope.data !== "string") return;
-    if (!hostOpen) { hostOpen = true; for (const send of waiting.splice(0)) send(); }
+    if (!hostOpen) { hostOpen = true; const held = [...waiting.values()]; waiting.clear(); for (const send of held) send(); }
     // The plugin's own SDK connection shares this channel; skip parsing its (often large) frames.
     if (!envelope.data.includes(REQUEST_PREFIX)) return;
     let parsed: Record<string, unknown>;
@@ -47,10 +50,10 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
   });
   const request = (message: Record<string, unknown>, responseType: string): Promise<Record<string, unknown>> => {
     if (disposed) return Promise.reject(new Error("子任务观察通道已关闭"));
-    if (pending.size >= 24) return Promise.reject(new Error("子任务读取繁忙，请稍后重试"));
+    if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(new Error("子任务读取繁忙，请稍后重试"));
     return new Promise((resolve, reject) => {
       const requestId = `${REQUEST_PREFIX}${randomUUID()}`;
-      const timer = setTimeout(() => { pending.delete(requestId); reject(new Error("宿主未响应子任务请求。可重试，或确认 Paseo 宿主支持子任务观察。")); }, timeoutMs);
+      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error("宿主未响应子任务请求。可重试，或确认 Paseo 宿主支持子任务观察。")); }, timeoutMs);
       const entry = { type: responseType, resolve, reject, timer, sent: false };
       pending.set(requestId, entry);
       const send = () => {
@@ -58,10 +61,11 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
         try { port.send({ type: "paseo_frame", data: JSON.stringify({ type: "session", message: { ...message, requestId } }), isBinary: false }); entry.sent = true; }
         catch (error) { pending.delete(requestId); clearTimeout(timer); reject(error); }
       };
-      if (hostOpen) send(); else waiting.push(send);
+      if (hostOpen) send(); else waiting.set(requestId, send);
     });
   };
-  return { request, dispose() { if (disposed) return; disposed = true; unsubscribe(); waiting.length = 0;
+  return { request, /** Requests held for a closed session (tests). */ get queued() { return waiting.size; },
+    dispose() { if (disposed) return; disposed = true; unsubscribe(); waiting.clear();
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error("插件重新加载，子任务请求已取消")); }
     pending.clear(); } };
 }

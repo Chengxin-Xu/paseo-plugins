@@ -1243,6 +1243,34 @@ test("分析设置 picks a profile or another model, and the Agent's 分析 tab 
   expect(sent).toEqual([expect.objectContaining({ agentId: "payment-root", input: expect.stringContaining("复用已通过的测试结果") })]);
 });
 
+test("分析设置 lets the built-in Grok CLI use another model and reasoning effort, and resets to grok-4.7 · xhigh", async ({ page }, testInfo) => {
+  await open(page, testInfo);
+  await page.getByRole("tab", { name: /^(智能分析|分析)$/ }).click();
+  await page.getByRole("button", { name: "分析设置", exact: true }).first().click();
+  const settings = page.getByRole("dialog", { name: "分析设置", exact: true });
+  await expect(settings.getByRole("textbox", { name: "Grok 模型", exact: true })).toHaveCount(0);
+  await settings.getByRole("radio", { name: "Grok 4.7 · xhigh", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.insights.configure")).at(-1)).toEqual({ runner: { kind: "grok" } });
+  const model = settings.getByRole("textbox", { name: "Grok 模型", exact: true });
+  await expect(model).toHaveValue("");
+  await expect(settings.getByRole("button", { name: "保存 Grok 设置", exact: true })).toBeDisabled();
+  // An option-like or shell-like id is refused before it reaches the CLI.
+  await model.fill("--always-approve");
+  await expect(settings.getByText("模型 ID 只能包含字母、数字和 . _ : / -，并以字母或数字开头", { exact: true })).toBeVisible();
+  await expect(settings.getByRole("button", { name: "保存 Grok 设置", exact: true })).toBeDisabled();
+  await model.fill("grok-4.6");
+  await settings.getByRole("button", { name: "high", exact: true }).click();
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "insights-settings-grok");
+  await settings.getByRole("button", { name: "保存 Grok 设置", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.insights.configure")).at(-1)).toEqual({ runner: { kind: "grok", model: "grok-4.6", effort: "high" } });
+  await expect(settings.getByRole("radio", { name: "Grok 4.6 · high", exact: true })).toHaveAttribute("aria-checked", "true");
+  await settings.getByRole("button", { name: "恢复默认", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.insights.configure")).at(-1)).toEqual({ runner: { kind: "grok" } });
+  await expect(settings.getByRole("radio", { name: "Grok 4.7 · xhigh", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(model).toHaveValue("");
+});
+
 // ---------- 定时运行 (2.9) ----------
 // Fixture zones: 站会 / 依赖 / 周报 run in 东京时间 (the device's zone), 夜间回归 is a zone-less cron (UTC), 环境诊断 runs in New York time.
 test.describe("定时运行", () => {

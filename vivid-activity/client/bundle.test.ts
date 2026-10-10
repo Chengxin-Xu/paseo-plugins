@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -110,16 +110,17 @@ describe("client mobile bundle compatibility", () => {
     }
 
     const bundle = await compileClientBundle();
-    const tmpJs = path.join(os.tmpdir(), `test-client-${Date.now()}.js`);
-    const tmpHbc = path.join(os.tmpdir(), `test-client-${Date.now()}.hbc`);
+    // 0.4.1: a private directory of our own (mkdtemp, mode 0700) instead of guessable names in the shared temp directory.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "vivid-hermes-"));
+    const tmpJs = path.join(dir, "client.js");
+    const tmpHbc = path.join(dir, "client.hbc");
 
     try {
-      writeFileSync(tmpJs, bundle, "utf8");
+      writeFileSync(tmpJs, bundle, { encoding: "utf8", flag: "wx" });
       execFileSync(hermesc, ["-w", "-emit-binary", "-out", tmpHbc, tmpJs]);
       expect(existsSync(tmpHbc)).toBe(true);
     } finally {
-      rmSync(tmpJs, { force: true });
-      rmSync(tmpHbc, { force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

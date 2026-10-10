@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.12.0 — 2026-10-10
+
+Security hardening after two external reviews of the published plugin. Saved settings, reports and statistics carry over unchanged; a saved built-in Grok choice keeps running grok-4.7 · xhigh.
+
+- 智能分析 only starts a Paseo analysis agent in an explicitly chosen mode whose restriction is known: a read-only mode (Codex and providers that extend it in Codex's read-only sandbox, Cursor's Ask, plan modes) or Claude Code's Always Ask. A provider that lists no modes used to start one with no mode, which made the daemon copy the analysed Agent's mode (often unattended); it is now unavailable. Modes that may act without asking (an ACP agent's Default or Agent mode, OpenCode's Build) are no longer used: such providers analyse in their plan mode, or are unavailable without one. The runner also refuses to create an agent without a verified mode. Codex's sandbox options are sent only to Codex and providers that extend it, not to any provider whose mode ids happen to match.
+- Profile feature switches are an allowlist (speed and reasoning effort); auto-accept, plan, agent and other access switches no longer reach an analysis agent, and ACP and OpenCode analyses switch auto-accept off explicitly (their daemon clients turn it on for children of unattended Agents otherwise).
+- The ask-first caution now says what happens: approval requests are denied, but actions the provider allows without approval (reading files) can still run. The badge reads 需审批时拒绝 instead of 工具会被拒绝.
+- 分析设置 has Grok 模型 and 推理档 (xhigh / high / medium / low) for the built-in Grok CLI. Unset values are grok-4.7 and xhigh, so a saved `{ kind: "grok" }` is read and written as before; a model id must start with a letter or digit and use only letters, digits and `._:/-`, so it can never become a CLI option.
+- Credential masking before a trajectory leaves the host also covers PEM private keys (including JSON-escaped and cut-off blocks), JWTs, bare `Bearer` tokens, Google `AIza`, Slack `xox[abprs]-`, GitLab `glpat-` and GitHub `ghs_/ghu_/ghr_` keys, `token=` / `GITHUB_TOKEN:` style assignments (only values that look generated) and prefixed key names such as `DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY`. Counters such as `max_tokens` and ordinary prose stay unchanged.
+- Reply previews and the reply renderer stay linear on hostile Markdown: a preview reads only the first 4000 characters with bounded patterns, link text can no longer contain `[`, and headings, list items and quotes are parsed without overlapping quantifiers (60,000 unclosed `[` took 3 s, a padded heading 8 s; now a few milliseconds). Headings keep a `#` that has no space before it (`## C#`), and CRLF line ends are dropped.
+- Budgets with an explicit cut notice: the Token import tracks at most 20,000 logs totalling 64 GB (newest first), keeps at most 750,000 dedupe keys and visits at most 250,000 directory entries per scan; a scan cut short keeps the logs it did not reach. A heavy host is about 600 logs, 4.7 GB and 61,000 keys. Logs are opened with `O_NOFOLLOW`, so a tracked log replaced by a symlink is not read. 定时运行 reads at most 2,000 schedule files and 50,000 Agent records (256 MB each) per scan and says when it skipped some.
+- `PASEO_HOME` is resolved by one function for reading schedules and writing plugin data: an absolute path or `~/…`; anything else falls back to `~/.paseo` and is logged once. Before, a `~/` value was honoured for schedules but not for plugin data.
+- The plugin data directory is created 0700 and tightened when it already exists with wider permissions; the schedule ledger's temporary file has a random name and is created exclusively with mode 0600.
+- A schedule without a name or title is stored in the ledger as 未命名定时任务 plus its short id instead of the start of its prompt; the live list still shows the prompt's start.
+- Requests to the host held while its session is closed leave the queue when they time out, and the queue has its own cap of 16.
+- Development preview: a malformed request target gets 400 instead of an unhandled rejection; the Playwright config and the preview server read the same `OBSERVATORY_PREVIEW_PORT`; the optional fontconfig directory is created with `mkdtemp`.
+
 ## 2.11.0 — 2026-10-09
 
 Open-source preparation. Existing installs keep what they show and store.

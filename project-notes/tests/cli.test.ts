@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { closeSync, constants, openSync } from "node:fs";
+import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { promisify } from "node:util";
 import { BoardStore, defaultStorageRoot, paseoHome } from "../server/store";
-import { CliError, parseArgs, resolveProject, runCli, type CliDeps } from "../server/cli";
-import { INBOX_PROJECT_ID, type BoardProject } from "../shared/schema";
+import { CliError, loadPaseoProjects, parseArgs, readLimited, resolveProject, runCli, terminalSafe, type CliDeps } from "../server/cli";
+import { INBOX_DESCRIPTION, INBOX_PROJECT_ID, type BoardProject } from "../shared/schema";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -105,6 +109,97 @@ describe("runCli", () => {
     await expect(run("show", "not-a-uuid")).rejects.toThrow(/不是有效的记录 ID/);
     await expect(run("frobnicate")).rejects.toThrow(/未知命令/);
     expect((await run("help")).text).toContain("用法");
+  });
+});
+
+describe("CLI input limits", () => {
+  it("reads a body file up to the byte limit, which a valid body can never exceed", async () => {
+    const { root, runJson } = await harness();
+    // 32,000 three-byte characters: exactly the body limit and exactly 96,000 bytes.
+    await writeFile(join(root, "full.md"), "字".repeat(32_000), "utf8");
+    const added = await runJson("add", "--title", "满长度正文", "--body-file", join(root, "full.md"));
+    expect((await runJson("show", added.itemId)).body).toHaveLength(32_000);
+    await writeFile(join(root, "over.md"), "字".repeat(32_000) + "!", "utf8");
+    await expect(runJson("add", "--title", "超长", "--body-file", join(root, "over.md"))).rejects.toThrow(/正文文件过大.*96000 字节/);
+  });
+
+  it("refuses a huge body file from its size alone, before reading it", async () => {
+    const { root, run } = await harness();
+    const huge = join(root, "huge.log");
+    await writeFile(huge, ""); await truncate(huge, 64 * 1024 * 1024); // sparse: costs nothing unless read
+    await expect(run("add", "--title", "大文件", "--body-file", huge)).rejects.toThrow(CliError);
+    await expect(run("add", "--title", "大文件", "--body-file", huge)).rejects.toThrow(/正文文件过大.*67108864 字节/);
+  });
+
+  it("refuses directories and FIFOs as body files without blocking", async () => {
+    const { root, run } = await harness();
+    await mkdir(join(root, "folder"));
+    await expect(run("add", "--title", "目录", "--body-file", join(root, "folder"))).rejects.toThrow(/不是普通文件/);
+    const fifo = join(root, "pipe");
+    await promisify(execFile)("mkfifo", [fifo]);
+    try { await expect(run("add", "--title", "管道", "--body-file", fifo)).rejects.toThrow(/不是普通文件.*--body-file -/); }
+    finally { try { closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)); } catch { /* nobody is reading it */ } }
+  }, 10_000);
+
+  it.runIf(process.platform !== "win32")("refuses endless devices such as /dev/zero", async () => {
+    const { run } = await harness();
+    await expect(run("add", "--title", "设备", "--body-file", "/dev/zero")).rejects.toThrow(/不是普通文件/);
+  });
+
+  it("reads /dev/stdin like '-', and stops reading stdin past the limit", async () => {
+    let limit = 0;
+    const { runJson } = await harness({ readStdin: async maxBytes => { limit = maxBytes; return "管道正文"; } });
+    const added = await runJson("add", "--title", "经由 /dev/stdin", "--body-file", "/dev/stdin");
+    expect((await runJson("show", added.itemId)).body).toBe("管道正文");
+    expect(limit).toBe(96_000);
+    expect(await readLimited(Readable.from([Buffer.from("ab"), "cd"]), 4, "标准输入")).toBe("abcd");
+    let pulled = 0;
+    const endless = Readable.from((function* () { for (;;) { pulled++; yield Buffer.alloc(1024, 120); } })());
+    await expect(readLimited(endless, 96_000, "标准输入")).rejects.toThrow(/标准输入过大.*96000 字节/);
+    expect(pulled).toBeLessThan(100);
+  });
+
+  it("falls back to a bounded projects.json and explains an oversized one", async () => {
+    const home = await mkdtemp(join(tmpdir(), "project-notes-cli-projects-")); directories.push(home);
+    // No `paseo` on PATH: the CLI falls back to the daemon's projects.json.
+    const env = { PASEO_HOME: home, PATH: join(home, "no-bin") };
+    await mkdir(join(home, "projects"));
+    const file = join(home, "projects", "projects.json");
+    await writeFile(file, JSON.stringify([{ projectId: "prj_a", rootPath: "/repo/a", displayName: "A", customName: null, archivedAt: null }]));
+    expect(await loadPaseoProjects(env)).toEqual([{ id: "prj_a", name: "A", path: "/repo/a" }]);
+    await truncate(file, 9 * 1024 * 1024);
+    await expect(loadPaseoProjects(env)).rejects.toThrow(/projects\.json 过大/);
+  });
+});
+
+describe("CLI human output", () => {
+  it("escapes terminal control characters in notes but leaves --json unchanged", async () => {
+    const { run, runJson } = await harness();
+    const title = "\u001b]52;c;ZXZpbA==\u0007提醒";
+    const body = "第一行\r\n\u001b[2J第二行\r覆盖\u009b31m\t缩进";
+    const added = await runJson("add", "--title", title, "--body", body);
+    const shown = (await run("show", added.itemId)).text;
+    expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(shown).toContain("\\x1b]52;c;ZXZpbA==\\x07提醒");
+    expect(shown).toContain("第一行\n\\x1b[2J第二行\\x0d覆盖\\x9b31m\t缩进");
+    const listed = (await run("list")).text;
+    expect(listed).toContain("\\x1b]52");
+    expect(listed).not.toContain("\u001b");
+    const json = await runJson("show", added.itemId);
+    expect([json.title, json.body]).toEqual([title, body]);
+    expect(terminalSafe("a\tb\nc")).toBe("a\tb\nc");
+  });
+
+  it("prints times in UTC and says so", async () => {
+    const { run, runJson } = await harness();
+    const added = await runJson("add", "--title", "带时间");
+    const updatedAt: string = (await runJson("show", added.itemId)).updatedAt;
+    expect((await run("show", added.itemId)).text).toContain(`${updatedAt.slice(0, 10)} ${updatedAt.slice(11, 16)} UTC`);
+  });
+
+  it("describes the inbox with the same wording as the plugin", async () => {
+    const { run } = await harness();
+    expect((await run("projects")).text).toContain(`__inbox__\t随手记\t（${INBOX_DESCRIPTION}）`);
   });
 });
 

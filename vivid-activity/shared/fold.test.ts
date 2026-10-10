@@ -6,6 +6,7 @@ import {
   formatFoldDuration,
   hashText,
   planFolds,
+  REASONING_KEY_SAMPLE,
   reasoningKey,
   roleSignature,
   toolKey,
@@ -42,6 +43,19 @@ describe("fold keys", () => {
     expect(reasoningKey("先读文件")).toBe(`r:4:${hashText("先读文件")}`);
     expect(reasoningKey("a")).not.toBe(reasoningKey("b"));
     expect(toolKey("toolu_1")).toBe("t:toolu_1");
+  });
+
+  it("keys long reasoning by its length and its first and last characters only (0.4.1)", () => {
+    // Up to the sample size the key is the whole text's, as before.
+    const short = "思".repeat(REASONING_KEY_SAMPLE);
+    expect(reasoningKey(short)).toBe(`r:${short.length.toString(36)}:${hashText(short)}`);
+    const half = REASONING_KEY_SAMPLE / 2;
+    const long = "a".repeat(half + 5_000) + "m".repeat(1_000) + "z".repeat(half + 5_000);
+    expect(reasoningKey(long)).toBe(`r:${long.length.toString(36)}:${hashText(long.slice(0, half) + long.slice(-half))}`);
+    // The end and the length still tell texts apart; the middle of a very long text does not.
+    expect(reasoningKey(long)).not.toBe(reasoningKey(long.slice(0, -1) + "y"));
+    expect(reasoningKey(long)).not.toBe(reasoningKey(long + "z"));
+    expect(reasoningKey(long)).toBe(reasoningKey(long.replace("m".repeat(1_000), "n".repeat(1_000))));
   });
 
   it("signs roles so a changed summary needs drawing again", () => {

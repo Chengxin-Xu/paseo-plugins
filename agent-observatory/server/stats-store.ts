@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, renameSync, statSync } from "node:fs";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { PaseoApi, AgentTimelineItem } from "./paseo-types";
@@ -9,6 +9,7 @@ import { addStatsMetrics, emptyStatsMetrics, statsMetricsSchema, statsToolSchema
 import type { ActivityMetrics, AnalyticsSnapshot } from "../shared/analytics";
 import type { TelemetrySnapshot, TurnOutcome } from "../shared/telemetry";
 import { telemetryDirectory, type TelemetryStore } from "./telemetry";
+import { ensurePrivateDirectory } from "./paseo-home";
 import { StatsDirectory } from "./stats-directory";
 import { settleWithin, type BackgroundTracker } from "./background";
 import { buildStatsSnapshot } from "./stats-snapshot";
@@ -381,7 +382,7 @@ export class StatsStore {
         running: [...this.running], permissions: [...this.permissions].map(([agentId, requests]) => ({ agentId, requests: [...requests] })) });
       const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await ensurePrivateDirectory(this.directory);
         const handle = await open(temporary, "wx", 0o600);
         try { await handle.writeFile(payload, "utf8"); if (durable) await handle.sync(); } finally { await handle.close(); }
         await rename(temporary, this.file);

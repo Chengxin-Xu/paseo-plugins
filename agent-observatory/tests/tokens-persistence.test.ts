@@ -6,7 +6,7 @@ import test from "node:test";
 import { addCall, emptyData, pruneData } from "../server/tokens/data";
 import { TokenStore } from "../server/tokens/store";
 import { DAY, iso, type LedgerCall } from "../server/tokens/types";
-import { tokenResponseSchema, tokenTotal } from "../shared/tokens";
+import { tokenResponseSchema, tokenTotal, tokenTruncationNotice } from "../shared/tokens";
 
 const NOW = Date.parse("2026-09-23T12:00:00Z"), input = { range: "7d", utcOffsetMinutes: 0 } as const;
 const line = (row: unknown) => JSON.stringify(row) + "\n";
@@ -72,4 +72,19 @@ test("late response blocks replace counts and response time, including hour-boun
   addCall(data, first, null, NOW); addCall(data, next, first, NOW);
   assert.equal(data.hours.size, 1); assert.equal([...data.hours.values()][0].output, 158); assert.equal([...data.hours.values()][0].calls, 1);
   assert.equal([...data.hours.values()][0].genMs, 11_001);
+});
+
+test("an import cut by its budgets says so in the coverage the Token page shows", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tokens-truncated-")), root = join(directory, "logs");
+  await mkdir(root, { recursive: true });
+  for (const name of ["a", "b", "c"]) await writeFile(join(root, `${name}.jsonl`), "{}\n");
+  const store = new TokenStore({ directory, roots: [{ source: "claude", path: root }], poll: false, now: () => NOW, limits: { files: 2 } });
+  try {
+    await store.ready;
+    const result = tokenResponseSchema.parse(await store.read(input)); if (result.mode !== "full") throw new Error("full expected");
+    assert.deepEqual(result.coverage.truncated, { files: true, bytes: false, index: false, scan: false });
+    assert.equal(tokenTruncationNotice(result.coverage.truncated), "统计不完整：日志文件超过 2 万个，只统计最新的部分。");
+    assert.equal(tokenTruncationNotice({ files: false, bytes: true, index: true, scan: true }), "统计不完整：日志总量超过 64 GB，更早的文件没有导入；日志目录条目超过 25 万个，本次扫描提前结束；去重索引超过 75 万条，最早的记录已截断。");
+    assert.equal(tokenTruncationNotice({ files: false, bytes: false, index: false, scan: false }), null);
+  } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });

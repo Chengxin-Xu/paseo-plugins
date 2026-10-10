@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.1 (2026-10-10)
+
+Security hardening after an outside review of 0.4.0. Image previews, folding and timing work as before.
+
+**Image previews**
+
+- A preview request must name the agent whose chat shows the image, and the daemon must know that agent; otherwise
+  nothing is read, not even the temp directory. A sub-agent's own view (`provider:<agent>:<subagent>`) uses its parent
+  agent's working directory.
+- The temp directory is `os.tmpdir()` alone. `/tmp` is added only on macOS, where agents and browser tools save
+  screenshots and `os.tmpdir()` is a per-user folder. A `TMPDIR` that is `/` or contains the home directory is ignored.
+- Files are read in 64 KB pieces and never past 3 MB plus one byte, even when a file grows after its size was checked.
+  A file that does not start like a supported image is not read past its first 32 bytes, and its size is no longer
+  reported.
+- After opening, the plugin checks the file it actually opened. On Linux it reads the real path from `/proc/self/fd`,
+  so a directory swapped for a link between the checks and the open is refused; elsewhere the checked path must still
+  name the same device and inode, which narrows that window.
+- A BMP needs a file size field that matches the file, a known DIB header size and a pixel data offset inside the file,
+  not just `BM`.
+
+**Parsing limits**
+
+- Looking for JSON after a prefix in MCP and command output tries at most 8 `{`/`[` positions and only text up to
+  100,000 characters. Crafted output with nested brackets could keep the app or the daemon busy for minutes.
+- The fold index counts a tool call holding more than a million characters as "other" without parsing it, and keys
+  reasoning longer than 64 K characters by its length and its first and last 32 K characters.
+
+**Memory**
+
+- The fold index, timings and pending-approval state of an agent none of whose rows has been on screen for 10 minutes
+  are dropped, and read again when you come back.
+
+**Tests**
+
+- The Hermes bundle test writes into a private `mkdtemp` directory. The host fixture's agent and message ids are
+  synthetic and its timestamps shifted to 2026-01-01.
+
 ## 0.4.0 (2026-10-10)
 
 First public release, based on Colorful Agent Activity 0.3.0

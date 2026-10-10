@@ -176,6 +176,23 @@ describe("NotesSurface polling", () => {
   });
 });
 
+describe("unavailable boards", () => {
+  it("shows the other projects and says which board it could not show, instead of calling it empty", async () => {
+    const big = { id: "prj_big", name: "大项目", path: "/repo/big" };
+    host.handlers.set("project-notes.dashboard", async input => input.revision === "rev-big" ? { unchanged: true, revision: "rev-big" }
+      : { revision: "rev-big", projects: [...projects, big], boards: [serverBoard], unavailable: [{ projectId: "prj_big", bytes: 40 * 1024 * 1024, reason: "file" }] });
+    const root = await mount();
+    expect(texts(root)).toContain("上线检查");
+    expect(texts(root)).toContain("「大项目」的手记暂时无法显示：手记文件超过 32 MB。其余项目照常显示；请先备份，再精简这些手记。");
+    await press(root, "筛选项目：全部项目");
+    const row = root.find(node => is(node, "Pressable") && node.props.accessibilityLabel === "大项目");
+    expect(texts(row)).toContain("不可用");
+    await press(root, "大项目");
+    expect(texts(root)).toContain("「大项目」的手记暂时无法显示");
+    expect(texts(root).some(text => text.includes("还没有"))).toBe(false);
+  });
+});
+
 describe("NotesSurface actions", () => {
   it("advances a task from its status glyph with one write, ignoring taps while that write is in flight", async () => {
     let release: () => void = () => {};

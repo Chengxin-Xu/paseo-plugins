@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { suggestionJobSchema, type SuggestionJob } from "../shared/insight-overview";
+import { ensurePrivateDirectory } from "./paseo-home";
 
 export const MAX_SUGGESTION_JOBS = 20;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -53,7 +54,7 @@ export class SuggestionStorage {
       const temp = `${this.file}.${randomUUID()}.tmp`;
       try {
         if (Buffer.byteLength(snapshot, "utf8") > MAX_FILE_BYTES) throw new Error("too large");
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await ensurePrivateDirectory(this.directory);
         const handle = await open(temp, "wx", 0o600);
         try { await handle.writeFile(snapshot); await handle.sync(); } finally { await handle.close(); }
         await rename(temp, this.file); this.digest = digest;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -8,6 +8,7 @@ import { archiveReadOriginSchema, getReadReceipts, markCompletionRead, readRecei
 import { object } from "../shared/timeline";
 import { createProviderSubagentBridge } from "./provider-subagents";
 import { telemetryDirectory } from "./telemetry";
+import { ensurePrivateDirectory } from "./paseo-home";
 import { contentRevision } from "./revision";
 
 const fileSchema = z.object({ version: z.union([z.literal(1), z.literal(2)]), receipts: z.array(readReceiptSchema).max(2000), archiveOrigins: z.array(archiveReadOriginSchema).max(2000).default([]) });
@@ -80,7 +81,7 @@ export class ReadReceiptStore {
     this.writes = this.writes.then(async () => {
       const temporary = `${this.file}.${randomUUID()}.tmp`;
       try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await ensurePrivateDirectory(this.directory);
         if (this.corrupt) { try { await rename(this.file, `${this.file}.backup`); } catch { /* missing previous file */ } this.corrupt = false; }
         await writeFile(temporary, serialized, { mode: 0o600 }); await rename(temporary, this.file); this.error = null;
       } catch { this.error = "原生已读已同步，但回执暂时无法写入磁盘；当前回执保留在内存。"; }

@@ -1,16 +1,29 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/** The built-in Grok CLI runner's defaults: a saved `{ kind: "grok" }` (every choice before 2.12) runs with these. */
+export const GROK_DEFAULT_MODEL = "grok-4.7";
+export const GROK_DEFAULT_EFFORT = "xhigh";
+/** `--reasoning-effort` levels the Grok CLI offers, deepest first. */
+export const GROK_EFFORTS = ["xhigh", "high", "medium", "low"] as const;
+export type GrokEffort = (typeof GROK_EFFORTS)[number];
+/** A Grok CLI model id, passed to the CLI as one argument: letters, digits and `._:/-`, never starting with `-` (an option). */
+export const grokModelSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/, "模型 ID 只能包含字母、数字和 . _ : / -，并以字母或数字开头");
+/** "Grok 4.7" for grok-<version> ids; any other id as written. */
+export function grokModelLabel(model: string): string { return /^grok-\d+(?:\.\d+)*$/.test(model) ? `Grok ${model.slice(5)}` : model; }
+/** "Grok 4.7 · xhigh" for the defaults. */
+export function grokRunnerLabel(runner: { model?: string; effort?: string }): string { return `${grokModelLabel(runner.model ?? GROK_DEFAULT_MODEL)} · ${runner.effort ?? GROK_DEFAULT_EFFORT}`; }
+
 /**
  * Who writes reports and suggestions. `auto` (the default) picks at run time: the Grok CLI when it is installed,
- * otherwise an enabled Paseo provider (Claude Code, then Codex, then any other that can analyse safely) with its
- * default model. `grok` is the Grok CLI (grok-4.7 · xhigh, tools disabled, empty temp directory). `profile` /
- * `provider` start a Paseo agent with that profile or provider/model as a sub-agent of the analysed Agent (its
- * workspace, the provider's safest mode, every tool permission prompt denied), archived when done.
+ * otherwise an enabled Paseo provider (Claude Code, then Codex, then providers that extend them) with its default model.
+ * `grok` is the Grok CLI (tools disabled, empty temp directory) with an optional model and reasoning effort (grok-4.7 ·
+ * xhigh when unset). `profile` / `provider` start a Paseo agent with that profile or provider/model as a sub-agent of
+ * the analysed Agent (its workspace, a verified read-only or ask-first mode, approval requests denied), archived when done.
  */
 export const insightRunnerSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("auto") }),
-  z.object({ kind: z.literal("grok") }),
+  z.object({ kind: z.literal("grok"), model: grokModelSchema.optional(), effort: z.enum(GROK_EFFORTS).optional() }),
   z.object({ kind: z.literal("profile"), profileId: z.string().min(1).max(200) }),
   z.object({ kind: z.literal("provider"), provider: z.string().min(1).max(120), model: z.string().min(1).max(240).nullable(), thinkingOptionId: z.string().min(1).max(120).nullable() }),
 ]);
@@ -122,8 +135,9 @@ export const updateInsightSettings = defineRpc({
   name: "observatory.insights.configure", input: z.object({ autoEnabled: z.boolean().optional(), runner: insightRunnerSchema.optional() }), output: insightSettingsSchema,
 });
 /**
- * How a runner will analyse: `none` = tools disabled (built-in Grok CLI); `read` = a read-only mode (plan / ask / codex
- * read-only); `ask` = no read-only mode, so every tool permission prompt is denied automatically.
+ * How a runner will analyse: `none` = tools disabled (built-in Grok CLI); `read` = a read-only mode (plan / ask / Codex's
+ * read-only sandbox); `ask` = an ask-first mode without a read-only one (Claude Code's Always Ask): tool requests that
+ * need approval are denied automatically, actions the provider allows without approval (reading files) may still run.
  */
 export const RUNNER_ACCESS = ["none", "read", "ask"] as const;
 export const insightRunnerOptionSchema = z.object({

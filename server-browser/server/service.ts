@@ -62,7 +62,8 @@ export class WorkspaceDirectory {
 export async function browserOptions(paseo:Paseo,directory?:WorkspaceDirectory):Promise<{workspaces:BrowserWorkspace[];profiles:BrowserProfile[]}> {
   const [workspaces,{config}]=await Promise.all([directory?directory.list(paseo):listBrowserWorkspaces(paseo),paseo.config.get()]);
   return {
-    workspaces:workspaces.map(item=>({id:item.id,title:item.title??item.name??item.projectDisplayName,cwd:item.workspaceDirectory??item.projectRootPath,projectId:item.projectId??null,projectTitle:item.projectDisplayName})),
+    // No directory paths: the client shows names only.
+    workspaces:workspaces.map(item=>({id:item.id,title:item.title??item.name??item.projectDisplayName,projectId:item.projectId??null,projectTitle:item.projectDisplayName})),
     profiles:(config.agentProfiles??[]).map(profile=>({id:profile.id,name:profile.name,provider:profile.provider,model:profile.model??null})),
   };
 }

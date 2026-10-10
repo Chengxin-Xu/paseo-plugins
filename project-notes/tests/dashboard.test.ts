@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BoardStore } from "../server/store";
@@ -104,6 +104,40 @@ describe("DashboardService revisions", () => {
     const back = await dashboard.read(api, full.revision);
     if (back.unchanged) throw new Error("expected a delta");
     expect(back.projects!.filter(p => p.id === "prj_gone_1234abcd").map(p => p.name)).toEqual(["回来了"]);
+  });
+
+  it("keeps the overview up when boards exceed the size limits, and names them", async () => {
+    const { root, api } = await fixture([project("prj_a", "Alpha"), project("prj_b", "Beta")]);
+    const writer = new BoardStore(root);
+    await create(writer, "prj_a", "dash-limit-1");
+    await writer.write({ projectId: "prj_b", requestId: "dash-limit-2", operation: { type: "create", fields: { ...fields, body: "长".repeat(4_000) } } });
+    const small = (await stat(join(root, writer.boardFile("prj_a")))).size, large = (await stat(join(root, writer.boardFile("prj_b")))).size;
+    // A fresh plugin process that has read neither board: Beta is named from the Paseo project list.
+    const store = new BoardStore(root, { maxTotalBytes: small + 10 });
+    const dashboard = new DashboardService(store, new ProjectDirectory());
+    const full = await dashboard.read(api);
+    if (full.unchanged) throw new Error("expected data");
+    expect(dashboardUpdateSchema.parse(full)).toEqual(full);
+    expect(full.boards.map(b => b.projectId)).toEqual(["prj_a"]);
+    expect(full.unavailable).toEqual([{ projectId: "prj_b", bytes: large, reason: "total" }]);
+    expect(await dashboard.read(api, full.revision)).toEqual({ unchanged: true, revision: full.revision });
+    // A removed project whose board is over the per-board limit still shows, as a history project.
+    await create(store, "prj_gone_9a8b7c6d", "dash-limit-3");
+    await truncate(join(root, store.boardFile("prj_gone_9a8b7c6d")), 33 * 1024 * 1024);
+    const next = await dashboard.read(api, full.revision);
+    if (next.unchanged) throw new Error("expected a delta");
+    expect(next.unavailable).toEqual([{ projectId: "prj_b", bytes: large, reason: "total" }, { projectId: "prj_gone_9a8b7c6d", bytes: 33 * 1024 * 1024, reason: "file" }].sort((x, y) => store.boardFile(x.projectId).localeCompare(store.boardFile(y.projectId))));
+    expect(next.projects!.at(-1)).toEqual({ id: "prj_gone_9a8b7c6d", name: "历史项目 · 9a8b7c6d", path: "项目已移除，手记仍保留" });
+    // The list is part of the revision: once that board is gone, the next delta carries the shorter list.
+    await rm(join(root, store.boardFile("prj_gone_9a8b7c6d")));
+    const after = await dashboard.read(api, next.revision);
+    if (after.unchanged) throw new Error("expected a delta");
+    expect(after.boards).toEqual([]);
+    expect(after.unavailable).toEqual([{ projectId: "prj_b", bytes: large, reason: "total" }]);
+    // With the default limits nothing is left out.
+    const roomy = await new DashboardService(new BoardStore(root), new ProjectDirectory()).read(api);
+    if (roomy.unchanged) throw new Error("expected data");
+    expect([roomy.boards.map(b => b.projectId), roomy.unavailable]).toEqual([["prj_a", "prj_b"], []]);
   });
 
   it("answers unknown or evicted revisions with everything, and is deterministic across restarts", async () => {

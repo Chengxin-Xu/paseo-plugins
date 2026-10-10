@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import type { PaseoApi } from "../paseo-types";
 import type { StatsRange } from "../../shared/stats";
-import type { TokenResponse, TokenSnapshot } from "../../shared/tokens";
+import type { TokenImportLimits, TokenResponse, TokenSnapshot } from "../../shared/tokens";
 import { StatsDirectory } from "../stats-directory";
 import { telemetryDirectory } from "../telemetry";
 import { addCall, emptyData, pruneData, settleCall, type TokenData } from "./data";
@@ -20,6 +20,8 @@ export interface TokenStoreOptions {
   poll?: boolean;
   /** Home, environment and launcher reads for provider root discovery (tests). */
   rootContext?: RootContext;
+  /** Smaller import budgets (tests); the defaults are TOKEN_IMPORT_LIMITS. */
+  limits?: Partial<TokenImportLimits>;
 }
 export class TokenStore {
   data: TokenData = emptyData();
@@ -45,7 +47,7 @@ export class TokenStore {
     this.now = options.now ?? Date.now; this.directory = options.agents ?? new StatsDirectory(this.now);
     this.rootContext = options.rootContext ?? { home: homedir(), env: process.env };
     this.persistence = new TokenPersistence(options.directory ?? telemetryDirectory());
-    this.ingester = new TokenIngester({ roots: options.roots, now: this.now,
+    this.ingester = new TokenIngester({ roots: options.roots, now: this.now, limits: options.limits,
       onCall: (call, previous) => {
         addCall(this.data, call, previous, this.now());
         if (this.data.sessions.size > 5100) pruneData(this.data, this.now());
@@ -116,14 +118,14 @@ export class TokenStore {
   }
   coverage(): TokenSnapshot["coverage"] {
     return { earliestAt: this.data.earliestAt === null ? null : iso(this.data.earliestAt), latestAt: this.data.latestAt === null ? null : iso(this.data.latestAt),
-      backfill: { ...this.ingester.backfill }, roots: this.ingester.roots.map(root => ({ ...root, path: root.path.slice(0, 1024) })) };
+      backfill: { ...this.ingester.backfill }, roots: this.ingester.roots.map(root => ({ ...root, path: root.path.slice(0, 1024) })), truncated: { ...this.ingester.truncated } };
   }
   async read(input: { range: StatsRange; utcOffsetMinutes: number; revision?: string }, paseo?: PaseoApi): Promise<TokenResponse> {
     await this.initialized;
     if (paseo) await this.directory.refresh(paseo);
     const now = this.now(), today = Math.floor((now + input.utcOffsetMinutes * 60_000) / DAY);
     if (dayOf(now) !== this.lastPrune) { pruneData(this.data, now); this.lastPrune = dayOf(now); this.changed(); }
-    const revision = createHash("sha256").update(JSON.stringify([this.change, input.range, input.utcOffsetMinutes, today, this.directory.digest, this.ingester.roots, this.ingester.backfill])).digest("hex").slice(0, 24);
+    const revision = createHash("sha256").update(JSON.stringify([this.change, input.range, input.utcOffsetMinutes, today, this.directory.digest, this.ingester.roots, this.ingester.backfill, this.ingester.truncated])).digest("hex").slice(0, 24);
     if (input.revision === revision) return { mode: "unchanged", unchanged: true, revision };
     const cached = this.cached.get(revision); if (cached) return cached;
     const result: Extract<TokenResponse, { mode: "full" }> = { ...buildTokenSnapshot(this.data, input, now, this.directory, this.coverage()), mode: "full", unchanged: false, revision };

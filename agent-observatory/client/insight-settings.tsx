@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
-import type { InsightJob, InsightRunner, InsightRunnerOption, InsightSettings } from "../shared/insights";
-import { Badge, Banner, Button, Chip, MetaLine, Sheet, Skeleton, fontSize, gradient, hue, isDarkTheme, radius, space, withAlpha, type Hue } from "./kit";
+import { GROK_DEFAULT_EFFORT, GROK_DEFAULT_MODEL, GROK_EFFORTS, grokModelSchema, grokRunnerLabel, type GrokEffort, type InsightJob, type InsightRunner, type InsightRunnerOption, type InsightSettings } from "../shared/insights";
+import { Badge, Banner, Button, Chip, MetaLine, Sheet, Skeleton, TextField, fontSize, gradient, hue, isDarkTheme, radius, space, withAlpha, type Hue } from "./kit";
 import { PaneLabel, Switch } from "./ui";
 import { useConfigureInsights, useInsightModels, useInsightRunners } from "./use-insight-overview";
 
@@ -15,7 +15,7 @@ export const sameRunner = (a: InsightRunner | undefined, b: InsightRunner | unde
 const accessLooks: Record<InsightRunnerOption["access"], { label: string; hue: Hue; icon: string; hint: string }> = {
   none: { label: "不用工具", hue: "green", icon: "ShieldCheck", hint: "在临时目录里运行，不创建会话" },
   read: { label: "只读", hue: "teal", icon: "Eye", hint: "以只读模式运行，可以查看代码但不能修改" },
-  ask: { label: "工具会被拒绝", hue: "amber", icon: "ShieldAlert", hint: "没有只读模式：它请求的每个工具都会被自动拒绝" },
+  ask: { label: "需审批时拒绝", hue: "amber", icon: "ShieldAlert", hint: "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行" },
 };
 
 function AccessBadge({ theme, access }: { theme: PluginTheme; access: InsightRunnerOption["access"] }) {
@@ -45,6 +45,32 @@ function Choice({ theme, option, selected, badge, onPress }: { theme: PluginThem
       {option.reason ? <Text style={{ color: hue(theme, option.available ? "amber" : "red", "text"), fontSize: fontSize.meta }}>{option.reason}</Text> : null}
     </View>
   </Pressable>;
+}
+
+type GrokRunner = Extract<InsightRunner, { kind: "grok" }>;
+/** The built-in Grok CLI's model and reasoning effort; unset values are the defaults, so an untouched choice stays `{ kind: "grok" }`. */
+function GrokOptions({ theme, runner, busy, onSave }: { theme: PluginTheme; runner: GrokRunner; busy: boolean; onSave: (runner: GrokRunner) => void }) {
+  const { colors } = theme;
+  const [model, setModel] = useState(runner.model ?? "");
+  const [effort, setEffort] = useState<GrokEffort>(runner.effort ?? GROK_DEFAULT_EFFORT);
+  useEffect(() => { setModel(runner.model ?? ""); setEffort(runner.effort ?? GROK_DEFAULT_EFFORT); }, [runner.model, runner.effort]);
+  const id = model.trim(), valid = !id || grokModelSchema.safeParse(id).success;
+  const next: GrokRunner = { kind: "grok", ...(id && id !== GROK_DEFAULT_MODEL ? { model: id } : {}), ...(effort !== GROK_DEFAULT_EFFORT ? { effort } : {}) };
+  const changed = next.model !== runner.model || next.effort !== runner.effort;
+  return <View style={{ gap: space.md, marginLeft: space.md, padding: space.md, borderRadius: radius.lg, borderWidth: 1, borderColor: withAlpha(hue(theme, "teal"), 0.35) }}>
+    <TextField theme={theme} label="Grok 模型" value={model} onChangeText={setModel} placeholder={`${GROK_DEFAULT_MODEL}（默认）`}
+      hint={valid ? "留空用默认模型。可以填 Grok CLI 支持的其他模型 ID（grok models 会列出）。" : "模型 ID 只能包含字母、数字和 . _ : / -，并以字母或数字开头"} />
+    <View style={{ gap: space.xs }}>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>推理档</Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+        {GROK_EFFORTS.map(option => <Chip key={option} theme={theme} label={option === GROK_DEFAULT_EFFORT ? `${option}（默认）` : option} tone="violet" selected={effort === option} onPress={() => setEffort(option)} />)}
+      </View>
+    </View>
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
+      <Button theme={theme} variant="primary" icon="Check" label="保存 Grok 设置" busy={busy} disabled={busy || !valid || !changed} onPress={() => onSave(next)} />
+      {runner.model || runner.effort ? <Button theme={theme} variant="ghost" icon="RotateCcw" label="恢复默认" disabled={busy} onPress={() => onSave({ kind: "grok" })} /> : null}
+    </View>
+  </View>;
 }
 
 /** Provider → model → thinking, for models no profile covers. */
@@ -133,6 +159,7 @@ export function InsightSettingsSheet({ theme, open, onClose, settings, pick }: {
       {data ? <>
         <Choice theme={theme} option={data.auto} badge="默认" selected={!pick && current.kind === "auto"} onPress={() => choose(data.auto.runner, data.auto.label)} />
         <Choice theme={theme} option={data.builtin} selected={!pick && current.kind === "grok"} onPress={() => choose(data.builtin.runner, data.builtin.label)} />
+        {!pick && current.kind === "grok" && data.builtin.available ? <GrokOptions theme={theme} runner={current} busy={configure.isPending} onSave={runner => choose(runner, grokRunnerLabel(runner))} /> : null}
         {data.profiles.length ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "700", marginTop: space.xs }}>你的 Profile</Text> : null}
         {data.profiles.map(option => <Choice key={JSON.stringify(option.runner)} theme={theme} option={option} selected={!pick && sameRunner(option.runner, current)} onPress={() => choose(option.runner, option.label)} />)}
         {data.providers.length ? <View style={{ gap: space.sm, marginTop: space.xs }}>
@@ -147,7 +174,7 @@ export function InsightSettingsSheet({ theme, open, onClose, settings, pick }: {
         </View> : null}
       </> : null}
     </View>
-    <MetaLine theme={theme} numberOfLines={4} parts={["选 Profile 或其他模型时，分析会作为被分析会话的子 Agent 在它的工作区里以只读方式运行，写完报告就自动归档；用量计入对应账号。"]} />
+    <MetaLine theme={theme} numberOfLines={5} parts={["选 Profile 或其他模型时，分析会作为被分析会话的子 Agent 在它的工作区里运行：有只读模式就用只读模式，否则用逐项审批的模式并拒绝每个审批请求；写完报告就自动归档，用量计入对应账号。没有这两种模式的提供商不能用来分析。"]} />
     {configure.error ? <Banner theme={theme} tone="danger" message={configure.error.message} /> : null}
   </Sheet>;
 }

@@ -1,5 +1,6 @@
 // Development-only synthetic 智能分析 data: 总览 roll-up, one suggestion set, analysis runners. No host data is read.
 import { rawAgents } from "./fixtures";
+import { grokRunnerLabel } from "../shared/insights";
 
 const hour = 3_600_000, day = 24 * hour;
 const iso = ms => new Date(ms).toISOString();
@@ -146,7 +147,7 @@ export const fixtureRunners = {
   auto: { runner: { kind: "auto" }, label: "自动选择", detail: "有 Grok CLI 时用它；否则用已启用的 Claude Code 或 Codex（包括 extends 它们的自定义 Provider）和它的默认模型", providerLabel: "现在：Grok 4.7 · xhigh", modelLabel: null, thinkingLabel: null, available: true, reason: null, access: "none", modeId: null },
   builtin: { runner: { kind: "grok" }, label: "Grok 4.7 · xhigh", detail: "Grok CLI：在临时目录里分析，不创建会话，也不使用任何工具", providerLabel: null, modelLabel: "grok-4.7", thinkingLabel: "xhigh", available: true, reason: null, access: "none", modeId: null },
   profiles: [
-    { runner: { kind: "profile", profileId: "daily" }, label: "日常 · Opus 5.5", detail: "常规问答、代码阅读、一般分析", providerLabel: "Claude Code", modelLabel: "Opus 5.5", thinkingLabel: "high", available: true, reason: "没有只读模式，工具请求会被自动拒绝", access: "ask", modeId: "default" },
+    { runner: { kind: "profile", profileId: "daily" }, label: "日常 · Opus 5.5", detail: "常规问答、代码阅读、一般分析", providerLabel: "Claude Code", modelLabel: "Opus 5.5", thinkingLabel: "high", available: true, reason: "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行", access: "ask", modeId: "default" },
     { runner: { kind: "profile", profileId: "implement" }, label: "实现 · 长程执行与交付", detail: "目标和验收明确的编码、重构、迁移", providerLabel: "Codex", modelLabel: "GPT-5 Codex", thinkingLabel: "high", available: true, reason: null, access: "read", modeId: "auto" },
     { runner: { kind: "profile", profileId: "explore" }, label: "探索 · 并行查证", detail: "另一条独立的并行探索或分析任务", providerLabel: "OpenCode", modelLabel: "kimi-k2", thinkingLabel: null, available: false, reason: "OpenCode 暂不可用", access: "read", modeId: "plan" },
   ],
@@ -175,7 +176,7 @@ export const fixtureProfiles = [
 ];
 export function runnerLabelFor(runner) {
   if (!runner || runner.kind === "auto") return "自动选择 · Grok 4.7 · xhigh";
-  if (runner.kind === "grok") return "Grok 4.7 · xhigh";
+  if (runner.kind === "grok") return grokRunnerLabel(runner);
   if (runner.kind === "profile") return fixtureRunners.profiles.find(item => item.runner.profileId === runner.profileId)?.label ?? `Profile ${runner.profileId}（不可用）`;
   const provider = fixtureRunners.providers.find(item => item.provider === runner.provider);
   const model = runner.model ? fixtureModels(runner.provider).models.find(item => item.id === runner.model)?.label ?? runner.model : "默认模型";

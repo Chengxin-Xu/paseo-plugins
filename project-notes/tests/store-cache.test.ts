@@ -20,8 +20,8 @@ describe("BoardStore read cache", () => {
     const { store } = await fixture();
     await store.write({ projectId: "project-a", requestId: "cache-create-1", operation: { type: "create", fields } });
     await store.write({ projectId: "project-b", requestId: "cache-create-2", operation: { type: "create", fields } });
-    const first = await store.readEntries();
-    const second = await store.readEntries();
+    const first = (await store.readEntries()).entries;
+    const second = (await store.readEntries()).entries;
     expect(second.map(entry => entry.snapshot.projectId)).toEqual(["project-a", "project-b"]);
     // Same objects: nothing was re-read or re-validated.
     expect(second[0]!.snapshot).toBe(first[0]!.snapshot);
@@ -32,10 +32,10 @@ describe("BoardStore read cache", () => {
   it("sees writes from its own process, another store instance (the CLI) and manual edits", async () => {
     const { root, store } = await fixture();
     const created = await store.write({ projectId: "project-a", requestId: "cache-own-1", operation: { type: "create", fields } });
-    const before = await store.readEntries();
+    const before = (await store.readEntries()).entries;
     // Another process writes through its own store and the lock file.
     await new BoardStore(root).write({ projectId: "project-a", requestId: "cache-other-1", operation: { type: "update", id: created.itemId, expectedRevision: 1, fields: { status: "doing" } } });
-    const afterOther = await store.readEntries();
+    const afterOther = (await store.readEntries()).entries;
     expect(afterOther[0]!.token).not.toBe(before[0]!.token);
     expect(afterOther[0]!.snapshot.items[0]!.status).toBe("doing");
     // Own writes drop the cached copy immediately.
@@ -49,7 +49,9 @@ describe("BoardStore read cache", () => {
     const file = await boardFile(root);
     // Whole seconds survive utimes exactly, so only ctime can reveal the edit below.
     await utimes(file, 1_700_000_000, 1_700_000_000);
-    const before = await store.readEntries();
+    const before = (await store.readEntries()).entries;
+    // ctime comes from the kernel's coarse clock: let it tick, or an edit within the same tick keeps the same ctime.
+    await new Promise(resolve => setTimeout(resolve, 25));
     const original = await stat(file, { bigint: true });
     const text = await readFile(file, "utf8");
     const handle = await open(file, "r+");
@@ -57,7 +59,7 @@ describe("BoardStore read cache", () => {
     await utimes(file, 1_700_000_000, 1_700_000_000);
     const edited = await stat(file, { bigint: true });
     expect([edited.ino, edited.size, edited.mtimeNs]).toEqual([original.ino, original.size, original.mtimeNs]);
-    const after = await store.readEntries();
+    const after = (await store.readEntries()).entries;
     expect(after[0]!.token).not.toBe(before[0]!.token);
     expect(after[0]!.snapshot.items[0]!.title).toBe("BBBB");
   });
@@ -83,16 +85,40 @@ describe("BoardStore read cache", () => {
     await expect(store.readAll()).rejects.toThrow(/校验失败/);
   });
 
-  it("enforces the per-file and overview size limits before reading", async () => {
+  it("leaves a board over the per-board limit out of the overview, unread, and keeps the others", async () => {
     const { root, store } = await fixture();
     await store.write({ projectId: "project-a", requestId: "cache-size-1", operation: { type: "create", fields } });
-    const file = await boardFile(root);
-    await truncate(file, 33 * 1024 * 1024); // sparse: the limit is checked from stat
-    await expect(store.readAll()).rejects.toThrow(/数据较大/);
+    await store.write({ projectId: "project-b", requestId: "cache-size-2", operation: { type: "create", fields } });
+    const file = store.boardFile("project-a");
+    await truncate(join(root, file), 33 * 1024 * 1024); // sparse: the limit is checked from stat, before reading
+    const overview = await store.readEntries();
+    expect(overview.entries.map(entry => entry.snapshot.projectId)).toEqual(["project-b"]);
+    expect(overview.unavailable).toEqual([{ file, projectId: "project-a", bytes: 33 * 1024 * 1024, reason: "file" }]);
+    expect((await store.readAll()).map(board => board.projectId)).toEqual(["project-b"]);
+    // A process that never read that board cannot tell whose it is.
+    expect((await new BoardStore(root).readEntries()).unavailable).toEqual([{ file, projectId: null, bytes: 33 * 1024 * 1024, reason: "file" }]);
+    // On its own the board still refuses reads and writes, as before.
     await expect(store.read("project-a")).rejects.toThrow(/记录文件过大/);
-    await rm(file);
-    for (const name of ["a", "b", "c"]) { const big = join(root, name.repeat(64) + ".json"); await writeFile(big, ""); await truncate(big, 12 * 1024 * 1024); }
-    await expect(store.readAll()).rejects.toThrow(/数据较大/);
+    await expect(store.write({ projectId: "project-a", requestId: "cache-size-3", operation: { type: "create", fields } })).rejects.toThrow(/记录文件过大/);
+  });
+
+  it("fills the overview budget smallest board first and leaves out what does not fit", async () => {
+    const { root } = await fixture();
+    const writer = new BoardStore(root), bytes: Record<string, number> = {};
+    for (const [projectId, length] of [["project-small", 100], ["project-medium", 3_000], ["project-large", 9_000]] as const) {
+      await writer.write({ projectId, requestId: `cache-total-${projectId}`, operation: { type: "create", fields: { ...fields, body: "正".repeat(length) } } });
+      bytes[projectId] = (await stat(join(root, writer.boardFile(projectId)))).size;
+    }
+    const store = new BoardStore(root, { maxTotalBytes: bytes["project-small"]! + bytes["project-large"]! + 10 });
+    const overview = await store.readEntries();
+    expect(overview.entries.map(entry => entry.snapshot.projectId)).toEqual(["project-medium", "project-small"]);
+    expect(overview.unavailable).toEqual([{ file: store.boardFile("project-large"), projectId: null, bytes: bytes["project-large"], reason: "total" }]);
+    // Only the overview is limited: the board itself still reads and writes, and then the store knows whose it is.
+    expect((await store.read("project-large")).items).toHaveLength(1);
+    expect((await store.readEntries()).unavailable[0]!.projectId).toBe("project-large");
+    // With room again, it is back.
+    await rm(join(root, store.boardFile("project-medium")));
+    expect((await store.readEntries()).entries.map(entry => entry.snapshot.projectId)).toEqual(["project-large", "project-small"]);
   });
 
   it("drops boards whose files disappear and ignores foreign files", async () => {

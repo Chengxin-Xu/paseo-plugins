@@ -1,8 +1,8 @@
 import { build } from "esbuild";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createPreviewServer, previewPort } from "./preview-server.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = join(root, "preview", "dist");
@@ -19,18 +19,8 @@ await writeFile(join(output, "index.html"), await readFile(join(root, "preview",
 console.log("Built development fixture preview in preview/dist (synthetic data only).");
 
 if (process.argv.includes("--serve")) {
-  const port = Number(process.env.OBSERVATORY_PREVIEW_PORT ?? 4177);
-  const allowed = new Map([["/", "index.html"], ["/index.html", "index.html"], ["/app.js", "app.js"], ["/app.js.map", "app.js.map"]]);
-  const server = createServer(async (request, response) => {
-    const pathname = new URL(request.url ?? "/", `http://127.0.0.1:${port}`).pathname;
-    const file = allowed.get(pathname);
-    if (!file) { response.writeHead(404); response.end("Not found"); return; }
-    try {
-      response.setHeader("Cache-Control", "no-store");
-      response.setHeader("Content-Type", file.endsWith(".html") ? "text/html; charset=utf-8" : file.endsWith(".map") ? "application/json" : "application/javascript; charset=utf-8");
-      response.end(await readFile(join(output, file)));
-    } catch { response.writeHead(500); response.end("Preview asset unavailable"); }
-  });
+  const port = previewPort();
+  const server = createPreviewServer(output);
   server.listen(port, "127.0.0.1", () => console.log(`Development fixture preview: http://127.0.0.1:${port}`));
   for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => server.close(() => process.exit(0)));
 }

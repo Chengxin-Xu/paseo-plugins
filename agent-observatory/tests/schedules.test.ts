@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ScheduleIndex, type ScheduleDirectory } from "../server/schedules";
+import { ScheduleIndex, type ScheduleDirectory, type ScheduleIndexOptions } from "../server/schedules";
 import type { StatsDirectoryAgent } from "../server/stats-types";
 import { EMPTY_RUN_FILTER, cadenceLabel, cadenceText, describeRunError, filterRuns, findChangeRequest, groupRunsByDay, knownRunError, zoneLabel, type ScheduleRunRow, type ScheduleRunsState } from "../shared/schedules";
 
@@ -32,7 +32,7 @@ function storedAgent(id: string, patch: Record<string, unknown> = {}) {
     features: [], persistence: { provider: "codex", sessionId: `session-${id}`, nativeHandle: `session-${id}`, metadata: {} },
     requiresAttention: true, attentionReason: "finished", attentionTimestamp: "2026-09-24T22:06:45.606Z", internal: false, archivedAt: "2026-09-24T22:06:45.630Z", ...patch };
 }
-async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: boolean; maxFileBytes?: number; maxLedgerBytes?: number } = {}) {
+async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: boolean; maxFileBytes?: number; maxLedgerBytes?: number; limits?: ScheduleIndexOptions["limits"] } = {}) {
   const root = await mkdtemp(join(tmpdir(), "observatory-schedules-"));
   const home = join(root, "home"), data = join(root, "data");
   await mkdir(join(home, "schedules"), { recursive: true }); await mkdir(join(home, "projects"), { recursive: true }); await mkdir(data, { recursive: true });
@@ -40,7 +40,7 @@ async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: bo
   const directory: ScheduleDirectory = { agents, digest: "d1", async refresh() {} };
   let now = NOW;
   const made: ScheduleIndex[] = [], warnings: string[] = [];
-  const make = (writeDelayMs = 0) => { const index = new ScheduleIndex({ home, dataDirectory: data, directory, writeDelayMs, now: () => now, maxFileBytes: options.maxFileBytes, maxLedgerBytes: options.maxLedgerBytes,
+  const make = (writeDelayMs = 0) => { const index = new ScheduleIndex({ home, dataDirectory: data, directory, writeDelayMs, now: () => now, maxFileBytes: options.maxFileBytes, maxLedgerBytes: options.maxLedgerBytes, limits: options.limits,
     log: message => warnings.push(message) }); made.push(index); return index; };
   // Every index saves what is pending and stops writing before the temporary tree goes away.
   const close = async () => { await chmod(data, 0o700).catch(() => {}); for (const index of made) await index.close(); await rm(root, { recursive: true, force: true }); };
@@ -149,6 +149,42 @@ test("runs survive their schedule's deletion through the ledger, which stores no
     assert.equal(after.schedules[0]!.status, "deleted"); assert.equal(after.schedules[0]!.timezone, "America/New_York");
     const detail = await fresh.run(null, "run-ok");
     assert.equal(detail.output, null); assert.match(detail.note ?? "", /已被删除/);
+  } finally { await f.close(); }
+});
+
+test("a schedule without a name or title is listed by its prompt, but the ledger stores a neutral name, never the prompt", async () => {
+  const f = await fixture([]);
+  try {
+    const prompt = "PRIVATE-PROMPT-MARKER 汇总昨天的改动并写成站会摘要";
+    await f.write("7a3f9c21d4", schedule("7a3f9c21d4", { name: null, prompt, target: { type: "new-agent", config: { provider: "codex", cwd: "/work/ops-runbook", title: null } } }));
+    const index = f.make();
+    const live = full(await index.list(null, { window: "all" }));
+    assert.equal(live.schedules[0]!.name.startsWith("PRIVATE-PROMPT-MARKER"), true, "the live list may show the prompt's start");
+    await index.flush();
+    const saved = await readFile(join(f.data, "schedule-ledger.json"), "utf8");
+    assert.equal(saved.includes("PRIVATE-PROMPT-MARKER"), false); assert.equal(saved.includes("站会摘要"), false);
+    assert.equal(JSON.parse(saved).schedules["7a3f9c21d4"].name, "未命名定时任务 7a3f9c21");
+    await rm(join(f.home, "schedules", "7a3f9c21d4.json"));
+    const after = full(await f.make().list(null, { window: "all" }));
+    assert.equal(after.schedules[0]!.name, "未命名定时任务 7a3f9c21"); assert.equal(after.runs[0]!.scheduleName, "未命名定时任务 7a3f9c21");
+  } finally { await f.close(); }
+});
+
+test("the ledger is written private: a 0700 data directory (an existing wider one is tightened), a 0600 file, no temporary left", async () => {
+  const f = await fixture([]);
+  try {
+    await chmod(f.data, 0o755);
+    await f.write("s1", schedule("s1"));
+    const index = f.make();
+    full(await index.list(null)); await index.flush();
+    assert.equal((await stat(f.data)).mode & 0o777, 0o700);
+    assert.equal((await stat(join(f.data, "schedule-ledger.json"))).mode & 0o777, 0o600);
+    assert.deepEqual((await readdir(f.data)).filter(name => name.endsWith(".tmp")), []);
+    // A fresh directory is created private too.
+    await rm(f.data, { recursive: true, force: true });
+    await f.write("s2", schedule("s2", { runs: [run("run-new", NOW - 1000)] }));
+    full(await index.list(null)); await index.flush();
+    assert.equal((await stat(f.data)).mode & 0o777, 0o700);
   } finally { await f.close(); }
 });
 
@@ -315,6 +351,39 @@ test("closing saves pending ledger changes once; indexes sharing a directory nev
     assert.deepEqual((await readdir(f.data)).filter(name => name.endsWith(".tmp")), []);
     assert.deepEqual(f.warnings, []);
   } finally { await f.close(); }
+});
+
+test("a scan reads at most its file and byte budgets of schedule files and says so", async () => {
+  const f = await fixture([], { limits: { scheduleFiles: 2 } });
+  try {
+    for (const id of ["s1", "s2", "s3"]) await f.write(id, schedule(id, { name: `任务 ${id}`, runs: [run(`run-${id}`, NOW - 1000)] }));
+    const state = full(await f.make().list(null, { window: "all" }));
+    assert.deepEqual(state.schedules.map(item => item.id).sort(), ["s1", "s2"]); assert.match(state.notice ?? "", /定时任务文件超过上限/);
+  } finally { await f.close(); }
+  const g = await fixture([], { limits: { scheduleBytes: 3000 } });
+  try {
+    await g.write("small", schedule("small", { runs: [run("run-small", NOW - 1000)] }));
+    await g.write("large", schedule("large", { runs: [run("run-large", NOW - 1000, { output: "长回复".repeat(2000) })] }));
+    const state = full(await g.make().list(null, { window: "all" }));
+    assert.deepEqual(state.runs.map(row => row.id), ["run-small"]); assert.match(state.notice ?? "", /定时任务文件超过上限/);
+    assert.deepEqual(g.warnings, []);
+  } finally { await g.close(); }
+});
+
+test("Agent records are read within a record, byte and directory-entry budget, and a cut says so", async () => {
+  const f = await fixture([], { limits: { agentRecords: 1 } });
+  try {
+    await f.write("75b70160", schedule("75b70160", { runs: [] }));
+    await f.record("folder", storedAgent("r1")); await f.record("folder", storedAgent("r2"));
+    const state = full(await f.make().list(null, { window: "all" }));
+    assert.equal(state.reconstructed, 1); assert.match(state.notice ?? "", /Agent 记录超过上限/);
+  } finally { await f.close(); }
+  const g = await fixture([], { limits: { entries: 2 } });
+  try {
+    await g.record("a", storedAgent("r1")); await g.record("b", storedAgent("r2")); await g.record("c", storedAgent("r3"));
+    const state = full(await g.make().list(null, { window: "all" }));
+    assert.ok(state.reconstructed < 3); assert.match(state.notice ?? "", /Agent 记录超过上限/);
+  } finally { await g.close(); }
 });
 
 test("Chinese cadences, zones, change-request labels and day groups", () => {

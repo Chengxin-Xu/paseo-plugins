@@ -1,7 +1,10 @@
-import type { BoardProject, BoardSnapshot, DashboardUpdate } from "../shared/board";
+import type { BoardProject, BoardSnapshot, DashboardUpdate, UnavailableBoard } from "../shared/board";
 
-/** The shared client copy of the dashboard. `revision` is the last server revision merged into it. */
-export interface DashboardData { revision: string | null; changedAt: number; projects: BoardProject[]; boards: BoardSnapshot[] }
+/**
+ * The shared client copy of the dashboard. `revision` is the last server revision merged into it. `unavailable` lists
+ * the boards the server left out because of their size; their projects show a notice instead of stale notes.
+ */
+export interface DashboardData { revision: string | null; changedAt: number; projects: BoardProject[]; boards: BoardSnapshot[]; unavailable?: UnavailableBoard[] }
 
 export const POLL_FAST_MS = 5_000;
 export const POLL_IDLE_MS = 15_000;
@@ -15,12 +18,15 @@ export const IDLE_AFTER_MS = 60_000;
  */
 export function mergeDashboard(current: DashboardData | undefined, update: DashboardUpdate, now: number): DashboardData {
   if (update.unchanged) return current ?? { revision: null, changedAt: now, projects: [], boards: [] };
-  const boards = new Map((current?.boards ?? []).map(board => [board.projectId, board]));
+  // Every server reply with data carries the full list; a write result (or an older server) keeps the current one.
+  const unavailable = update.unavailable ?? current?.unavailable;
+  const hidden = new Set(unavailable?.flatMap(board => board.projectId ? [board.projectId] : []));
+  const boards = new Map((current?.boards ?? []).filter(board => !hidden.has(board.projectId)).map(board => [board.projectId, board]));
   for (const next of update.boards) {
     const previous = boards.get(next.projectId);
-    if (!previous || next.revision >= previous.revision) boards.set(next.projectId, next);
+    if (!hidden.has(next.projectId) && (!previous || next.revision >= previous.revision)) boards.set(next.projectId, next);
   }
-  return { revision: update.revision ?? null, changedAt: now, projects: update.projects ?? current?.projects ?? [], boards: [...boards.values()] };
+  return { revision: update.revision ?? null, changedAt: now, projects: update.projects ?? current?.projects ?? [], boards: [...boards.values()], unavailable };
 }
 
 /** Applies a write result locally. The server revision stays, so the next poll still reports what changed. */

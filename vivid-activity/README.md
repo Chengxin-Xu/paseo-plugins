@@ -54,8 +54,10 @@ The plugin makes no network requests, writes no files and starts no processes.
 
 - The server part reads the projected timeline of the agent you are viewing inside the daemon and returns a
   compact fold index (position, end time, kind, status and category of each row) to the app.
-- Image previews read the image file only from the agent's working directory or the system temp directory,
-  regular files up to 3 MB, with links resolved before the check (`server/read-image.ts`).
+- Image previews read the image file only from the working directory of the agent whose chat shows it or from
+  the system temp directory (`os.tmpdir()`, plus `/tmp` on macOS): regular files up to 3 MB, links resolved before
+  the check, the opened file checked again, and no more than the first 32 bytes of a file that is not an image
+  (`server/read-image.ts`).
 - Expanding a row for Paseo's create agent tool reads the new agent's recent timeline.
 
 [OVERVIEW.md](OVERVIEW.md) lists the details and known limits, including why it cannot be combined with other

@@ -1,7 +1,9 @@
 // Host-typed coverage: every item below was produced by Paseo 0.11.1 itself — Claude Code frames normalised by the
 // real Claude provider (a custom provider extending claude, driven by a scripted stream-json CLI), the fakeacp ACP agent,
 // and Codex fileChange/command/MCP thread items run through the installed Codex mapper. Provider ids and the demo
-// project path were renamed to the built-in `claude` and /home/user/demo-app afterwards; the items are unchanged.
+// project path were renamed to the built-in `claude` and /home/user/demo-app afterwards. Agent and message ids are
+// synthetic (a0000000-…, b0000000-…) and the timestamps start at 2026-01-01T09:00:00Z with their original gaps; the
+// items are otherwise unchanged.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

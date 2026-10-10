@@ -3,7 +3,7 @@ import { Icon, Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/cl
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text, View, type LayoutChangeEvent } from "react-native";
-import { INBOX_PROJECT_ID, readDashboardRpc, writeBoardRpc, type BoardItem, type BoardProject, type BoardSnapshot, type NoteKind, type TaskStatus, type WriteBoardInput } from "../shared/board";
+import { BOARD_FILE_LIMIT_BYTES, INBOX_PROJECT_ID, OVERVIEW_LIMIT_BYTES, readDashboardRpc, writeBoardRpc, type BoardItem, type BoardProject, type BoardSnapshot, type NoteKind, type TaskStatus, type UnavailableBoard, type WriteBoardInput } from "../shared/board";
 import { NoteDetail } from "./detail";
 import { EditorForm, editorFor, newFields, type Editor } from "./editor";
 import { ActionMenu, Banner, Button, EmptyState, IconButton, SearchField, Segmented, Skeleton, Spacer, SplitView, SyncStatus, Toolbar, fontSize, hairline, radius, relativeTime, space, toneColor, type MenuAction } from "./kit";
@@ -18,6 +18,7 @@ type Sheet = { mode: "detail"; key: string } | { mode: "editor"; editor: Editor;
 type Section = { key: string; title: string; items: BoardItem[]; collapsible: boolean; status?: TaskStatus; projectId?: string };
 const NO_PROJECTS: BoardProject[] = [];
 const NO_BOARDS: BoardSnapshot[] = [];
+const NO_UNAVAILABLE: UnavailableBoard[] = [];
 const ALL_PROJECTS: BoardProject = { id: ALL_PROJECT_ID, name: "全部项目", path: "" };
 /** Below this width (or when the host says so) one pane at a time: lists with collapsible sections, sheets for detail. */
 const COMPACT_BELOW = 760;
@@ -29,6 +30,19 @@ function requestId() { return `notes-${Date.now().toString(36)}-${(++localReques
 function errorText(error: unknown) { return error instanceof Error ? error.message : "操作没有完成，请重试。"; }
 function compareItems(a: BoardItem, b: BoardItem) { return Number(b.pinned) - Number(a.pinned) || Number(b.priority === "high") - Number(a.priority === "high") || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id); }
 function byDeletion(a: BoardItem, b: BoardItem) { return (b.deletedAt ?? "").localeCompare(a.deletedAt ?? "") || compareItems(a, b); }
+const megabytes = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
+/** Why boards were left out of the overview (they exceed the size limits); the other projects still show. */
+function unavailableReason(boards: readonly UnavailableBoard[]) {
+  if (boards.every(board => board.reason === "file")) return `手记文件超过 ${megabytes(BOARD_FILE_LIMIT_BYTES)}`;
+  if (boards.every(board => board.reason === "total")) return `全部项目的手记合计超过 ${megabytes(OVERVIEW_LIMIT_BYTES)}`;
+  return "手记数据超过上限";
+}
+const UNAVAILABLE_ADVICE = "其余项目照常显示；请先备份，再精简这些手记。";
+function unavailableText(boards: readonly UnavailableBoard[], projectName: (projectId: string) => string) {
+  const named = boards.flatMap(board => board.projectId ? [`「${projectName(board.projectId)}」`] : []), unnamed = boards.length - named.length;
+  const who = [...named.slice(0, 3), ...(unnamed ? [`${unnamed} 个已移除的项目`] : [])].join("、") + (named.length > 3 ? ` 等 ${boards.length} 个项目` : "");
+  return `${who}的手记暂时无法显示：${unavailableReason(boards)}。${UNAVAILABLE_ADVICE}`;
+}
 
 export function NotesSurface(props: PluginSurfaceProps) { return <NotesApp key={props.host.id} {...props} />; }
 
@@ -134,6 +148,8 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
 
   const projects = board.data?.projects ?? NO_PROJECTS;
   const boards = board.data?.boards ?? NO_BOARDS;
+  const unavailable = board.data?.unavailable ?? NO_UNAVAILABLE;
+  const unavailableIds = useMemo(() => new Set(unavailable.flatMap(entry => entry.projectId ? [entry.projectId] : [])), [unavailable]);
   // One stable object per project (memoized rows compare it by reference); boards without a listed project get a stand-in.
   const projectOf = useMemo(() => {
     const known = new Map(projects.map(project => [project.id, project])), standIns = new Map<string, BoardProject>();
@@ -294,7 +310,10 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   ];
 
   // ── Content ────────────────────────────────────────────────────────────────────────────────────────────
+  const scopeUnavailable = unavailable.filter(entry => entry.projectId === scopeId);
   const empty = () => {
+    // Notes that exist but are too large to show must not read as an empty project.
+    if (scopeUnavailable.length) return <EmptyState theme={theme} icon="TriangleAlert" tone="warning" title={`「${scope.name}」的手记暂时无法显示`} message={`${unavailableReason(scopeUnavailable)}。${UNAVAILABLE_ADVICE}`} />;
     if (needle) return <EmptyState theme={theme} icon="Search" tone={trash ? "neutral" : KIND_TONES[kind]} title={`没有匹配「${search.trim()}」的${trash ? "手记" : KIND_LABELS[kind]}`} action={{ label: "清除搜索", onPress: () => setSearch("") }} />;
     if (trash) return <EmptyState theme={theme} icon="Trash2" tone="neutral" title="回收站是空的" />;
     return <EmptyState theme={theme} icon={KIND_ICONS[kind]} tone={KIND_TONES[kind]} title={`${scopeId === ALL_PROJECT_ID ? "" : `「${scope.name}」`}还没有${KIND_LABELS[kind]}`} action={{ label: createLabel, icon: "Plus", onPress: () => openCreate() }} />;
@@ -345,6 +364,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     {toolbar}
     {operationError && !sheet ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="danger" message={operationError} onDismiss={() => setOperationError(null)} /></View> : null}
     {board.isError && board.data ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="warning" message="同步中断，当前显示上次读取的内容。" action={{ label: "重试", onPress: () => void refresh() }} /></View> : null}
+    {unavailable.length > 0 && scopeUnavailable.length === 0 ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="warning" message={unavailableText(unavailable, projectName)} /></View> : null}
     <View style={{ flex: 1, minHeight: 0 }}>{content}</View>
 
     <Modal title={sheetTitle} open={sheet !== null && (sheet.mode === "editor" || sheetItem !== null)} onOpenChange={open => { if (!open) closeSheet(); }}>
@@ -362,7 +382,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     </Modal>
     <Modal title="选择项目" open={scopeOpen} onOpenChange={setScopeOpen}>
       <Modal.Content contentContainerStyle={{ paddingHorizontal: space.md, paddingVertical: space.md, gap: 0 }}>
-        <ProjectList theme={theme} projects={scopeOptions} selectedId={scopeId} counts={perProject} loading={board.isPending} onSelect={project => { setScopeId(project.id); setScopeOpen(false); }} />
+        <ProjectList theme={theme} projects={scopeOptions} selectedId={scopeId} counts={perProject} unavailable={unavailableIds} loading={board.isPending} onSelect={project => { setScopeId(project.id); setScopeOpen(false); }} />
       </Modal.Content>
     </Modal>
     <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menuActions} />

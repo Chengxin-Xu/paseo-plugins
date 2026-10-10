@@ -83,3 +83,21 @@ test("frames without an observatory request id are never parsed", () => {
   finally { JSON.parse = parse; }
   assert.equal(parsed, 0);
 });
+test("requests queued while the host session is closed leave the queue when they time out, and the queue has its own cap", async () => {
+  let handler: (message: unknown) => void = () => {};
+  const sent: Array<{ data: string }> = [];
+  const bridge = createProviderSubagentBridge({ send(message) { sent.push(message as { data: string }); }, listen(listener) { handler = listener; return () => {}; } }, 20);
+  handler({ type: "paseo_close" });
+  const timedOut = Array.from({ length: 5 }, () => bridge.request({ type: "read" }, "answer"));
+  assert.equal(bridge.queued, 5);
+  for (const request of timedOut) await assert.rejects(request, /宿主未响应/);
+  assert.equal(bridge.queued, 0, "timed-out requests are removed from the queue");
+  // While the session stays closed, at most 16 requests wait; the rest fail at once instead of piling up.
+  const waiting = Array.from({ length: 16 }, () => bridge.request({ type: "read" }, "answer"));
+  await assert.rejects(bridge.request({ type: "read" }, "answer"), /繁忙/);
+  assert.equal(bridge.queued, 16);
+  handler({ type: "paseo_frame", isBinary: false, data: JSON.stringify({ type: "session", message: { type: "status", payload: {} } }) });
+  assert.equal(sent.length, 16, "only live requests are sent after the session re-attaches"); assert.equal(bridge.queued, 0);
+  bridge.dispose();
+  for (const request of waiting) await assert.rejects(request);
+});

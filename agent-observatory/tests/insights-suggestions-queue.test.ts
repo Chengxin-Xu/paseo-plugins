@@ -122,7 +122,8 @@ function fakeProvider(options: { output: string; archived?: boolean; gate?: Prom
     waitForFinish: async () => ({ status: "idle", lastMessage: options.output, final: { lastUsage: { inputTokens: 20, outputTokens: 9, totalCostUsd: 0.4 } } }),
     archive: async () => { archives++; return { archivedAt: at }; } });
   const api = {
-    config: { get: async () => ({ config: { providers: {}, agentProfiles: [{ id: "reader", name: "Reader", provider: "codex-fake", model: "m", modeId: "full-access" }] } }) },
+    // A custom provider that extends Codex: only Codex gets the read-only sandbox options.
+    config: { get: async () => ({ config: { providers: { "codex-fake": { extends: "codex" } }, agentProfiles: [{ id: "reader", name: "Reader", provider: "codex-fake", model: "m", modeId: "full-access" }] } }) },
     providers: { snapshot: async () => ({ entries: [{ provider: "codex-fake", enabled: true, status: "available", label: "Codex Fake", modes: [{ id: "auto" }, { id: "full-access" }], models: [{ id: "m", label: "Model", isDefault: true }] }] }) },
     agents: { list: async () => { if (options.gate) await options.gate; return { entries: [], pageInfo: { hasMore: false } }; },
       create: async (input: unknown) => { creations.push(input); return handle(); },

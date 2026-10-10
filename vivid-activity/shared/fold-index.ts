@@ -120,6 +120,39 @@ export function hostToolDisposition(provider: string, item: { name: string; deta
   return null;
 }
 
+/**
+ * 0.4.1: the most a tool call may hold (text of its detail and metadata, plus one per value) to be classified. The index
+ * of an Agent on screen is read again every 15 s, and a bigger call would be parsed again each time; it is counted as
+ * "other" instead. Ordinary calls stay far below it (Claude Code reads files up to 256 KB, MCP results stop near 100 000
+ * characters), so this only changes the count in a fold summary for a call of more than a million characters.
+ */
+export const MAX_CLASSIFY_CHARS = 1_000_000;
+
+/** Whether `value` holds more than `budget` characters of strings and keys, counting one per value. Stops once it does. */
+export function exceedsTextBudget(value: unknown, budget: number): boolean {
+  let left = budget - 1;
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    if (left < 0) return true;
+    const next = stack.pop();
+    if (typeof next === "string") {
+      left -= next.length;
+    } else if (Array.isArray(next)) {
+      for (const item of next) {
+        if (--left < 0) return true;
+        stack.push(item);
+      }
+    } else if (next !== null && typeof next === "object") {
+      for (const key in next) {
+        left -= key.length + 1;
+        if (left < 0) return true;
+        stack.push((next as Record<string, unknown>)[key]);
+      }
+    }
+  }
+  return left < 0;
+}
+
 /** The row look the client draws for a tool call (apply_patch rows draw as edits). */
 export function toolLook(item: Pick<ToolItem, "name" | "detail" | "metadata">): LookKey {
   if (readTaskNotice(item)) return "shell";
@@ -159,10 +192,12 @@ export function wireRowFromEntry(entry: unknown): WireRow | null {
   if (!claimsToolCall(tool)) return { ...base, k: "b", w: tool.detail?.type === "plan" ? "plan" : "speak" };
   const status: StepStatus = ["running", "completed", "failed", "canceled"].includes(tool.status) ? tool.status : "completed";
   let look: LookKey = "other";
-  try {
-    look = toolLook(tool);
-  } catch {
-    look = "other";
+  if (!exceedsTextBudget([tool.detail, tool.metadata], MAX_CLASSIFY_CHARS)) {
+    try {
+      look = toolLook(tool);
+    } catch {
+      look = "other";
+    }
   }
   const notice = readTaskNotice(tool);
   return {

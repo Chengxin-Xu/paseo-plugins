@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { completionSnoozeSchema, defaultViewPreferences, getPreferences, savedViewSchema, updatePreferences, viewPreferencesSchema,
   type CompletionSnooze, type PreferencesSnapshot, type PreferencesUpdate, type PreferencesUpdateResult, type SavedView, type ViewPreferences } from "../shared/preferences";
 import { telemetryDirectory } from "./telemetry";
+import { ensurePrivateDirectory } from "./paseo-home";
 
 const storedViewSchema = z.object({ key: z.string().min(1).max(256), updatedAt: z.iso.datetime({ offset: true }), view: viewPreferencesSchema, savedViews: z.array(savedViewSchema).max(12) });
 const fileSchema = z.object({ version: z.literal(1), revision: z.number().int().nonnegative(), views: z.array(storedViewSchema).max(32), snoozes: z.array(completionSnoozeSchema).max(2000) });
@@ -108,7 +109,7 @@ export class PreferencesStore {
   private async persist() {
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     try {
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await ensurePrivateDirectory(this.directory);
       if (this.corrupt) { try { await rename(this.file, `${this.file}.corrupt`); } catch { /* unreadable/absent original */ } this.corrupt = false; }
       const handle = await open(temporary, "wx", 0o600);
       try {

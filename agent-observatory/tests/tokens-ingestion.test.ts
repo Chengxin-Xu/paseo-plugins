@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -129,4 +129,64 @@ test("dedupe keys expire after the initial import and older copied history stays
   await writeFile(join(root, "resumed.jsonl"), line(assistant("old", old, { sessionId: "resumed" })) + line(user(NOW - 2000)) + line(assistant("fresh", NOW - 1000, { sessionId: "resumed" })));
   await ingester.poll(true);
   assert.deepEqual([...calls.values()].map(call => call.at).sort(), [old, NOW - 5000, NOW - 1000]);
+}));
+
+const capped = async (limits: ConstructorParameters<typeof TokenIngester>[0]["limits"], run: (root: string, ingester: TokenIngester, calls: Map<string, LedgerCall>) => Promise<void>) => {
+  const root = await mkdtemp(join(tmpdir(), "tokens-caps-")), calls = new Map<string, LedgerCall>();
+  const ingester = new TokenIngester({ roots: [{ source: "claude", path: root }], now: () => NOW, limits, onCall: call => { calls.set(call.key, call); } });
+  try { await run(root, ingester, calls); } finally { await ingester.close(); await rm(root, { force: true, recursive: true }); }
+};
+
+test("past the file cap only the newest logs are tracked, and the cut is reported", () => capped({ files: 2 }, async (root, ingester, calls) => {
+  for (const [index, name] of ["old", "mid", "new"].entries()) {
+    await writeFile(join(root, `${name}.jsonl`), line(assistant(name, NOW - 5000 + index)));
+    await utimes(join(root, `${name}.jsonl`), new Date(NOW - 60_000 + index * 1000), new Date(NOW - 60_000 + index * 1000));
+  }
+  await ingester.backfillAll();
+  assert.deepEqual([...ingester.files.keys()].map(path => path.split("/").at(-1)).sort(), ["mid.jsonl", "new.jsonl"]);
+  assert.deepEqual([calls.size, ingester.truncated.files, ingester.roots[0].files], [2, true, 3]);
+}));
+
+test("past the byte budget a log is not imported; smaller ones still are", () => capped({ bytes: 4096 }, async (root, ingester, calls) => {
+  await writeFile(join(root, "big.jsonl"), line(assistant("big", NOW - 4000)) + " ".repeat(5000) + "\n");
+  await writeFile(join(root, "small.jsonl"), line(assistant("small", NOW - 3000)));
+  await ingester.backfillAll();
+  assert.deepEqual([[...calls.values()].map(call => call.key).length, ingester.truncated.bytes], [1, true]);
+  assert.equal([...ingester.files.keys()].some(path => path.endsWith("big.jsonl")), false);
+}));
+
+test("a scan stops at its entry budget, says so, and keeps the files it did not reach", () => capped({ scanEntries: 4 }, async (root, ingester) => {
+  await mkdir(join(root, "a"), { recursive: true }); await mkdir(join(root, "b"), { recursive: true });
+  await writeFile(join(root, "a", "one.jsonl"), line(assistant("one", NOW - 5000)));
+  await writeFile(join(root, "b", "two.jsonl"), line(assistant("two", NOW - 4000)));
+  await ingester.backfillAll();
+  assert.equal(ingester.truncated.scan, false); assert.equal(ingester.files.size, 2);
+  for (let index = 0; index < 6; index++) await writeFile(join(root, "a", `noise-${index}.txt`), "x");
+  await ingester.scan();
+  assert.equal(ingester.truncated.scan, true);
+  assert.equal(ingester.files.size, 2, "files the shortened walk did not reach stay tracked");
+}));
+
+test("the dedupe index keeps its newest keys under the cap and raises its floor, so old copies are not counted twice", () => capped({ index: 10 }, async (root, ingester, calls) => {
+  await writeFile(join(root, "s.jsonl"), Array.from({ length: 20 }, (_, index) => line(assistant(`m${index}`, NOW - 100_000 + index * 1000))).join(""));
+  await ingester.backfillAll();
+  assert.equal(calls.size, 20); assert.ok(ingester.seen.size <= 10); assert.equal(ingester.truncated.index, true);
+  assert.ok((ingester.seenFloor ?? 0) > NOW - 100_000);
+  // A copy of the oldest calls in a new file is history, not new usage.
+  await writeFile(join(root, "copy.jsonl"), line(assistant("m0", NOW - 100_000, { sessionId: "copy" })));
+  await ingester.poll(true);
+  assert.equal(calls.size, 20);
+}));
+
+test("a tracked log replaced by a symlink is not followed", async () => fixture(async (root, ingester, calls) => {
+  const outside = await mkdtemp(join(tmpdir(), "tokens-outside-"));
+  try {
+    await writeFile(join(root, "s.jsonl"), line(assistant("a", NOW - 5000)));
+    await ingester.backfillAll(); assert.equal(calls.size, 1);
+    await writeFile(join(outside, "other.jsonl"), line(assistant("a", NOW - 5000)) + line(assistant("outside", NOW - 1000)));
+    await rm(join(root, "s.jsonl")); await symlink(join(outside, "other.jsonl"), join(root, "s.jsonl"));
+    await ingester.poll(false);
+    assert.equal([...calls.keys()].length, 1, "nothing is read through the link");
+    assert.equal(ingester.roots[0].error, null);
+  } finally { await rm(outside, { recursive: true, force: true }); }
 }));

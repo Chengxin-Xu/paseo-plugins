@@ -108,9 +108,28 @@ export const tokenSnapshotSchema = z.object({
     /** First import of existing logs; counts grow while it runs. */
     backfill: z.object({ done: z.boolean(), files: count, filesDone: count, bytes: count, bytesDone: count }),
     roots: z.array(z.object({ source: z.enum(TOKEN_SOURCES), path: z.string().max(1024), files: count, error: z.string().max(240).nullable() })).max(8),
+    /** A budget cut the import (2.12): too many logs, too many bytes, an oversized dedupe index, or a scan stopped early. */
+    truncated: z.object({ files: z.boolean(), bytes: z.boolean(), index: z.boolean(), scan: z.boolean() }).optional(),
   }),
 });
 export type TokenSnapshot = z.infer<typeof tokenSnapshotSchema>;
+
+/**
+ * Budgets of the log import (server/tokens/ingester). The defaults are far above a heavy host (about 600 logs, 4.7 GB,
+ * 61,000 dedupe keys and 1,600 directory entries in October 2026), so they only stop pathological trees:
+ * `files` logs tracked at once (the newest win); `bytes` their total size, i.e. what a first import may read; `index`
+ * dedupe keys kept (the newest; older calls then count as copied history); `scanEntries` directory entries one scan visits.
+ */
+export const TOKEN_IMPORT_LIMITS = { files: 20_000, bytes: 64 * 1024 ** 3, index: 750_000, scanEntries: 250_000 } as const;
+export type TokenImportLimits = { -readonly [Key in keyof typeof TOKEN_IMPORT_LIMITS]: number };
+const wan = (count: number) => `${count / 10_000} 万`;
+/** Why the Token page is incomplete, in Chinese, or null when no budget cut the import. */
+export function tokenTruncationNotice(truncated: { files: boolean; bytes: boolean; index: boolean; scan: boolean } | undefined, limits: TokenImportLimits = TOKEN_IMPORT_LIMITS): string | null {
+  if (!truncated) return null;
+  const reasons = [truncated.files ? `日志文件超过 ${wan(limits.files)}个，只统计最新的部分` : null, truncated.bytes ? `日志总量超过 ${limits.bytes / 1024 ** 3} GB，更早的文件没有导入` : null,
+    truncated.scan ? `日志目录条目超过 ${wan(limits.scanEntries)}个，本次扫描提前结束` : null, truncated.index ? `去重索引超过 ${wan(limits.index)}条，最早的记录已截断` : null].filter(Boolean);
+  return reasons.length ? `统计不完整：${reasons.join("；")}。` : null;
+}
 
 const revision = z.string().min(1).max(80);
 const offset = z.number().int().min(-840).max(840);

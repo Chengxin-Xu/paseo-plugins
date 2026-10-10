@@ -16,7 +16,8 @@ export const sessionSchema = z.object({
   settings:browserSettingsSchema.optional(),runtime:runtimeSchema.optional(),health:healthSchema.nullable().optional(),
   activity:z.array(activitySchema).optional(),
 });
-export const workspaceSchema = z.object({id:workspaceIdSchema,title:z.string(),cwd:z.string(),projectId:z.string().nullable().optional(),projectTitle:z.string().optional()});
+// cwd is no longer sent (0.9.2); it stays optional so a client still parses an older server's reply.
+export const workspaceSchema = z.object({id:workspaceIdSchema,title:z.string(),cwd:z.string().optional(),projectId:z.string().nullable().optional(),projectTitle:z.string().optional()});
 export const linkedAgentSchema = z.object({id:z.string(),title:z.string(),status:z.string(),provider:z.string(),needsPermission:z.boolean()});
 export const overviewItemSchema = z.object({workspace:workspaceSchema,session:sessionSchema,agent:linkedAgentSchema.nullable(),observedAt:z.number()});
 // A client that sends the revision it renders receives only {unchanged, revision, checkedAt} until the summary changes.

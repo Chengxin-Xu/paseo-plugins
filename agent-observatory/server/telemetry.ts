@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
+import { ensurePrivateDirectory, resolvePaseoHome } from "./paseo-home";
 import {
   agentTelemetrySchema,
   telemetryEventSchema,
@@ -68,10 +68,9 @@ export interface TelemetryStoreOptions {
   coverageWriteMs?: number;
 }
 
+/** `$PASEO_HOME/plugin-data/agent-observatory`, with the same PASEO_HOME rules as the schedule reader (./paseo-home). */
 export function telemetryDirectory(): string {
-  const configured = process.env.PASEO_HOME?.trim();
-  const paseoHome = configured && isAbsolute(configured) ? configured : join(homedir(), ".paseo");
-  return join(paseoHome, "plugin-data", "agent-observatory");
+  return join(resolvePaseoHome(), "plugin-data", "agent-observatory");
 }
 
 function identifierKey(value: string | null, kind: "turn" | "permission"): string {
@@ -364,7 +363,7 @@ export class TelemetryStore {
       if (digest === this.lastWrittenDigest) return;
       const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await ensurePrivateDirectory(this.directory);
         const handle = await open(temporary, "wx", 0o600);
         try {
           await handle.writeFile(payload, "utf8");

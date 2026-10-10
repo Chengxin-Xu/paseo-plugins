@@ -20,18 +20,19 @@ function host(){
     before:(name:string,handler:Handler)=>{before.set(name,handler);return()=>{};},
     registerSettings(){},registerProvider(){},
   } as unknown as PluginServerContext;
-  const restored:string[][]=[],frames:unknown[][]=[];
+  const restored:string[][]=[],frames:unknown[][]=[],directories:[string,string][]=[];
   const manager={
     restore:async(ids:string[])=>{restored.push(ids);},
+    setWorkspaceDirectory:(id:string,directory:string)=>{directories.push([id,directory]);},
     frame:async(...args:unknown[])=>{frames.push(args);return {sessionRevision:'r',frame:null};},
     state:async(id:string)=>session(id),dataRoot:'/nonexistent/server-browser-hooks-test',close:async()=>{},
   } as unknown as BrowserManager;
-  return {server,rpc,events,before,manager,restored,frames};
+  return {server,rpc,events,before,manager,restored,frames,directories};
 }
 const openRequest={agentId:'agent-1',workspaceId:'one',provider:'claude',cwd:'/work/one',reason:'resume',purpose:'interactive',env:{}};
 
 test('agent session open returns at once, even while the workspace listing hangs or fails',async()=>{
-  const {server,before,events,manager,restored}=host();
+  const {server,before,events,manager,restored,directories}=host();
   let listCalls=0;const pending:{resolve:(value:unknown)=>void;reject:(error:Error)=>void}[]=[];
   const paseo={workspaces:{list:()=>{listCalls++;return new Promise((resolve,reject)=>{pending.push({resolve,reject});});}}};
   const cleanup=contribute(server,{manager});
@@ -47,13 +48,14 @@ test('agent session open returns at once, even while the workspace listing hangs
   pending[1].resolve({entries:[workspace('one'),workspace('two')],pageInfo:{hasMore:false}});
   await tick();await tick();
   assert.deepEqual(restored,[['one','two']]);
+  assert.deepEqual(directories,[['one','/work/one'],['two','/work/two']],'restoration tells the manager each workspace directory for upload checks');
   open({request:openRequest},{paseo,signal:new AbortController().signal});
   assert.equal(listCalls,2,'restoration runs once per plugin process');
   await (cleanup as ()=>Promise<void>)();
 });
 
 test('panel RPCs still validate the workspace, share the cached listing and see lifecycle invalidation',async()=>{
-  const {server,rpc,events,manager,frames}=host();
+  const {server,rpc,events,manager,frames,directories}=host();
   let listCalls=0,entries=[workspace('one')];
   const paseo={workspaces:{list:async()=>{listCalls++;return {entries,pageInfo:{hasMore:false}};}}};
   contribute(server,{manager,directory:new WorkspaceDirectory(60_000)});
@@ -61,6 +63,7 @@ test('panel RPCs still validate the workspace, share the cached listing and see 
   for(let index=0;index<20;index++)await frame({workspaceId:'one',after:null,quality:'sharp',maxWidth:780,maxHeight:1200,sessionRevision:'rev'},{paseo});
   assert.equal(listCalls,1,'twenty frame polls validate against one listing');
   assert.deepEqual(frames[0],['one',null,'sharp',{maxWidth:780,maxHeight:1200,sessionRevision:'rev'}]);
+  assert(directories.some(([id,directory])=>id==='one'&&directory==='/work/one'),'a validated workspace records its directory');
   await assert.rejects(Promise.resolve(frame({workspaceId:'other',after:null},{paseo})),/已不可用/);
   assert.equal(listCalls,2,'an unknown workspace is confirmed with one fresh listing');
   entries=[workspace('one'),workspace('new')];

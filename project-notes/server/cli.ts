@@ -4,16 +4,20 @@
  * 通过 esbuild 打包为 bin/notes.mjs（npm run build）。与插件子进程共用同一套 BoardStore
  * 与数据文件，写入受跨进程锁保护；前台打开的界面约每 5 秒（空闲一分钟后每 15 秒）按内容版本号检查，
  * 只取回变化的看板，会自动看到新记录。
+ *
+ * 读取的输入都有上限：--body-file 只读普通文件，先按 stat 的大小拒绝过大的文件再读；stdin 读到上限即停。
+ * 不限制路径：命令行由 Agent 在自己的 shell 里运行，它本来就能读这些文件，路径白名单挡不住任何东西。
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
-  INBOX_PROJECT_ID, fieldsSchema, kindSchema, statusSchema,
+  BOARD_FILE_LIMIT_BYTES, BODY_MAX_LENGTH, INBOX_DESCRIPTION, INBOX_PROJECT_ID, OVERVIEW_LIMIT_BYTES, fieldsSchema, kindSchema, statusSchema,
   type BoardItem, type BoardProject, type NoteFields, type WriteBoardInput,
 } from "../shared/schema";
 import { BoardStore, defaultStorageRoot, paseoHome } from "./store";
@@ -25,12 +29,17 @@ export interface CliDeps {
   /** Paseo 项目列表（不含随手记）。 */
   loadProjects: () => Promise<BoardProject[]>;
   stdout: (text: string) => void;
-  readStdin: () => Promise<string>;
+  /** Standard input as text, refused once it passes `maxBytes`. */
+  readStdin: (maxBytes: number) => Promise<string>;
   cwd: string;
   env: Record<string, string | undefined>;
 }
 
 const INBOX: BoardProject = { id: INBOX_PROJECT_ID, name: "随手记", path: "" };
+/** UTF-8 takes at most 3 bytes per UTF-16 unit, so a larger body file or stdin can never pass the body limit. */
+const MAX_BODY_BYTES = BODY_MAX_LENGTH * 3;
+/** The same bound as the `paseo project ls` output that projects.json stands in for. */
+const MAX_PROJECTS_BYTES = 8 * 1024 * 1024;
 const VALUE_OPTIONS = new Set(["project", "kind", "status", "title", "body", "body-file", "priority", "request-id", "limit"]);
 const FLAG_OPTIONS = new Set(["json", "pinned", "no-pinned", "all", "trash", "help", "high", "normal"]);
 
@@ -103,6 +112,7 @@ export const USAGE = `拾页 · 项目手记 命令行
                                  移入 / 移出回收站
 
 通用：--json 机器可读输出；--project 接受 inbox、prj_… ID、绝对路径或项目名称。
+正文最多 32000 字：--body-file 只读普通文件，- 读标准输入，都不超过 96000 字节。时间按 UTC 显示。
 数据目录：$PASEO_HOME/plugin-data/project-notes/boards（与插件界面同一份文件）。
 
 示例：
@@ -113,15 +123,64 @@ export const USAGE = `拾页 · 项目手记 命令行
   node bin/notes.mjs done 3f1c…
 `;
 
+/**
+ * Human-readable output escapes control characters that come from notes, project names or paths: ESC sequences could
+ * clear the screen, rewrite earlier lines or set the clipboard (OSC 52), CR and backspace overwrite what was printed.
+ * Newlines and tabs stay, and CRLF line ends read as newlines. `--json` output is unchanged.
+ */
+export function terminalSafe(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, char => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/** Times print in UTC and say so: the CLI runs in agent shells whose time zone says nothing about the reader's. */
+function formatTime(value: string): string {
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC` : value;
+}
+
 function formatItem(item: BoardItem, projectName: string): string {
   const marks = `${item.pinned ? "📌" : " "}${item.priority === "high" ? "!" : " "}`;
   const status = item.kind === "task" ? item.status.padEnd(5) : "     ";
   const trash = item.deletedAt ? " [回收站]" : "";
-  return `${item.kind.padEnd(6)} ${status} ${marks} ${item.id}  ${item.title}  · ${projectName}${trash}  (rev ${item.revision}, ${item.updatedAt.slice(0, 16).replace("T", " ")})`;
+  return `${item.kind.padEnd(6)} ${status} ${marks} ${item.id}  ${item.title}  · ${projectName}${trash}  (rev ${item.revision}, ${formatTime(item.updatedAt)})`;
 }
 
 function sortItems(items: BoardItem[]): BoardItem[] {
   return [...items].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/** Reads a stream as UTF-8 text and stops as soon as it passes `maxBytes`. */
+export async function readLimited(chunks: AsyncIterable<Buffer | string>, maxBytes: number, label: string): Promise<string> {
+  const buffers: Buffer[] = []; let total = 0;
+  for await (const chunk of chunks) {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    total += buffer.length;
+    if (total > maxBytes) throw new CliError(`${label}过大：超过 ${maxBytes} 字节的上限。`);
+    buffers.push(buffer);
+  }
+  return Buffer.concat(buffers).toString("utf8");
+}
+async function* fileChunks(handle: FileHandle): AsyncGenerator<Buffer> {
+  for (;;) {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    if (bytesRead === 0) return;
+    yield buffer.subarray(0, bytesRead);
+  }
+}
+/**
+ * Reads a regular file of at most `maxBytes`. Directories, devices and FIFOs are refused from `stat`, before anything
+ * opens them (opening a FIFO would block, /dev/zero never ends), and a file that grows meanwhile stops at the limit.
+ */
+async function readFileLimited(file: string, maxBytes: number, label: string, hint = ""): Promise<string> {
+  const info = await stat(file);
+  if (!info.isFile()) throw new CliError(`${label}不是普通文件：${file}。${hint}`);
+  if (info.size > maxBytes) throw new CliError(`${label}过大：${file} 有 ${info.size} 字节，上限 ${maxBytes} 字节。`);
+  const handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw new CliError(`${label}不是普通文件：${file}。${hint}`);
+    return await readLimited(fileChunks(handle), maxBytes, `${label.trim()} ${file} `);
+  } finally { await handle.close(); }
 }
 
 async function readBody(args: ParsedArgs, deps: CliDeps): Promise<string | undefined> {
@@ -129,8 +188,28 @@ async function readBody(args: ParsedArgs, deps: CliDeps): Promise<string | undef
   if (args.values.has("body")) return args.values.get("body")!;
   const file = args.values.get("body-file");
   if (file === undefined) return undefined;
-  if (file === "-") return deps.readStdin();
-  return readFile(path.resolve(deps.cwd, file), "utf8");
+  if (file === "-" || file === "/dev/stdin") return deps.readStdin(MAX_BODY_BYTES);
+  return readFileLimited(path.resolve(deps.cwd, file), MAX_BODY_BYTES, "正文文件", "要从管道读取正文请用 --body-file -。");
+}
+
+const megabytes = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
+/** Readable boards plus, by project, the ones left out of the overview for their size (a single board still reads with --project). */
+async function readEveryBoard(deps: CliDeps, projects: readonly BoardProject[]) {
+  const { entries, unavailable } = await deps.store.readEntries();
+  const byFile = new Map(projects.map(project => [deps.store.boardFile(project.id), project.id]));
+  return {
+    boards: entries.map(entry => entry.snapshot),
+    unavailable: unavailable.map(board => ({ projectId: board.projectId ?? byFile.get(board.file) ?? null, bytes: board.bytes, reason: board.reason })),
+  };
+}
+type Unavailable = Awaited<ReturnType<typeof readEveryBoard>>["unavailable"];
+function describeUnavailable(unavailable: Unavailable, nameOf: (projectId: string) => string): string {
+  const each = unavailable.map(board => {
+    const who = board.projectId ? `「${nameOf(board.projectId)}」` : "一个已移除的项目";
+    return board.reason === "file" ? `${who}（${megabytes(board.bytes)}，超过单个项目 ${megabytes(BOARD_FILE_LIMIT_BYTES)} 的上限）`
+      : `${who}（${megabytes(board.bytes)}，全部手记合计超过 ${megabytes(OVERVIEW_LIMIT_BYTES)}，可用 --project 单独查看）`;
+  });
+  return `另有 ${unavailable.length} 个项目的手记没有读取：${each.join("、")}。`;
 }
 
 async function projectsWithInbox(deps: CliDeps): Promise<BoardProject[]> { return [INBOX, ...(await deps.loadProjects())]; }
@@ -144,11 +223,12 @@ async function locateItem(id: string, args: ParsedArgs, deps: CliDeps, projects:
     if (!item) throw new CliError(`项目「${project.name}」里没有记录 ${id}。`);
     return { item, project };
   }
-  for (const board of await deps.store.readAll()) {
+  const { boards, unavailable } = await readEveryBoard(deps, projects);
+  for (const board of boards) {
     const item = board.items.find(x => x.id === id);
     if (item) return { item, project: nameOf(board.projectId) };
   }
-  throw new CliError(`没有找到记录 ${id}。`);
+  throw new CliError(`没有找到记录 ${id}。${unavailable.length ? describeUnavailable(unavailable, projectId => nameOf(projectId).name) + "记录在其中时请用 --project 指定项目。" : ""}`);
 }
 
 function describeZodError(error: z.ZodError): string {
@@ -158,21 +238,21 @@ function describeZodError(error: z.ZodError): string {
 export async function runCli(argv: readonly string[], deps: CliDeps): Promise<number> {
   const args = parseArgs(argv);
   const json = args.flags.has("json");
-  const emit = (human: string, data: unknown) => deps.stdout(json ? JSON.stringify(data, null, 2) + "\n" : human.endsWith("\n") ? human : human + "\n");
+  const emit = (human: string, data: unknown) => deps.stdout(json ? JSON.stringify(data, null, 2) + "\n" : terminalSafe(human.endsWith("\n") ? human : human + "\n"));
   if (args.command === "help" || args.flags.has("help")) { deps.stdout(USAGE); return 0; }
 
   if (args.command === "projects") {
     const projects = await projectsWithInbox(deps);
-    emit(projects.map(p => `${p.id}\t${p.name}\t${p.path || "（不归入具体项目）"}`).join("\n"), { projects });
+    emit(projects.map(p => `${p.id}\t${p.name}\t${p.path || `（${INBOX_DESCRIPTION}）`}`).join("\n"), { projects });
     return 0;
   }
 
   if (args.command === "list") {
     const projects = await projectsWithInbox(deps);
     const nameOf = (projectId: string) => projects.find(p => p.id === projectId)?.name ?? `历史项目 · ${projectId.slice(-8)}`;
-    const boards = args.values.has("project")
-      ? [await deps.store.read(resolveProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps.cwd).id)]
-      : await deps.store.readAll();
+    const { boards, unavailable } = args.values.has("project")
+      ? { boards: [await deps.store.read(resolveProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps.cwd).id)], unavailable: [] as Unavailable }
+      : await readEveryBoard(deps, projects);
     const kind = args.values.has("kind") ? kindSchema.parse(args.values.get("kind")) : undefined;
     const status = args.values.has("status") ? statusSchema.parse(args.values.get("status")) : undefined;
     const trash = args.flags.has("trash"); const all = args.flags.has("all");
@@ -183,7 +263,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     const total = items.length; if (limit) items = items.slice(0, limit);
     const lines = items.map(item => formatItem(item, nameOf(item.projectId)));
     if (limit && total > items.length) lines.push(`… 共 ${total} 条，仅显示前 ${items.length} 条`);
-    emit(lines.join("\n") || "（没有匹配的手记）", { total, items: items.map(item => ({ ...item, projectName: nameOf(item.projectId) })) });
+    if (!lines.length) lines.push("（没有匹配的手记）");
+    if (unavailable.length) lines.push(describeUnavailable(unavailable, nameOf));
+    emit(lines.join("\n"), {
+      total, items: items.map(item => ({ ...item, projectName: nameOf(item.projectId) })),
+      ...(unavailable.length ? { unavailable: unavailable.map(board => ({ ...board, projectName: board.projectId ? nameOf(board.projectId) : null })) } : {}),
+    });
     return 0;
   }
 
@@ -244,38 +329,35 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
 export async function loadPaseoProjects(env: Record<string, string | undefined>): Promise<BoardProject[]> {
   const errors: string[] = [];
   try {
-    const { stdout } = await promisify(execFile)("paseo", ["project", "ls", "--json"], { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = await promisify(execFile)("paseo", ["project", "ls", "--json"], { env: env as NodeJS.ProcessEnv, timeout: 15_000, maxBuffer: MAX_PROJECTS_BYTES });
     const rows = z.array(z.object({ projectId: z.string(), name: z.string(), path: z.string() })).parse(JSON.parse(stdout));
     return rows.map(row => ({ id: row.projectId, name: row.name, path: row.path }));
   } catch (e) { errors.push(`paseo project ls: ${(e as Error).message}`); }
   try {
-    const raw = await readFile(path.join(paseoHome(env), "projects", "projects.json"), "utf8");
+    const raw = await readFileLimited(path.join(paseoHome(env), "projects", "projects.json"), MAX_PROJECTS_BYTES, "projects.json ");
     const rows = z.array(z.object({ projectId: z.string(), rootPath: z.string(), displayName: z.string(), customName: z.string().nullable().optional(), archivedAt: z.string().nullable().optional() })).parse(JSON.parse(raw));
     return rows.filter(row => !row.archivedAt).map(row => ({ id: row.projectId, name: row.customName ?? row.displayName, path: row.rootPath }));
   } catch (e) { errors.push(`projects.json: ${(e as Error).message}`); }
   throw new CliError(`无法读取 Paseo 项目列表：${errors.join("；")}`);
 }
 
-async function readAllStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const deps: CliDeps = {
     store: new BoardStore(defaultStorageRoot()),
     loadProjects: () => loadPaseoProjects(process.env),
     stdout: text => process.stdout.write(text),
-    readStdin: readAllStdin,
+    readStdin: maxBytes => readLimited(process.stdin, maxBytes, "标准输入"),
     cwd: process.cwd(),
     env: process.env,
   };
+  // Error messages quote project names, paths and arguments: escaped like the rest of the human-readable output.
+  const fail = (message: string, code: number) => { process.stderr.write(terminalSafe(message) + "\n"); process.exitCode = code; };
   try { process.exitCode = await runCli(argv, deps); }
   catch (error) {
-    if (error instanceof CliError) { process.stderr.write(error.message + "\n"); process.exitCode = error.exitCode; }
-    else if (error instanceof z.ZodError) { process.stderr.write(`参数不合法：${describeZodError(error)}\n`); process.exitCode = 2; }
-    else { process.stderr.write(`${(error as Error).message ?? String(error)}\n`); process.exitCode = 1; }
+    if (error instanceof CliError) fail(error.message, error.exitCode);
+    else if (error instanceof z.ZodError) fail(`参数不合法：${describeZodError(error)}`, 2);
+    else fail((error as Error).message ?? String(error), 1);
   }
 }
 

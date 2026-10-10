@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { reasoningKey } from "./fold";
-import { claimsToolCall, foldIndexRpc, hostToolDisposition, indexRowFromWire, toolLook, wirePageFromEntries, wireRowFromEntry } from "./fold-index";
+import {
+  claimsToolCall,
+  exceedsTextBudget,
+  foldIndexRpc,
+  hostToolDisposition,
+  indexRowFromWire,
+  MAX_CLASSIFY_CHARS,
+  toolLook,
+  wirePageFromEntries,
+  wireRowFromEntry,
+} from "./fold-index";
 
 const entry = (seqStart: number, item: Record<string, unknown>, provider = "claude", timestamp = "2026-10-09T10:00:00.000Z") => ({
   provider,
@@ -70,6 +80,35 @@ describe("fold index rows", () => {
   it("draws apply_patch as edits", () => {
     const patch = "*** Begin Patch\n*** Add File: docs/a.md\n+# a\n*** End Patch";
     expect(toolLook({ name: "apply_patch", detail: { type: "unknown", input: { patch }, output: null } } as never)).toBe("write");
+  });
+
+  it("counts a tool call too big to classify as other, without parsing it (0.4.1)", () => {
+    const over = "x".repeat(MAX_CLASSIFY_CHARS);
+    const mcp = (input: unknown) => call("mcp__github__search_code", { type: "unknown", input, output: null });
+    const small = wireRowFromEntry(entry(30, mcp(JSON.stringify({ query: "TODO" }))));
+    expect(small).toMatchObject({ k: "t", key: "t:toolu_mcp__github__search_code" });
+    expect(small?.look).not.toBe("other");
+    expect(wireRowFromEntry(entry(31, mcp(JSON.stringify({ query: over }))))).toMatchObject({ k: "t", key: "t:toolu_mcp__github__search_code", look: "other" });
+    // Text in the output and in the metadata counts too.
+    expect(wireRowFromEntry(entry(32, call("Bash", { type: "shell", command: "ls", output: over })))).toMatchObject({ look: "other" });
+    expect(wireRowFromEntry(entry(33, call("Bash", { type: "shell", command: "ls" }, { metadata: { log: over } })))).toMatchObject({ look: "other" });
+    // Ordinary large calls are far below it: a 300 000-character read stays a read.
+    expect(wireRowFromEntry(entry(34, call("Read", { type: "read", filePath: "src/big.ts", content: "y".repeat(300_000) })))).toMatchObject({ look: "read" });
+    // Task rows and dropped rows are still told apart however big the call is.
+    expect(wireRowFromEntry(entry(35, call("TaskCreate", { type: "unknown", input: { subject: over } })))).toMatchObject({ k: "x" });
+  });
+
+  it("measures text with a budget and stops as soon as it is spent", () => {
+    expect(exceedsTextBudget("abc", 4)).toBe(false);
+    expect(exceedsTextBudget("abc", 3)).toBe(true);
+    expect(exceedsTextBudget({ a: [1, null, "xy"] }, 10)).toBe(false);
+    expect(exceedsTextBudget({ a: [1, null, "xy"] }, 6)).toBe(true);
+    expect(exceedsTextBudget(undefined, 0)).toBe(true);
+    const values = Array.from({ length: 2_000_000 }, () => 0);
+    const started = performance.now();
+    expect(exceedsTextBudget(values, 1_000)).toBe(true);
+    expect(exceedsTextBudget({ huge: "z".repeat(10_000_000) }, 1_000)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   it("keeps seqEnd only when the entry was updated after it began", () => {

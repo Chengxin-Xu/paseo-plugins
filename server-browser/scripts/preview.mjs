@@ -12,11 +12,20 @@ await writeFile(join(output, "index.html"), await readFile(join(root, "preview",
 console.log("Server browser fixture built (synthetic data, no daemon).");
 if (process.argv.includes("--serve")) {
   const server = createServer(async (request, response) => {
-    const pathname = new URL(request.url || "/", `http://127.0.0.1:${port}`).pathname;
+    // One bad request (an unparsable target, a missing build) answers with an error instead of stopping the preview.
+    let pathname;
+    try { pathname = new URL(request.url || "/", `http://127.0.0.1:${port}`).pathname; }
+    catch { response.writeHead(400); response.end(); return; }
     const file = ({ "/": "index.html", "/index.html": "index.html", "/app.js": "app.js" })[pathname];
     if (!file) { response.writeHead(404); response.end(); return; }
-    response.setHeader("Content-Type", file.endsWith("html") ? "text/html; charset=utf-8" : "application/javascript; charset=utf-8");
-    response.end(await readFile(join(output, file)));
+    try {
+      const body = await readFile(join(output, file));
+      response.setHeader("Content-Type", file.endsWith("html") ? "text/html; charset=utf-8" : "application/javascript; charset=utf-8");
+      response.end(body);
+    } catch {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    }
   });
   server.listen(port, "127.0.0.1", () => console.log(`Fixture http://127.0.0.1:${port}`));
   for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => server.close(() => process.exit(0)));

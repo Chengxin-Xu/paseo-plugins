@@ -53,4 +53,12 @@ describe("GitHub tool presentation", () => {
     };
     expect(githubOutputValue(output)).toEqual({ items: [{ name: "README.md" }] });
   });
+
+  it("gives up on crafted text quickly instead of retrying from every bracket (0.4.1)", () => {
+    const crafted = "result_count=1 " + "[".repeat(99_980) + "x";
+    const started = performance.now();
+    expect(githubOutputValue(crafted)).toBe(crafted);
+    expect(githubOutputValue({ content: [{ type: "text", text: crafted }] })).toBe(crafted);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
 });

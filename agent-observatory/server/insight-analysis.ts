@@ -3,12 +3,35 @@ import { insightReportSchema, type InsightReport, type InsightJob } from "../sha
 import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
 import { excerptText } from "../shared/evidence";
 
-/** Never forward common credential literals into a trajectory analysis prompt. */
+// Credential shapes that are masked before a trajectory leaves the host. Every pattern stays linear on hostile input: a JWT
+// only starts where the previous character cannot belong to it, and no two quantifiers compete for the same run. A value that
+// is already a `[… redacted]` marker is left alone.
+/** A PEM private key: header to footer, or to the end of the text when an excerpt cut the block. */
+const PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g;
+/** header.payload.signature, both JSON parts base64url (`eyJ` is `{"`); an unsigned token has an empty signature. */
+const JWT = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g;
+/** Vendor prefixes: OpenAI/Stripe-style sk-/pk-, GitHub gh?_ and github_pat_, xAI, AWS access keys, Google API keys, Slack, GitLab. */
+const PREFIXED = /\b(?:(?:sk|pk|gh[pousr]|github_pat|xai)[-_][A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,})/g;
+/** `password=…`, `"api_key": "…"`, `Authorization: Basic …`: the value after a credential key (any prefix, e.g. `DB_PASSWORD`). */
+const KEYED = /((?:authorization|api[_-]?key|access[_-]?(?:token|key)|refresh[_-]?token|secret[_-]?key|private[_-]?key|client[_-]?secret|password|passwd|secret)["']?\s*[=:]\s*["']?)(?:(?:Bearer|Basic|Token)[ \t]+)?(?!\[)[^\s"'`,;\]}]{8,}/gi;
+/**
+ * `token=…` / `GITHUB_TOKEN: …` (not `tokens`, `max_tokens`). Only values that look generated: token characters with a digit or at
+ * least 32 of them, not followed by `(`, `[` or `{` (code such as `const token = readToken(agent)` stays). The value is matched once
+ * (an atomic lookahead), so a long run cannot backtrack.
+ */
+const TOKEN = /(token["']?\s*[=:]\s*["']?)(?!\[)(?=[\w.~+/=%-]*[0-9]|[\w.~+/=%-]{32})(?=([\w.~+/=%-]{8,}))\2(?![(\[{])/gi;
+/** A bare `Bearer <token>` (headers in curl commands, logs). */
+const BEARER = /(\bBearer[ \t]+)(?!\[)[A-Za-z0-9._~+/=-]{16,}/gi;
+
+/** Never forward common credential literals into a trajectory analysis prompt. Not exhaustive: unknown formats pass through. */
 export function redactSecrets(text: string): string {
   return text
-    .replace(/\b(?:sk|pk|ghp|gho|github_pat|xai)[-_][A-Za-z0-9_-]{16,}\b/g, "[credential redacted]")
-    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "[credential redacted]")
-    .replace(/(\b(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret)\b["']?\s*[=:]\s*["']?)(?:Bearer\s+)?[^\s"'`,;\]}]{8,}/gi, "$1[redacted]")
+    .replace(PRIVATE_KEY, "[private key redacted]")
+    .replace(JWT, "[credential redacted]")
+    .replace(PREFIXED, "[credential redacted]")
+    .replace(KEYED, "$1[redacted]")
+    .replace(TOKEN, "$1[redacted]")
+    .replace(BEARER, "$1[redacted]")
     .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@");
 }
 export function assessTrajectory(trajectory: SessionTrajectory, trigger: "manual" | "auto", minimumTurns = 3, minimumTools = 3) {

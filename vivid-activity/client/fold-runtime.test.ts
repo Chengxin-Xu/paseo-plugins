@@ -329,6 +329,67 @@ describe("fold runtime", () => {
     expect(timeline.calls.at(-1)?.direction).toBe("after");
   });
 
+  it("forgets an Agent's index and roles once none of its rows has been on screen for forgetMs (0.4.1)", async () => {
+    const { clock, timeline, runtime, project, nudges } = setup();
+    timeline.append(user);
+    timeline.append(shell("a"));
+    timeline.append(shell("b"));
+    timeline.append(text);
+    timeline.setRunning(false);
+    project("t:a", "t:b");
+    runtime.acquire("agent-1");
+    await clock.advance(1_000);
+    expect(project("t:a", "t:b")).toEqual({ "t:a": "fold", "t:b": "hide" });
+    const nudged = nudges();
+    runtime.release("agent-1");
+    // Coming back within the window finds the folds in place: no flash of unfolded rows, only an incremental read.
+    await clock.advance(FOLD_TIMING.forgetMs - 1);
+    expect(runtime.debugAgent("agent-1")).not.toBeNull();
+    expect(runtime.roleFor("t:b").kind).toBe("hide");
+    await clock.advance(1);
+    expect(runtime.debugAgent("agent-1")).toBeNull();
+    expect(runtime.roleFor("t:a")).toEqual(SHOW);
+    expect(runtime.roleFor("t:b")).toEqual(SHOW);
+    // Nothing of it is on screen, so nothing is drawn again, and no timer is left behind.
+    expect(nudges()).toBe(nudged);
+    expect(clock.pending()).toBe(0);
+    // Back again: a fresh tail read folds it as before.
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    expect(timeline.calls.at(-1)?.direction).toBe("tail");
+    expect(runtime.roleFor("t:b").kind).toBe("hide");
+  });
+
+  it("keeps an Agent that comes back in time, and one whose read is still running (0.4.1)", async () => {
+    const { clock, timeline, runtime } = setup();
+    timeline.append(user);
+    timeline.append(shell("a"));
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs / 2);
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    expect(timeline.calls.at(-1)?.direction).toBe("after");
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs / 2 + 1);
+    expect(runtime.debugAgent("agent-1")).not.toBeNull();
+    // A read that hangs past the window: the Agent is forgotten only after it has settled.
+    let finish: () => void = () => {};
+    const original = timeline.rpc.bind(timeline);
+    timeline.rpc = (input) => new Promise((resolve) => {
+      finish = () => void original(input).then(resolve);
+    });
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs);
+    expect(runtime.debugAgent("agent-1")).not.toBeNull();
+    finish();
+    await clock.advance(FOLD_TIMING.releaseGraceMs);
+    expect(runtime.debugAgent("agent-1")).toBeNull();
+  });
+
   it("starts a live row of an autonomous turn at that turn's start, not at the last turn's reply (0.3.0-local.3)", async () => {
     const { clock, runtime } = setup();
     const HOUR = 3_600_000;

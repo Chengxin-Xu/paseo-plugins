@@ -1,9 +1,11 @@
 import type { BrowserPage } from './browser-types';
+import { BUDGETS, withTimeout } from './budgets';
 
 type Size={width:number;height:number};
 const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+/** The page's own size, or null when it cannot answer in time. */
 async function actual(page:BrowserPage):Promise<Size|null>{
-  try{return await page.evaluate<Size>('({width:innerWidth,height:innerHeight})');}catch{return null;}
+  try{return await withTimeout(page.evaluate<Size|null>('({width:innerWidth,height:innerHeight})'),BUDGETS.viewportProbeMs,()=>null);}catch{return null;}
 }
 function matches(a:Size|null,b:Size){return a?.width===b.width&&a.height===b.height;}
 

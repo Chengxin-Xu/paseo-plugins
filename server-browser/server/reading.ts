@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { BrowserPage } from './browser-types';
+import { BUDGETS, withTimeout } from './budgets';
 import { defaultRuntimeRoot } from './runtime';
 import type { BrowserReading, BrowserReadInput } from '../shared/browser';
 
@@ -22,11 +23,11 @@ function readerRuntime(root:string):ReaderRuntime {
   return value;
 }
 
-/** Read only the selected live page. No navigation, script execution from HTML, or credential access. */
-export async function readPageContent(page:BrowserPage,tabId:string,input:ReadingInput,runtimeRoot?:string):Promise<BrowserReading> {
+/** Read only the selected live page. No navigation, script execution from HTML, or credential access. A page that does not answer within timeoutMs fails the read. */
+export async function readPageContent(page:BrowserPage,tabId:string,input:ReadingInput,runtimeRoot?:string,timeoutMs=BUDGETS.pageReadMs):Promise<BrowserReading> {
   const selector=input.selector?.trim()??'';
   if(selector.length>500)throw new Error('页面区域选择器过长。');
-  const captured=await page.evaluate(`(() => {
+  const captured=await withTimeout(page.evaluate(`(() => {
     const selector=${JSON.stringify(selector)};
     let element;
     try { element=selector?document.querySelector(selector):document.body; }
@@ -41,7 +42,7 @@ export async function readPageContent(page:BrowserPage,tabId:string,input:Readin
     const html=clone.outerHTML??'';
     const visible=element.innerText??element.textContent??'';
     return {title:document.title,url:location.href,html:html.slice(0,2000000),visible:visible.slice(0,400000),sourceTruncated:html.length>2000000||visible.length>400000};
-  })()`) as Capture;
+  })()`) as Promise<Capture>,timeoutMs,()=>{throw new Error('网页长时间没有响应，读取已停止。');});
   let content=captured.visible.trim();
   let title=captured.title;
   let method:BrowserReading['method']='dom';

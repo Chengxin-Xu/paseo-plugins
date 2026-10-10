@@ -13,7 +13,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(launchOptionsRpc, (input, { paseo }) => loadLaunchOptions(paseo, input.projectId, () => projects.list(paseo)));
   server.handle(launchRpc, (input, { paseo }) => launches.start(input, paseo));
   server.handle(launchStatusRpc, (input, { paseo }) => launches.status(input.launchId, paseo));
-  server.handle(projectsRpc, async (_input, { paseo }) => ({ projects: boardProjects(await projects.list(paseo), "尚未归入项目的想法") }));
+  server.handle(projectsRpc, async (_input, { paseo }) => ({ projects: boardProjects(await projects.list(paseo)) }));
   server.handle(readBoardRpc, async ({ projectId }) => store.read(projectId));
   server.handle(readDashboardRpc, (input, { paseo }) => dashboard.read(paseo, input.revision));
   server.handle(writeBoardRpc, async input => store.write(input));

@@ -4,7 +4,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { vendorOf, type StatsRange } from "../shared/stats";
 import { bigNumber, percent, weekdayNames } from "../shared/stats-view";
-import { cacheHitRate, outputSpeed, tokenInput, tokenSourceNames, tokenTotal, type TokenCounts, type TokenLive, type TokenRow, type TokenSnapshot } from "../shared/tokens";
+import { cacheHitRate, outputSpeed, tokenInput, tokenSourceNames, tokenTotal, tokenTruncationNotice, type TokenCounts, type TokenLive, type TokenRow, type TokenSnapshot } from "../shared/tokens";
 import { Banner, EmptyState, ProjectMark, Segmented, Skeleton, fontSize, gradient, hairline, hue, hueFor, radius, relativeTime, space, withAlpha, type Hue } from "./kit";
 import { Card, CompositionBar, Donut, InlineBar, StackedColumns, TrendChart } from "./charts";
 import { GlassPill, IconDisk, StatsHeader, trackFor, vendorHue, vendorLabel } from "./stats-common";
@@ -193,7 +193,7 @@ function RhythmCard({ theme, snapshot }: { theme: PluginTheme; snapshot: TokenSn
 }
 
 function Coverage({ theme, snapshot }: { theme: PluginTheme; snapshot: TokenSnapshot }) {
-  const { backfill, roots, earliestAt } = snapshot.coverage;
+  const { backfill, roots, earliestAt } = snapshot.coverage, cut = tokenTruncationNotice(snapshot.coverage.truncated);
   const parts = [...roots.map(root => `${tokenSourceNames[root.source]} ${root.files} 个日志${root.error ? `（${root.error}）` : ""}`), earliestAt ? `最早 ${new Date(earliestAt).toLocaleDateString("zh-CN")}` : null, snapshot.paseoShare !== null ? `Paseo 会话占 ${percent(snapshot.paseoShare)}` : null].filter(Boolean);
   return <View style={{ gap: space.sm }}>
     {!backfill.done ? <View accessibilityLabel={`正在导入历史日志 ${percent(backfill.bytes ? backfill.bytesDone / backfill.bytes : 0)}`} style={{ gap: 6, padding: space.md, borderRadius: radius.lg, backgroundColor: hue(theme, "amber", "soft"), borderWidth: 1, borderColor: hue(theme, "amber", "line") }}>
@@ -208,6 +208,7 @@ function Coverage({ theme, snapshot }: { theme: PluginTheme; snapshot: TokenSnap
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>导入期间数字会持续变大，完成后就是完整历史。</Text>
     </View> : null}
     {roots.some(root => root.error) ? <Banner theme={theme} tone="warning" message={roots.filter(root => root.error).map(root => `${tokenSourceNames[root.source]}：${root.error}`).join("；")} /> : null}
+    {cut ? <Banner theme={theme} tone="warning" message={cut} /> : null}
     {parts.length ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, textAlign: "center" }}>{parts.join(" · ")}</Text> : null}
   </View>;
 }

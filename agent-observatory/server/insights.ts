@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { cancelInsight, getInsightState, getInsightReport, listInsightJobs, listInsightRunners, listInsightModels, insightReportSchema, setFindingFeedback, startInsight, updateInsightSettings,
+import { cancelInsight, getInsightState, getInsightReport, grokModelLabel, grokRunnerLabel, listInsightJobs, listInsightRunners, listInsightModels, insightReportSchema, setFindingFeedback, startInsight, updateInsightSettings,
   type FindingFeedback, type InsightJob, type InsightListState, type InsightSettings, type InsightRunner } from "../shared/insights";
 import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
 import { assessTrajectory, buildAnalysisRequest, InsightReportError, isUsefulInsightReport, parseGrokReport, redactSecrets, trajectoryFingerprint } from "./insight-analysis";
@@ -11,7 +11,7 @@ import { abortable, fetchTrajectory } from "./trajectory";
 import { telemetryDirectory } from "./telemetry";
 import { fitInsightReport, InsightStorage, retainInsightJobs, summarizeInsight, type InsightActivity, type InsightCooldown } from "./insight-storage";
 
-import { AUTO_RUNNER_LABEL, BUILTIN_INSIGHT_RUNNER, InsightRunnerRegistry, NO_RUNNER_ERROR, cleanupInsightAgents, runPaseoStructured } from "./insight-runner";
+import { AUTO_RUNNER_LABEL, BUILTIN_INSIGHT_RUNNER, InsightRunnerRegistry, NO_RUNNER_ERROR, cleanupInsightAgents, grokPlan, runPaseoStructured } from "./insight-runner";
 import { isInsightAgent, isKnownInsightAgent, markInsightAgent } from "./insight-runner-lifecycle";
 import { getInsightOverview, getInsightSuggestions, startInsightSuggestions, cancelInsightSuggestions, setActionFeedback,
   suggestionReportSchema, type OverviewDays, type SuggestionJob, type ActionFeedback } from "../shared/insight-overview";
@@ -85,7 +85,13 @@ export class InsightManager {
     if (!registry) { registry = new InsightRunnerRegistry(paseo, { now: this.now, findBinary: this.findBinary }); this.registries.set(paseo, registry); }
     return registry;
   }
-  async runners(paseo: PaseoApi) { await this.ready; this.attach(paseo); return this.registry(paseo).runners(); }
+  /** The built-in Grok option carries the saved model and effort when it is the configured runner, so picking it keeps them. */
+  async runners(paseo: PaseoApi) {
+    await this.ready; this.attach(paseo);
+    const runners = await this.registry(paseo).runners(), saved = this.settings.runner;
+    if (saved.kind === "grok") { const plan = grokPlan(saved); runners.builtin = { ...runners.builtin, runner: structuredClone(saved), label: plan.info.label, modelLabel: grokModelLabel(plan.model), thinkingLabel: plan.effort }; }
+    return runners;
+  }
   async models(paseo: PaseoApi, provider: string) { await this.ready; this.attach(paseo); return this.registry(paseo).models(provider); }
   async overview(paseo: PaseoApi, days: OverviewDays, utcOffsetMinutes: number, revision?: string) {
     await this.ready; this.attach(paseo);
@@ -99,7 +105,7 @@ export class InsightManager {
   }
   private async runnerLabel(paseo = this.lastPaseo) {
     const runner = this.settings.runner;
-    if (runner.kind === "grok" || (runner.kind === "auto" && this.binary)) return runner.kind === "auto" ? `${AUTO_RUNNER_LABEL} · ${BUILTIN_INSIGHT_RUNNER.label}` : BUILTIN_INSIGHT_RUNNER.label;
+    if (runner.kind === "grok" || (runner.kind === "auto" && this.binary)) return runner.kind === "auto" ? `${AUTO_RUNNER_LABEL} · ${BUILTIN_INSIGHT_RUNNER.label}` : grokRunnerLabel(runner);
     try {
       if (paseo) { const label = (await this.registry(paseo).resolve(runner)).info.label; return (runner.kind === "auto" ? `${AUTO_RUNNER_LABEL} · ${label}` : label).slice(0, 160); }
     } catch { /* preserve the configured identity when unavailable */ }
@@ -275,7 +281,7 @@ export class InsightManager {
           if (abort.signal.aborted || this.closed) break;
           if (!this.binary) await this.refreshBinary();
           if (!this.binary) throw new Error("未找到 Grok CLI。安装并登录后可刷新重试，或在「分析设置」里换一个执行器。");
-          const execution = this.run({ binary: this.binary, prompt: request.prompt, signal: abort.signal });
+          const execution = this.run({ binary: this.binary, prompt: request.prompt, signal: abort.signal, model: plan.model, effort: plan.effort ?? undefined });
           this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
           const output = await abortable(execution, abort.signal);
           if (abort.signal.aborted || this.closed) break;
@@ -325,8 +331,8 @@ export class InsightManager {
     const at = this.iso(), selection = runner ?? this.settings.runner;
     const job: SuggestionJob = { id: randomUUID(), createdAt: at, updatedAt: at, status: "queued", trigger, stage: "已加入建议队列",
       window: { days, from: at, to: at, reports: 0, findings: 0, agents: 0 },
-      runner: { ...BUILTIN_INSIGHT_RUNNER, kind: selection.kind, label: selection.kind === "grok" ? BUILTIN_INSIGHT_RUNNER.label : selection.kind === "auto" ? AUTO_RUNNER_LABEL : "等待解析分析执行器",
-        ...(selection.kind !== "grok" ? { provider: selection.kind === "provider" ? selection.provider : null, model: null, thinkingOptionId: null } : {}) },
+      runner: selection.kind === "grok" ? grokPlan(selection).info : { ...BUILTIN_INSIGHT_RUNNER, kind: selection.kind, label: selection.kind === "auto" ? AUTO_RUNNER_LABEL : "等待解析分析执行器",
+        provider: selection.kind === "provider" ? selection.provider : null, model: null, thinkingOptionId: null },
       usage: null, error: null, report: null, basis: [] };
     this.suggestionJobs.unshift(job); this.enqueue({ kind: "suggestion", id: job.id, paseo, runner }, trigger); this.changed(); this.kick();
     return structuredClone(job);
@@ -363,7 +369,7 @@ export class InsightManager {
         for (let attempt = 0; attempt < 2; attempt++) {
           if (abort.signal.aborted || this.closed) return;
           const execution = this.run({ binary: this.binary, prompt: buildSuggestionPrompt(context, { compact: attempt > 0 }),
-            signal: abort.signal, schema: suggestionReportSchema, systemPrompt: SUGGESTION_SYSTEM_PROMPT });
+            signal: abort.signal, schema: suggestionReportSchema, systemPrompt: SUGGESTION_SYSTEM_PROMPT, model: plan.model, effort: plan.effort ?? undefined });
           this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
           const output = await abortable(execution, abort.signal);
           try { result = parseSuggestionText(output, context.references); }

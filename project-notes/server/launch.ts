@@ -13,6 +13,15 @@ const journalSchema = launchReceiptSchema.omit({ replayed: true }).extend({ inpu
 type Journal = z.infer<typeof journalSchema>;
 type Prepared = { project: LaunchOptions["projects"][number]; featureValues?: Record<string, unknown> };
 const message = (e: unknown) => e instanceof Error ? e.message : "操作未完成";
+/**
+ * Provider and launch errors come from the daemon and the providers as they are. The dialog shows them in full and every
+ * connected app can read them, so a stack trace or a dumped request stays bounded; 500 characters still fit any diagnosis.
+ */
+const MAX_ERROR_CHARS = 500;
+function clip(text: string, max = MAX_ERROR_CHARS): string {
+  const chars = Array.from(text); // code points: never split a surrogate pair
+  return chars.length <= max ? text : chars.slice(0, max - 1).join("") + "…";
+}
 /** Per-call timeouts that together stay inside the host's 30 s plugin RPC limit. */
 function budget(totalMs: number) { const end = Date.now() + totalMs; return (maxMs: number) => Math.max(1, Math.min(maxMs, end - Date.now())); }
 
@@ -41,7 +50,7 @@ export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listPr
   return {
     projects, project,
     providers: catalog.entries.filter(p => p.enabled !== false).map(p => ({
-      id: p.provider, label: p.label || p.provider, status: p.status, error: p.error ?? null,
+      id: p.provider, label: p.label || p.provider, status: p.status, error: p.error ? clip(p.error) : null,
       models: (p.models ?? []).filter(m => m.isSelectable !== false).map(m => ({
         id: m.id, label: m.label || m.id, isDefault: Boolean(m.isDefault),
         thinkingOptions: (m.thinkingOptions ?? []).map(o => ({ id: o.id, label: o.label })),
@@ -87,7 +96,8 @@ export class LaunchService {
   }
   private receipt(record: Journal, replayed = false): LaunchReceipt {
     const { inputHash: _hash, ...receipt } = record;
-    return { ...receipt, replayed };
+    // Room for the capped cause plus the guidance after it; also caps records written before the cap existed.
+    return { ...receipt, error: receipt.error === null ? null : clip(receipt.error, MAX_ERROR_CHARS + 100), replayed };
   }
   private checkAlive() { if (this.stopping) throw new Error("插件正在重载，启动流程已停止；检查现有工作区后再继续。"); }
 
@@ -198,7 +208,8 @@ export class LaunchService {
     } catch (e) {
       const noMutation = record.stage === "prepared";
       record.stage = noMutation ? "rejected" : "uncertain";
-      record.error = noMutation ? `${message(e)}。尚未创建工作区或代理，可以修改选项后重试。` : `${message(e)}。工作区或会话可能已经创建，请先检查，不会自动重复启动。`;
+      const cause = clip(message(e));
+      record.error = noMutation ? `${cause}。尚未创建工作区或代理，可以修改选项后重试。` : `${cause}。工作区或会话可能已经创建，请先检查，不会自动重复启动。`;
       try { await this.save(record); } catch { /* A prior durable stage still prevents automatic replay after restart. */ }
     }
   }

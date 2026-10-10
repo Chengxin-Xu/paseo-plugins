@@ -1241,13 +1241,24 @@ export function todoToolDetailModel(input: unknown, output: unknown): TodoToolDe
   };
 }
 
+/**
+ * 0.4.1: when the text is not JSON as a whole, look for JSON after a prefix only in text up to this long and only from
+ * the first few `{`/`[`. Retrying from every bracket of a long text is quadratic: 100 000 nested brackets kept the parser
+ * busy for minutes. Results with a prefix (`result_count=1\n\n{...}`) start at one of the first brackets.
+ */
+const MAX_EMBEDDED_JSON_CHARS = 100_000;
+const MAX_EMBEDDED_JSON_STARTS = 8;
+
 function parseEmbeddedJson(value: string): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
+    if (value.length > MAX_EMBEDDED_JSON_CHARS) return undefined;
+    let starts = 0;
     for (const match of value.matchAll(/\{|\[/g)) {
       const offset = match.index;
       if (offset === undefined) continue;
+      if (++starts > MAX_EMBEDDED_JSON_STARTS) break;
       try {
         return JSON.parse(value.slice(offset)) as unknown;
       } catch {

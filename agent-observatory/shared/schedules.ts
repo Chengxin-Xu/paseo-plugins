@@ -95,11 +95,18 @@ export function findChangeRequest(text: string | null | undefined): RunLink | nu
   return { url: match[0].slice(0, 2000), label: `${mr ? "!" : "#"}${match[1]}`, kind: mr ? "mr" : "pr", state: null };
 }
 
-/** Drop Markdown noise and the daemon's leading rule, collapse whitespace: one paragraph for a list row. */
+/** A preview only needs the start of a reply; a run's output can be megabytes of agent-written text. */
+const PREVIEW_SOURCE_MAX = 4000;
+/**
+ * Drop Markdown noise and the daemon's leading rule, collapse whitespace: one paragraph for a list row. Only the first
+ * 4000 characters are read, and every pattern is bounded (link text, link target, bold span) or line-local, so hostile
+ * input (thousands of unclosed `[`, blank lines, `**` markers) costs linear time.
+ */
 export function previewOf(text: string | null | undefined, max = 280): string | null {
   if (!text) return null;
-  const plain = text.replace(/^\s*---\s*\n/, "").replace(/```[^\n]*\n?/g, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, "").replace(/^\s{0,3}>\s?/gm, "").replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, "$2").replace(/`([^`]*)`/g, "$1").replace(/\s+/g, " ").trim();
+  const source = text.length > PREVIEW_SOURCE_MAX ? text.slice(0, PREVIEW_SOURCE_MAX) : text;
+  const plain = source.replace(/^\s*---\s*\n/, "").replace(/```[^\n]*\n?/g, "").replace(/!?\[([^[\]]{0,500})\]\([^)]{0,1000}\)/g, "$1").replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
+    .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, "").replace(/^[ \t]{0,3}>[ \t]?/gm, "").replace(/(\*\*|__)(?=\S)([\s\S]{0,300}?\S)\1/g, "$2").replace(/`([^`]*)`/g, "$1").replace(/\s+/g, " ").trim();
   if (!plain) return null;
   return plain.length <= max ? plain : `${plain.slice(0, max - 1).trimEnd()}…`;
 }

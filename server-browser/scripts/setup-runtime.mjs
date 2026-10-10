@@ -6,7 +6,7 @@
 // gets the same dependency tree. Packages come from the npm registry configured on this host, with install scripts disabled.
 // Chromium itself is not downloaded.
 import { spawn } from 'node:child_process';
-import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -16,14 +16,26 @@ const runtime=process.env.PASEO_SERVER_BROWSER_RUNTIME||path.join(homedir(),'.lo
 const locked=path.join(path.dirname(fileURLToPath(import.meta.url)),'..','runtime-deps');
 const {dependencies}=JSON.parse(await readFile(path.join(locked,'package.json'),'utf8'));
 console.log(`Runtime directory: ${runtime}`);
+// The plugin loads code from this directory, so it must be a real directory owned by this user and closed to others (0700).
+// The plugin refuses to start a browser from anything else.
+async function checkRuntimeDirectory(fix){
+ const info=await lstat(runtime).catch(error=>{if(error.code==='ENOENT'&&!fix)throw new Error(`${runtime} does not exist yet; run this script without --check to install the runtime.`);throw error;});
+ if(info.isSymbolicLink()||!info.isDirectory())throw new Error(`${runtime} is not a real directory (it may be a symbolic link). Use a plain directory owned by this user.`);
+ if(process.getuid&&info.uid!==process.getuid())throw new Error(`${runtime} belongs to another user. Use a directory owned by the user that runs the Paseo daemon.`);
+ if((info.mode&0o777)===0o700)return;
+ if(fix)await chmod(runtime,0o700);
+ else console.log(`Note: ${runtime} has mode ${(info.mode&0o777).toString(8)}; the plugin sets it to 700 when it starts a browser.`);
+}
 if(!process.argv.includes('--check')){
  await mkdir(runtime,{recursive:true,mode:0o700});
+ await checkRuntimeDirectory(true);
  // The shipped manifest replaces whatever package.json the runtime had; npm ci then installs exactly the shipped lockfile.
  for(const file of ['package.json','package-lock.json'])await writeFile(path.join(runtime,file),await readFile(path.join(locked,file)),{mode:0o600});
  const child=spawn('npm',['ci','--ignore-scripts','--no-audit','--no-fund'],{cwd:runtime,stdio:'inherit'});
  const code=await new Promise((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve);});
  if(code!==0)throw new Error('Runtime dependency installation failed.');
 }
+else await checkRuntimeDirectory(false);
 const load=createRequire(path.join(runtime,'package.json'));
 for(const dependency of Object.keys(dependencies)){load.resolve(dependency);console.log(`${dependency}: available`);}
 const {chromium}=load('playwright');

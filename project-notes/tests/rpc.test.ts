@@ -6,7 +6,7 @@ import type { PluginRpcContract, RpcOutput } from "@getpaseo/plugin";
 import type { input as ZodInput } from "zod";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "../index.server";
-import { projectsRpc, readBoardRpc, readDashboardRpc, writeBoardRpc, type NoteFields } from "../shared/board";
+import { INBOX_DESCRIPTION, projectsRpc, readBoardRpc, readDashboardRpc, writeBoardRpc, type NoteFields } from "../shared/board";
 import { launchOptionsRpc, launchRpc, launchStatusRpc, type LaunchInput } from "../shared/launch";
 
 const fields: NoteFields = { kind: "task", title: "上线检查", body: "逐项核对", status: "todo", priority: "high", pinned: false };
@@ -97,7 +97,9 @@ describe("board RPCs", () => {
     expect(delta.boards.map(b => [b.projectId, b.revision, b.items.length])).toEqual([["prj_git", 1, 1]]);
     expect((await call(readBoardRpc, { projectId: "prj_git" })).items[0]!.title).toBe("上线检查");
     // One project list for dashboard polls, the projects RPC and launch options.
-    expect((await call(projectsRpc, {})).projects[0]).toEqual({ id: "__inbox__", name: "随手记", path: "尚未归入项目的想法" });
+    // The projects RPC and the dashboard describe the inbox with the same wording.
+    expect((await call(projectsRpc, {})).projects[0]).toEqual({ id: "__inbox__", name: "随手记", path: INBOX_DESCRIPTION });
+    expect(empty.projects![0]).toEqual({ id: "__inbox__", name: "随手记", path: INBOX_DESCRIPTION });
     await call(launchOptionsRpc, {});
     expect(paseo.projects.list).toHaveBeenCalledTimes(1);
     // project.update drops the cached list.
@@ -215,6 +217,25 @@ describe("launch RPCs", () => {
     paseo.workspaces.create.mockImplementationOnce(async () => ({ id: "wks_ffffffffffffffff", agents: { create: vi.fn(async () => { throw new Error("provider 启动失败"); }) } }) as never);
     await call(launchRpc, launchInput(itemId, { launchId: "launch-agent-fails" }));
     expect(await settle(call, "launch-agent-fails")).toMatchObject({ stage: "uncertain", workspaceId: "wks_ffffffffffffffff", agentId: null, error: expect.stringMatching(/provider 启动失败.*可能已经创建/) });
+  });
+
+  it("caps provider and launch errors before they reach the app", async () => {
+    const paseo = fakePaseo();
+    paseo.catalog = { entries: [{ ...ready("claude"), error: "供应商错误".repeat(1_000) }] } as never;
+    const { call } = host(paseo);
+    const options = await call(launchOptionsRpc, { projectId: "prj_git" });
+    expect(Array.from(options.providers[0]!.error!)).toHaveLength(500);
+    expect(options.providers[0]!.error).toMatch(/^(供应商错误)+供应商错…$/);
+    const itemId = await seed(call);
+    paseo.workspaces.create.mockImplementationOnce(async () => { throw new Error("工作区失败".repeat(1_000)); });
+    await call(launchRpc, launchInput(itemId, { launchId: "launch-long-error" }));
+    const receipt = await settle(call, "launch-long-error");
+    expect(receipt.error).toMatch(/^(工作区失败)+工作区失…。工作区或会话可能已经创建，请先检查，不会自动重复启动。$/);
+    expect(Array.from(receipt.error!).length).toBeLessThan(560);
+    // A journal from an older version with an uncapped error is capped on the way out too.
+    const launches = join(home, "plugin-data", "project-notes", "launches");
+    await writeFile(join(launches, "launch-old-error.json"), JSON.stringify({ launchId: "launch-old-error", inputHash: "x", stage: "uncertain", workspaceId: null, agentId: null, error: "旧".repeat(5_000) }));
+    expect(Array.from((await call(launchStatusRpc, { launchId: "launch-old-error" }))!.error!).length).toBeLessThanOrEqual(600);
   });
 
   it("passes the profile's feature values when the profile matches", async () => {

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { tokenCountsSchema } from "../../shared/tokens";
 import { bucketKey, emptyData, projectHourKey, RECORD_DEPTH, sessionHourKey, sessionKey, type TokenData } from "./data";
 import type { TokenIngester } from "./ingester";
 import { dayOf, safeError } from "./types";
+import { ensurePrivateDirectory } from "../paseo-home";
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const time = z.number().finite().nonnegative(), count = z.number().int().nonnegative();
@@ -106,7 +107,7 @@ export class TokenPersistence {
     if (Buffer.byteLength(payload) > MAX_BYTES) { console.warn("Token 历史超过保存上限，保留原文件。"); return false; }
     const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await ensurePrivateDirectory(this.directory);
       const handle = await open(temporary, "wx", 0o600);
       try { await handle.writeFile(payload, "utf8"); if (durable) await handle.sync(); } finally { await handle.close(); }
       await rename(temporary, this.file);

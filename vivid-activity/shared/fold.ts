@@ -120,12 +120,19 @@ export function hashText(text: string): string {
   return hash.toString(36);
 }
 
+/** 0.4.1: reasoning longer than this is hashed by its first and last half of it only (the key keeps the full length). */
+export const REASONING_KEY_SAMPLE = 64 * 1024;
+
 /**
  * Fold key of a reasoning row: its raw text (length + hash). Reasoning carries no id; Paseo's live stream and its projected
  * timeline both concatenate the same chunks, so the texts agree. Identical texts in one agent are ambiguous and never fold.
+ * The plugin server keys every reasoning row of a page each time it reads it, so a very long text is sampled: two texts
+ * of the same length that differ only in the middle share a key, and like identical texts they then never fold.
  */
 export function reasoningKey(text: string): string {
-  return `r:${text.length.toString(36)}:${hashText(text)}`;
+  const half = REASONING_KEY_SAMPLE / 2;
+  const sample = text.length <= REASONING_KEY_SAMPLE ? text : text.slice(0, half) + text.slice(-half);
+  return `r:${text.length.toString(36)}:${hashText(sample)}`;
 }
 
 /** Stable signature of a role, to tell whether a projected row needs drawing again. */

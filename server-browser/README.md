@@ -46,7 +46,7 @@ Paseo 自带的浏览器工具不会被当成操作者。每个工作区有独�
   页面诊断、操作记录、资源与恢复、打开演示页、关闭当前标签页和关闭浏览器（需确认）。只能在手动模式使用的操作，
   在 Agent 模式下不出现在菜单里。
 - **阅读页面**：用 Readability 提取正文并转成 Markdown，也可读取完整可见文字或按关键词查找；长内容会标明截断。
-- **页面诊断**：只读检查 Chromium 与调试连接、Profile、字体与运行库、Agent 工具、代理设置，以及当前页面的登录提示、
+- **页面诊断**：只读检查 Chromium 与调试连接、Chromium 沙箱、Profile、字体与运行库、Agent 工具、代理设置，以及当前页面的登录提示、
   HTTP 401/403 和网络错误。页面可读取不等于已经登录。
 - **用本机浏览器打开**：用手机或电脑的默认浏览器打开当前网址（Paseo 桌面端另有“在 Paseo 本机浏览器打开”）；本机打开不共享
   服务器浏览器的登录状态，localhost 指向你自己的设备。
@@ -69,11 +69,17 @@ Paseo 自带的浏览器工具不会被当成操作者。每个工作区有独�
 `server_browser` 是通过一个小 bridge 连接到这个浏览器的 Playwright MCP。bridge 由插件按自己的源码（`server/bridge-source.ts`）
 写入数据目录，Agent 用 daemon 的 Node.js 运行它：
 
-- 手动模式下拒绝导航、输入、脚本等写操作，只读查看（快照、截图、阅读、诊断）仍然允许；
-- 不允许 Agent 关闭共享浏览器；
-- 不提供 `browser_run_code_unsafe`（会在 MCP 进程里执行任意 Node.js 代码）；
-- 其余 Playwright MCP 工具照常可用，包括在网页内执行 JavaScript、填写表单、上传 Agent 工作区内的文件、读取控制台与网络请求、保存截图；
-  每次调用仍按 Agent 自己的审批设置处理。网页不能通过 WebMCP 给 Agent 注册工具。
+- 只提供一份固定清单里的 Playwright MCP 0.0.82 工具，清单外的工具（包括以后版本新增的）一律拒绝。
+  只读：快照、查找、等待、截图、控制台、网络请求列表与详情；写操作：导航、后退、点击、输入、填写表单、按键、选择、悬停、拖动、
+  拖放文件、上传文件、处理对话框、在网页内执行 JavaScript、调整尺寸、模拟媒体特性、标签页；另有插件自带的阅读页面和页面诊断；
+- 手动模式下拒绝所有写操作，只读查看仍然允许；不允许 Agent 关闭共享浏览器；不提供 `browser_run_code_unsafe`
+  （会在 MCP 进程里执行任意 Node.js 代码）；
+- 导航和面板地址栏走同一套规则：只允许 HTTP/HTTPS，拒绝地址里的账号密码以及链路本地和云服务器元数据地址，交给 MCP 的是规范化后的地址；
+- 上传（`browser_file_upload`、`browser_drop`）的每个文件先解析真实路径，必须是该工作区目录里的普通文件，符号链接和目录外的文件一律拒绝；
+- Playwright MCP 只从运行时目录的 `node_modules/@playwright/mcp/cli.js` 启动，工作目录是该工作区目录，
+  截图、快照等按文件名保存时只能写进工作区目录或该浏览器的 `artifacts/`；它只继承 PATH、HOME、语言、时区、临时目录和 XDG 目录等环境变量，
+  不继承 Agent 环境里的密钥、`NODE_OPTIONS`、代理和 `PLAYWRIGHT_MCP_*` 设置；
+- 每次调用仍按 Agent 自己的审批设置处理。网页不能通过 WebMCP 给 Agent 注册工具。
 
 插件重载或 daemon 重启后，浏览器在后台恢复；浏览器 Agent 的 MCP 启动时若浏览器正在恢复，会最多等待 20 秒。
 
@@ -91,6 +97,8 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
   `npm ci --ignore-scripts` 按锁文件安装 `@playwright/mcp@0.0.82`、`@mozilla/readability@0.6.0`、`jsdom@26.1.0`、`turndown@7.2.4`
   及其全部下层依赖，每台主机装出同一棵依赖树。来源是主机 npm 配置的 registry，禁用安装脚本；运行时目录原有的 `package.json` 会被替换。
   它不下载 Chromium，也不修改 Agent 配置或创建浏览器 Profile。
+- 插件会从运行时目录加载代码，所以它必须是当前用户自己的真实目录（不能是符号链接）；脚本和插件都会把它设为 0700，
+  不符合时拒绝使用并说明原因。
 - **Chromium**：插件依次使用 `PASEO_SERVER_BROWSER_EXECUTABLE`、Playwright 缓存（`~/.cache/ms-playwright` 或 `PLAYWRIGHT_BROWSERS_PATH`）
   中最新的 `chromium-headless-shell`、运行时 Playwright 自带版本。没有时可以用运行时里的 Playwright 安装 headless shell
   （从 Playwright 的下载源获取）：`node <运行时目录>/node_modules/playwright/cli.js install chromium-headless-shell`。
@@ -103,23 +111,25 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
 | `PASEO_SERVER_BROWSER_RUNTIME` | 运行时目录（Playwright、MCP、正文提取库，可选 `lib/`、`fonts.conf`） | `~/.local/share/paseo-server-browser` |
 | `PASEO_SERVER_BROWSER_DATA` | 各工作区的浏览器数据目录 | `<运行时目录>/visual` |
 | `PASEO_SERVER_BROWSER_EXECUTABLE` | 显式指定 Chromium / Chrome 可执行文件 | 自动查找 |
-| `PASEO_SERVER_BROWSER_PROXY` | 只给共享浏览器设置代理（`host:port` 或 `scheme://host:port`，不含账号密码） | 不设置时沿用 daemon 的 `HTTP(S)_PROXY` / `ALL_PROXY` |
-| `PASEO_SERVER_BROWSER_SANDBOX` | 设为 `1` 时启用 Chromium 沙箱（主机需支持非特权用户命名空间） | 关闭，与 Playwright 默认一致 |
+| `PASEO_SERVER_BROWSER_PROXY` | 只给共享浏览器设置代理（`host:port` 或 `scheme://host:port`；含账号密码时拒绝启动，因为它会出现在 Chromium 命令行里） | 不设置时沿用 daemon 的 `HTTP(S)_PROXY` / `ALL_PROXY` |
+| `PASEO_SERVER_BROWSER_SANDBOX` | `1` 总是开启 Chromium 沙箱（主机不支持时启动失败）；`0` 总是关闭 | 不设置时自动：先开沙箱，主机不支持时改用 `--no-sandbox` 并在页面诊断里提示 |
 
 ## 数据与隐私
 
-每个工作区的数据在 `<数据目录>/<工作区 ID>/`，目录只有 daemon 用户可以访问（0700），插件写的 JSON 文件为 0600：
+每个工作区的数据在 `<数据目录>/<工作区 ID>/`。数据目录、工作区目录、`profile/`、`artifacts/` 和运行时目录在使用前都会检查：
+必须是 daemon 用户自己的真实目录（不能是符号链接），并设为 0700，否则拒绝启动并说明原因。插件写的 JSON 文件为 0600：
 
 | 路径 | 内容 |
 | --- | --- |
 | `profile/` | Chromium Profile：Cookie、登录状态、历史和缓存。按私人浏览器数据保管。 |
-| `state.json` | 控制模式、网页尺寸、设置、恢复计数和已打开标签的地址（只保存 HTTP/HTTPS，不含账号密码，可能含查询参数），用于恢复浏览器。 |
-| `session.json` | 本机连接信息和随机令牌，只给本机 MCP bridge 使用，浏览器停止时删除。 |
-| `agent.json` | 关联的浏览器 Agent ID。 |
+| `state.json` | 控制模式、网页尺寸、设置、恢复计数和已打开标签的地址，用于恢复浏览器。地址只保存 HTTP/HTTPS，去掉账号密码、`#` 后的片段和疑似一次性凭据的查询参数（`code`、`state`、`token`、`session`、`sig`、`ticket`、`otp` 等），其他查询参数保留。 |
+| `session.json` | 本机连接信息、工作区目录（用于限制上传）和随机令牌。令牌只对这个工作区的浏览器有效，每次启动更换；文件只给本机 MCP bridge 使用，浏览器停止时删除。 |
+| `agent.json` | 关联的浏览器 Agent ID（只读取 4 KB 以内的普通文件）。 |
 | `artifacts/` | Agent 工具自动命名保存的截图、快照和日志；超过 48 小时或总量超过 256 MB 时自动清理较旧的文件（保留最新的一份和 5 分钟内的文件），也可在 **资源与恢复** 里立即按同样规则清理。 |
 
 - 数据目录根部还有插件写入的 `mcp-bridge.mjs`。
-- 网页下载的文件只在系统临时目录中存在，浏览器连接关闭时删除；本版没有下载管理。
+- 网页下载的文件由 Playwright 为插件的浏览器连接建立的临时目录接收（系统临时目录下的 `playwright-artifacts-*`，只有 daemon 用户可读写），
+  浏览器停止、重启或插件卸载时删除；daemon 被强制结束时可能留下，需要时手动清理。本版没有下载管理。
 - **操作记录** 只在内存里保留本次插件运行中最后 12 次操作的来源、类型、状态和目标页面，不记录输入内容、Cookie 或网址查询参数。
 - 画面、网页标题和地址只通过 Paseo 的连接发给你的客户端；插件不向其他服务发送数据。Agent 读取的网页文字、地址和截图会进入它的模型会话。
 - 插件读取 daemon 的工作区列表和 Agent Profile（名称、provider、模型），只用于界面里的选择。
@@ -129,12 +139,19 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
 ## 网络与进程
 
 - Chromium 以 daemon 用户身份无头运行，使用该用户的网络，可以打开主机能访问的任何 HTTP/HTTPS 地址，包括 `localhost`、局域网和其他私有网络地址；
-  能使用这个 daemon 的人都可以通过它浏览。其他协议和在地址里写账号密码的请求会被拒绝。
-- Chromium 关闭了后台联网和组件更新。代理见上表。
+  能使用这个 daemon 的人都可以通过它浏览。
+- 其他协议、在地址里写账号密码的请求，以及链路本地和云服务器元数据地址（`169.254.0.0/16`、`fe80::/10`、`fd00:ec2::254`、`100.100.100.200`、
+  `metadata.google.internal`）会被拒绝。这些地址在 Chromium 内部也无法解析，网页脚本、跳转、iframe 和表单同样访问不到；
+  但通过 DNS 解析到这些地址的其他域名拦不住。
+- Chromium 关闭了后台联网和组件更新。代理见上表。Chromium 只继承 PATH、HOME、语言、时区、临时目录、XDG 目录、代理和字体等必要的环境变量；
+  运行时目录有 `lib/` 时才把它加入 `LD_LIBRARY_PATH`。
 - 进程：每个运行中的工作区浏览器一个 Chromium；每个浏览器 Agent 会话一个 Node.js bridge 和一个 Playwright MCP 进程。
-- Chromium 调试端口和插件控制接口只监听 `127.0.0.1`。控制接口需要 `session.json` 里的令牌；**调试端口没有认证**，
-  同一主机上的其他用户和进程可以连上浏览器，请不要在与他人共用的主机上使用。
-- 默认关闭 Chromium 沙箱，与 Playwright 一致；支持时可用 `PASEO_SERVER_BROWSER_SANDBOX=1` 开启。
+- Chromium 调试端口和插件控制接口只监听 `127.0.0.1`。控制接口需要 `session.json` 里该工作区的令牌；**调试端口没有认证**，
+  同一主机上的其他用户和进程可以连上浏览器并绕过手动接管，请不要在与他人共用的主机上使用。
+- 默认开启 Chromium 沙箱：网页进程在独立的用户命名空间和系统调用过滤中运行。主机不支持时自动改用 `--no-sandbox`，
+  并在页面诊断里提示；`PASEO_SERVER_BROWSER_SANDBOX` 可以强制开或关。
+- Agent 的每次操作都持有一个租约：浏览器 Agent 放弃等待的申请不会留下租约，2 分钟没有续期的租约自动失效，
+  Agent 新开标签页时租约保留到页面加载完成或超时。读取标题、测量宽度和读取正文都有各自的时限，关闭浏览器不会排在卡住的操作后面。
 - 这不是对本机全权限 Agent 的安全沙箱：授权的本地进程仍有自己的系统权限。
 
 ## 恢复与限制
@@ -142,7 +159,8 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
 - 浏览器意外退出后按 1、3、8 秒退避，5 分钟内最多恢复 3 次；恢复已保存的 HTTP(S) 页面、窗口尺寸、固定状态和 Profile，
   不重放输入、点击或表单提交。用户主动“关闭浏览器”后不自动恢复。客户端断开不会停止浏览器。
 - 尚未写盘的新 Cookie、未提交的表单和网页内存状态不能保证在崩溃后恢复。
-- 只支持 Linux daemon 主机，已在 x86-64 + Chromium headless shell 上验证。
+- 只支持 Linux daemon 主机，已在 x86-64 + Chromium headless shell 上验证；自动查找只认 x86-64（`linux64`）的 headless shell，
+  其他架构请用 `PASEO_SERVER_BROWSER_EXECUTABLE` 指定。
 - 没有下载管理、音视频、剪贴板同步和完整的键盘快捷键映射。
 - 企业 SSO、验证码以及站点是否允许服务器访问，需要按站点验证；诊断只检查当前页面，不访问其他站点。
 - 原生 iOS/Android 的代码使用 React Native 组件，但测试在手机尺寸的网页里完成。

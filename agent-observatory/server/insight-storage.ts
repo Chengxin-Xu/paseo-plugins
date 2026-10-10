@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { insightJobSchema, insightJobSummarySchema, insightSettingsSchema, insightSourceSchema, type InsightJob, type InsightJobSummary, type InsightSettings } from "../shared/insights";
 import { excerptText } from "../shared/evidence";
+import { ensurePrivateDirectory } from "./paseo-home";
 
 export const MAX_SUCCESSFUL_REPORTS = 60;
 export const MAX_REPORT_BYTES = 768 * 1024;
@@ -69,7 +70,7 @@ export class InsightStorage {
     catch (error) { if ((error as { code?: string }).code === "ENOENT") return undefined; throw error; }
   }
   private async atomic(path: string, data: unknown) {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await ensurePrivateDirectory(this.directory);
     const temp = `${path}.${randomUUID()}.tmp`;
     try { const handle = await open(temp, "wx", 0o600); try { await handle.writeFile(JSON.stringify(data)); await handle.sync(); } finally { await handle.close(); } await rename(temp, path); }
     finally { await unlink(temp).catch(() => {}); }
@@ -152,7 +153,7 @@ export class InsightStorage {
     this.writes = this.writes.then(async () => {
       this.lastSaveSucceeded = false;
       try {
-        await mkdir(this.reports, { recursive: true, mode: 0o700 });
+        await ensurePrivateDirectory(this.directory); await ensurePrivateDirectory(this.reports);
         for (const job of snapshot.jobs) if (job.report) {
           const signature = createHash("sha256").update(JSON.stringify(job)).digest("base64");
           if (this.saved.get(job.id) === signature) continue;

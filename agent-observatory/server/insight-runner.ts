@@ -1,18 +1,34 @@
 import type { PaseoApi, PaseoAgent, PaseoAgentCreateOptions, PaseoAgentHandle, PaseoAgentRunResult, PaseoProviderSnapshotResult, AgentMode } from "./paseo-types";
 import { z } from "zod";
-import type { InsightJob, InsightModelOption, InsightRunner, InsightRunnerInfo, InsightRunnerOption, InsightRunners } from "../shared/insights";
+import { GROK_DEFAULT_EFFORT, GROK_DEFAULT_MODEL, grokRunnerLabel, type InsightJob, type InsightModelOption, type InsightRunner, type InsightRunnerInfo, type InsightRunnerOption, type InsightRunners } from "../shared/insights";
 import { findGrokBinary } from "./grok-runner";
 import { redactSecrets } from "./insight-analysis";
 
-export const BUILTIN_INSIGHT_RUNNER: InsightRunnerInfo = { kind: "grok", label: "Grok 4.7 · xhigh", provider: null, model: "grok-4.7", thinkingOptionId: "xhigh", modeId: null, sessionAgentId: null };
+export const BUILTIN_INSIGHT_RUNNER: InsightRunnerInfo = { kind: "grok", label: "Grok 4.7 · xhigh", provider: null, model: GROK_DEFAULT_MODEL, thinkingOptionId: GROK_DEFAULT_EFFORT, modeId: null, sessionAgentId: null };
+/** The built-in Grok CLI with its saved model and reasoning effort (grok-4.7 · xhigh when unset). */
+export function grokPlan(runner: Extract<InsightRunner, { kind: "grok" }>): InsightRunnerPlan {
+  const model = runner.model ?? GROK_DEFAULT_MODEL, effort = runner.effort ?? GROK_DEFAULT_EFFORT;
+  return { info: { ...BUILTIN_INSIGHT_RUNNER, label: grokRunnerLabel({ model, effort }), model, thinkingOptionId: effort }, model, effort, access: "none", featureValues: {} };
+}
 export const AUTO_RUNNER_LABEL = "自动选择";
 export const NO_RUNNER_ERROR = "没有可以自动选用的分析执行器：安装并登录 Grok CLI、在 Paseo 里启用 Claude Code 或 Codex，或者在「分析设置」里选一个 Profile 或模型";
 export const INSIGHT_PERMISSION_MESSAGE = "分析会话是只读的：不能使用工具。请直接输出 JSON 报告。";
-const ASK_REASON = "没有只读模式，工具请求会被自动拒绝";
+/** Shown for `ask` access: only requests that need approval reach the observatory, so say so. */
+const ASK_REASON = "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行";
+const NO_MODES_REASON = "该提供商没有列出权限模式，无法确认分析会话受限，不能用于分析";
+const UNSAFE_REASON = "该提供商没有只读或逐项审批的模式，不能用于分析";
+const UNVERIFIED_MODE_ERROR = "分析执行器没有经过确认的受限模式（只读或逐项审批），已拒绝启动分析会话；可以在「分析设置」里换一个执行器";
 const WORKSPACE_ERROR = "无法在该会话的工作区启动分析（可能已归档），可以在「分析设置」里换一个执行器";
 /** What `auto` may run, in order: Claude Code, Codex, then custom providers that extend them (`extends` in the daemon config). */
 const AUTO_BASES = ["claude", "codex"] as const;
-const UNSAFE_FEATURE = /auto.?accept|yolo|bypass|full.?access|danger/i;
+/**
+ * Profile feature switches an analysis keeps: speed and reasoning effort only (Paseo 0.11: Claude Code / Oh My Pi `fast_mode`,
+ * Cursor `fast`, Codex `service_tier`). Everything else (auto-accept, plan or agent switches, provider-specific access settings)
+ * belongs to the profile's coding sessions, not to an analysis that reads untrusted transcripts.
+ */
+const INSIGHT_FEATURES = new Set(["fast_mode", "fast", "service_tier", "reasoning", "reasoning_effort", "effort", "thinking"]);
+/** Providers whose daemon client turns auto-accept on for a child of an unattended Agent unless the request sets it. */
+const AUTO_ACCEPT_BASES = new Set(["acp", "copilot", "opencode"]);
 type Access = InsightRunnerOption["access"];
 type Profile = NonNullable<Awaited<ReturnType<PaseoApi["config"]["get"]>>["config"]["agentProfiles"]>[number];
 interface CatalogEntry { provider: string; label: string; description: string | null; enabled: boolean; status: string; error: string | null; modes: AgentMode[]; models: InsightModelOption[];
@@ -24,26 +40,40 @@ const clipped = (value: string | undefined | null, length: number) => value?.tri
 const safeError = (value: unknown, length = 300) => redactSecrets(value instanceof Error ? value.message : String(value)).slice(0, length);
 const validId = (value: string | undefined, max: number) => value && value.length <= max ? value : null;
 
+/** The allowlisted switches with plain values; `auto_accept: false` (switching approval prompts back on) always passes. */
 export function filterInsightFeatures(values: Record<string, unknown> = {}): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(values).filter(([key]) => !UNSAFE_FEATURE.test(key)));
+  const plain = (value: unknown) => typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length <= 120);
+  return Object.fromEntries(Object.entries(values).filter(([key, value]) => (INSIGHT_FEATURES.has(key) && plain(value)) || (key === "auto_accept" && value === false)));
 }
 export interface InsightAnalysisMode { modeId: string | null; access: Access; providerOptions?: Record<string, unknown>; unsafe?: true }
 /** Codex's read-only sandbox, applied on top of its default mode (create_agent rejects modes a provider does not list). */
 export const CODEX_READ_ONLY_OPTIONS = { sandbox_mode: "read-only", approval_policy: "never" } as const;
 /**
- * The mode an analysis runs in. A listed mode is always explicit: create_agent otherwise inherits the analysed Agent's
- * mode (often unattended) for the same provider, or maps an unattended parent to the target's unattended mode.
+ * The mode an analysis runs in, always explicit (create_agent otherwise inherits the analysed Agent's mode, often
+ * unattended, or maps an unattended parent to the target's unattended mode). Only modes whose restriction is known qualify:
+ * - Codex and providers that extend it: the default mode in Codex's read-only sandbox without approvals (`read`);
+ * - an `ask` mode (Cursor's read-only Ask; Oh My Pi's Always Ask) (`read`);
+ * - a `default` mode the provider marks as safe, Claude Code's Always Ask: every tool that needs approval asks (`ask`);
+ * - a plan mode (`read`).
+ * A mode id alone proves nothing (an ACP agent's "default" or "agent" mode may edit without asking), and a provider with
+ * no listed modes cannot be pinned to one: both are `unsafe` and never run.
  */
-export function insightAnalysisMode(modes: readonly AgentMode[]): InsightAnalysisMode {
-  const safe = (mode: AgentMode) => !(mode as AgentMode & { isUnattended?: boolean }).isUnattended && mode.colorTier !== "dangerous";
-  if (modes.some(mode => mode.id === "auto" && safe(mode)) && modes.some(mode => mode.id === "full-access")) return { modeId: "auto", access: "read", providerOptions: { ...CODEX_READ_ONLY_OPTIONS } };
-  const mode = ["ask", "default"].map(id => modes.find(candidate => candidate.id === id && safe(candidate))).find(Boolean);
-  if (mode) return { modeId: mode.id, access: mode.id === "ask" ? "read" : "ask" };
-  // Claude's plan mode ends in an approval, but every Claude provider lists default; elsewhere plan is the read-only choice.
-  const other = modes.find(candidate => safe(candidate) && candidate.id !== "plan") ?? modes.find(safe);
-  if (other) return { modeId: other.id, access: other.id === "plan" ? "read" : "ask" };
-  return modes.length ? { modeId: null, access: "ask", unsafe: true } : { modeId: null, access: "ask" };
+export function insightAnalysisMode(modes: readonly AgentMode[], provider: { codex?: boolean } = {}): InsightAnalysisMode {
+  const usable = modes.filter(mode => !(mode as AgentMode & { isUnattended?: boolean }).isUnattended && mode.colorTier !== "dangerous");
+  if (provider.codex && usable.some(mode => mode.id === "auto")) return { modeId: "auto", access: "read", providerOptions: { ...CODEX_READ_ONLY_OPTIONS } };
+  const ask = usable.find(mode => mode.id === "ask");
+  if (ask) return { modeId: ask.id, access: "read" };
+  const gated = usable.find(mode => mode.id === "default" && mode.colorTier === "safe");
+  if (gated) return { modeId: gated.id, access: "ask" };
+  const plan = usable.find(mode => mode.id === "plan" || mode.colorTier === "planning");
+  if (plan) return { modeId: plan.id, access: "read" };
+  return { modeId: null, access: "ask", unsafe: true };
 }
+/** The built-ins a provider is or extends (custom providers name theirs in `extends`). */
+const lineage = (entry: Pick<CatalogEntry, "provider" | "extends">) => [entry.provider, entry.extends].filter((id): id is string => !!id);
+const analysisModeOf = (entry: CatalogEntry) => insightAnalysisMode(entry.modes, { codex: lineage(entry).includes("codex") });
+/** An analysis never auto-accepts: ACP and OpenCode clients otherwise switch it on for children of unattended Agents. */
+const lockedFeatures = (entry: CatalogEntry): Record<string, unknown> => lineage(entry).some(id => AUTO_ACCEPT_BASES.has(id)) ? { auto_accept: false } : {};
 
 function normalizeModels(entry: PaseoProviderSnapshotResult["entries"][number], snapshot: PaseoProviderSnapshotResult): InsightModelOption[] {
   const compact = snapshot.compactSnapshot?.entries.find(candidate => candidate.provider === entry.provider);
@@ -103,7 +133,8 @@ export class InsightRunnerRegistry {
     if (!entry) return "未找到该提供商，请检查 Paseo 配置";
     if (!entry.enabled) return "该提供商已停用";
     if (entry.status === "unavailable" || entry.status === "error") return clipped(entry.error, 300) ?? "该提供商当前不可用，请检查登录状态";
-    if (insightAnalysisMode(entry.modes).unsafe) return "该提供商没有可以安全分析的模式";
+    if (!entry.modes.length) return NO_MODES_REASON;
+    if (analysisModeOf(entry).unsafe) return UNSAFE_REASON;
     return null;
   }
   /**
@@ -119,7 +150,7 @@ export class InsightRunnerRegistry {
       const base = AUTO_BASES.indexOf(entry.extends as typeof AUTO_BASES[number]);
       return base >= 0 ? AUTO_BASES.length + base : -1;
     };
-    const choice = (await this.catalog()).entries.map((entry, index) => ({ entry, index, rank: rank(entry), read: insightAnalysisMode(entry.modes).access === "read" ? 0 : 1 }))
+    const choice = (await this.catalog()).entries.map((entry, index) => ({ entry, index, rank: rank(entry), read: analysisModeOf(entry).access === "read" ? 0 : 1 }))
       .filter(item => item.rank >= 0 && !this.unavailable(item.entry))
       .sort((a, b) => a.rank - b.rank || a.read - b.read || a.index - b.index)[0]?.entry;
     return choice ? { kind: "provider", provider: choice.provider, model: null, thinkingOptionId: null } : null;
@@ -130,7 +161,7 @@ export class InsightRunnerRegistry {
       if (!chosen) throw new Error(NO_RUNNER_ERROR);
       return this.resolve(chosen);
     }
-    if (runner.kind === "grok") return { info: { ...BUILTIN_INSIGHT_RUNNER }, model: "grok-4.7", effort: "xhigh", access: "none", featureValues: {} };
+    if (runner.kind === "grok") return grokPlan(runner);
     const catalog = await this.catalog();
     const profile = runner.kind === "profile" ? catalog.profiles.find(candidate => candidate.id === runner.profileId) : undefined;
     if (runner.kind === "profile" && !profile) throw new Error("找不到所选分析 Profile，请重新选择执行器");
@@ -141,9 +172,9 @@ export class InsightRunnerRegistry {
     const model = entry.models.find(candidate => candidate.id === modelId);
     const thinkingOptionId = (runner.kind === "provider" ? runner.thinkingOptionId : profile?.thinkingOptionId) ?? model?.defaultThinkingOptionId ?? null;
     const thinkingLabel = model?.thinking.find(option => option.id === thinkingOptionId)?.label ?? thinkingOptionId;
-    const { modeId, access, providerOptions } = insightAnalysisMode(entry.modes);
+    const { modeId, access, providerOptions } = analysisModeOf(entry);
     const label = runner.kind === "profile" ? profile!.name : [entry.label, entry.label.includes(provider) ? null : provider, model?.label ?? modelId, thinkingLabel].filter(Boolean).join(" · ");
-    return { info: { kind: runner.kind, label: clipped(label, 160) ?? provider, provider, model: modelId, thinkingOptionId, modeId, sessionAgentId: null }, model: modelId ?? provider, effort: thinkingOptionId, access, featureValues: filterInsightFeatures(profile?.featureValues), ...(providerOptions ? { providerOptions } : {}) };
+    return { info: { kind: runner.kind, label: clipped(label, 160) ?? provider, provider, model: modelId, thinkingOptionId, modeId, sessionAgentId: null }, model: modelId ?? provider, effort: thinkingOptionId, access, featureValues: { ...filterInsightFeatures(profile?.featureValues), ...lockedFeatures(entry) }, ...(providerOptions ? { providerOptions } : {}) };
   }
   async runners(): Promise<InsightRunners> {
     const [catalog, available] = await Promise.all([this.catalog(), this.binaryAvailable()]);
@@ -154,12 +185,12 @@ export class InsightRunnerRegistry {
       reason: chosen ? (chosen.access === "ask" ? ASK_REASON : null) : NO_RUNNER_ERROR, access: chosen?.access ?? "none", modeId: chosen?.info.modeId ?? null };
     const profiles: InsightRunnerOption[] = catalog.profiles.slice(0, 40).map(profile => {
       const entry = catalog.entries.find(candidate => candidate.provider === profile.provider), reason = this.unavailable(entry);
-      const { modeId, access } = insightAnalysisMode(entry?.modes ?? []), mode = { modeId, access }, model = entry?.models.find(candidate => candidate.id === (profile.model ?? entry.models.find(candidate => candidate.isDefault)?.id));
+      const { modeId, access } = entry ? analysisModeOf(entry) : insightAnalysisMode([]), mode = { modeId, access }, model = entry?.models.find(candidate => candidate.id === (profile.model ?? entry.models.find(candidate => candidate.isDefault)?.id));
       const thinking = profile.thinkingOptionId ?? model?.defaultThinkingOptionId ?? null;
       return { runner: { kind: "profile", profileId: profile.id }, label: clipped(profile.name, 160) ?? profile.id.slice(0, 160), detail: clipped(profile.notes, 400), providerLabel: entry?.label ?? profile.provider.slice(0, 160), modelLabel: model?.label ?? clipped(profile.model, 240),
         thinkingLabel: model?.thinking.find(option => option.id === thinking)?.label ?? clipped(thinking, 120), available: !reason, reason: reason ?? (mode.access === "ask" ? ASK_REASON : null), ...mode };
     });
-    return { auto, builtin, profiles, providers: catalog.entries.filter(entry => entry.enabled).slice(0, 40).map(entry => { const { modeId, access } = insightAnalysisMode(entry.modes), mode = { modeId, access }, reason = this.unavailable(entry);
+    return { auto, builtin, profiles, providers: catalog.entries.filter(entry => entry.enabled).slice(0, 40).map(entry => { const { modeId, access } = analysisModeOf(entry), mode = { modeId, access }, reason = this.unavailable(entry);
       return { provider: entry.provider, label: entry.label, available: !reason, reason: reason ?? (mode.access === "ask" ? ASK_REASON : null), ...mode, defaultModel: entry.models.find(model => model.isDefault)?.id ?? null };
     }) };
   }
@@ -195,6 +226,8 @@ function snapshotUsage(snapshot: PaseoAgent | null): InsightJob["usage"] {
 export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T>): Promise<PaseoStructuredResult<T>> {
   const { paseo, plan, parent, signal } = options;
   if (plan.info.kind === "grok" || plan.info.kind === "auto" || !plan.info.provider) throw new Error("Grok 分析必须使用 Grok CLI 执行");
+  // Never create a helper whose mode is not pinned to a verified restricted one: without a mode it would inherit the analysed Agent's.
+  if (!plan.info.modeId || (plan.access !== "read" && plan.access !== "ask")) throw new Error(UNVERIFIED_MODE_ERROR);
   if (signal.aborted) throw new Error("分析已取消");
   const now = options.now ?? Date.now, timeoutMs = options.timeoutMs ?? 20 * 60_000, deadline = now() + timeoutMs, timers = options.timers ?? defaultTimers;
   let handle: PaseoAgentHandle | undefined, terminated: Error | undefined, denials = 0;
@@ -229,7 +262,7 @@ export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T
   try {
     remaining();
     const config: PaseoAgentCreateOptions["config"] = { provider: plan.info.model ? `${plan.info.provider}/${plan.info.model}` : plan.info.provider,
-      ...(plan.info.modeId ? { modeId: plan.info.modeId } : {}), ...(plan.info.thinkingOptionId ? { thinkingOptionId: plan.info.thinkingOptionId } : {}), featureValues: filterInsightFeatures(plan.featureValues),
+      modeId: plan.info.modeId, ...(plan.info.thinkingOptionId ? { thinkingOptionId: plan.info.thinkingOptionId } : {}), featureValues: filterInsightFeatures(plan.featureValues),
       ...(plan.providerOptions ? { options: plan.providerOptions as NonNullable<PaseoAgentCreateOptions["config"]["options"]> } : {}), systemPrompt: options.systemPrompt };
     const common = { config, title: (options.title ?? `观测台分析 · ${parent.title}`).slice(0, 60), prompt: options.prompt, outputSchema: z.toJSONSchema(options.schema), labels: { "observatory.role": "insight", "observatory.job": options.jobId } };
     let creation: Promise<PaseoAgentHandle>;

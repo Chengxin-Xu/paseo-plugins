@@ -48,6 +48,24 @@ describe("mergeDashboard", () => {
   });
 });
 
+describe("unavailable boards", () => {
+  it("hides boards the server left out, until the server reports them back", () => {
+    const current: DashboardData = { revision: "r1", changedAt: 1, projects, boards: [board("prj_a", 1), board("__inbox__", 1)] };
+    const unavailable = [{ projectId: "prj_a", bytes: 40_000_000, reason: "file" as const }, { projectId: null, bytes: 50_000_000, reason: "total" as const }];
+    const next = mergeDashboard(current, { revision: "r2", boards: [], unavailable }, 5);
+    expect(next.boards.map(b => b.projectId)).toEqual(["__inbox__"]);
+    expect(next.unavailable).toEqual(unavailable);
+    // Its own write result does not bring it back while the server leaves it out, and an unchanged reply keeps all.
+    expect(patchDashboard(next, board("prj_a", 2), 6).boards.map(b => b.projectId)).toEqual(["__inbox__"]);
+    expect(mergeDashboard(next, { unchanged: true, revision: "r2" }, 7)).toBe(next);
+    // A reply without the list (an older server) keeps it; an empty list clears it.
+    expect(mergeDashboard(next, { revision: "r3", boards: [] }, 8).unavailable).toEqual(unavailable);
+    const back = mergeDashboard(next, { revision: "r4", boards: [board("prj_a", 3)], unavailable: [] }, 9);
+    expect(back.boards.map(b => [b.projectId, b.revision])).toEqual([["__inbox__", 1], ["prj_a", 3]]);
+    expect(back.unavailable).toEqual([]);
+  });
+});
+
 describe("pollInterval", () => {
   it("stops while hidden, polls fast after changes and relaxes when idle", () => {
     expect(pollInterval(false, { changedAt: 0 }, 0)).toBe(false);

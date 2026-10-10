@@ -1,5 +1,18 @@
 # 变更记录
 
+## 0.8.1 — 2026-10-10
+
+Security hardening after two external reviews of the published 0.8.0. Notes, the board file format and the interface stay the same, and lock files written by 0.8.0 are still understood.
+
+- Board lock: a waiting writer now takes over a lock only when the process holding it has exited (on Linux a reused pid counts as exited, by the process start time), or after a minute when the holder cannot be checked from here (unreadable lock, another host or PID namespace). 0.8.0 removed any lock older than 30 seconds, even a live holder's. Each lock carries a random token: a writer removes only its own lock and checks it still holds the lock right before committing, and a `.reclaim` guard file lets only one of several waiters take over a stale lock. Before, two writers could hold a board at once and the later write silently replaced the earlier one.
+- Overview size limits: a board file over 32 MiB, or the boards that would push one overview reply past 32 MiB in total (filled smallest first), are left out and named. The app shows a notice, marks those projects 不可用 in the project list and explains instead of showing an empty project; every other project loads as usual. Before, one oversized board, or two large boards together, made the whole overview fail. The total stays at 32 MiB because the reply is one WebSocket message: over the relay it grows by a third, and the host drops an app whose outbound queue would pass 64 MiB. In the CLI, `list` without `--project` does the same and reports what it skipped (`unavailable` in `--json`); a board left out only for the total still reads with `--project`.
+- CLI input limits: `--body-file` reads only regular files and refuses, from `stat` and before reading, files over 96,000 bytes, the most a 32,000-character body can take in UTF-8. Directories, FIFOs and devices such as `/dev/zero` are refused without being opened. Standard input (`-`, and now `/dev/stdin`) stops at the same limit, and the `projects.json` fallback at 8 MiB, the limit already applied to `paseo project ls`. There is still no path allow-list: the CLI runs in the agent's own shell, which can read those files anyway.
+- CLI output: human-readable output shows control characters from notes, project names and paths (ESC sequences such as OSC 52, CR, backspace, C1 controls) escaped as `\xNN`, keeping newlines and tabs; error messages too. `--json` output is unchanged. Times print in UTC and say so.
+- Start dialog: provider errors and launch failures sent to the app are cut to 500 characters, including those in journals written before.
+- The inbox has one description, 暂不归入项目的想法, in the projects RPC, the overview and the CLI, which used three wordings.
+- Development: the fixture preview server answers a malformed request such as `GET //` with 400 and a missing build with 500 instead of exiting, and `PROJECT_NOTES_PREVIEW_PORT` sets its port (default 4693) for both the server and the Playwright config.
+- Tests: lock liveness, pid reuse, unknown holders, a deterministic two-writer interleaving that lost an update on 0.8.0, a refused commit after the lock was taken over, CLI processes recovering a crashed writer's lock, overview degradation in the store, dashboard, client merge and UI, CLI input limits, escaping, UTC times and capped errors. A cache test that assumed ctime changes within one kernel clock tick now waits for the tick (it failed about 1 run in 7 before).
+
 ## 0.8.0 — 2026-10-09
 
 开源整理：可以单独公开，并提交到 Paseo 插件市场。界面、功能和数据格式不变，已有手记照常读取。
