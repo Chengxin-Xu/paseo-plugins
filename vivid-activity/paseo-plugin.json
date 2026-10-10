@@ -1,0 +1,25 @@
+{
+  "id": "vivid-activity",
+  "name": "Vivid Activity",
+  "description": "Redraws agent thinking and tool-call rows as color-coded activity rows with live states, folds finished runs into one summary row and times every step. Simplified Chinese interface.",
+  "icon": "assets/icon.png",
+  "media": [
+    "assets/screenshot-desktop-dark.png",
+    "assets/screenshot-details-light.png",
+    "assets/screenshot-phone-dark.png",
+    "assets/screenshot-settings-dark.png"
+  ],
+  "requirements": {
+    "paseo": ">=0.11.1"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ]
+}

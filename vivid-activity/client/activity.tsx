@@ -1,0 +1,2495 @@
+import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent, useRpc, useSettings } from "@getpaseo/plugin/client";
+import { Icon, ScrollView, copyText, useRevealedText, useToast } from "@getpaseo/plugin/client/react-native";
+import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import {
+  ActivityIndicator,
+  Image,
+  Pressable,
+  Text,
+  View,
+  type NativeScrollEvent,
+  type ScrollView as NativeScrollView,
+  type NativeSyntheticEvent,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
+import type { z } from "zod";
+import { useHighlightTokens, type HighlightToken } from "./highlight";
+import { BrandChip, failureText, lookFor, mcpParts, resolveVividPalette, VividHeader, zh, type LookKey, type RowStatus } from "./vivid";
+import { commandBadge, fileBadge, type Badge } from "../shared/brand";
+import { statusLabel } from "../shared/vivid-model";
+import { usePendingPermissions } from "./attention";
+import { densityMetrics, useDensity, useFoldRow, type DensityMetrics } from "./density";
+import { timingText, useLiveNow, useOnScreen, useRowTiming } from "./timing";
+import { Breathe } from "./motion";
+import {
+  cmonoTextEscape,
+  cmonoViewEscape,
+  cuiTextEscape,
+  cuiViewEscape,
+  pmonoViewEscape,
+} from "./web";
+import { GithubToolDetail } from "./github";
+import { ExaToolDetail, PaseoToolDetail } from "./paseo";
+import { CodeModeToolDetail } from "./codemode";
+import { BgWaitToolDetail, PiSubagentLifecycleSummary, PiSubagentToolDetail, SupervisorToolDetail } from "./pi-subagents";
+import { parsePiSubagentCall, piSubagentOperation } from "../shared/pi-subagents";
+import { OmpWaitToolDetail } from "./omp-wait";
+import { OmpFindToolDetail } from "./omp-find";
+import { OpencodeSubagentToolDetail } from "./opencode-subagent";
+import { TodoToolDetail } from "./todo";
+import {
+  compactText,
+  diffLinesForDetail,
+  editDiffContentSize,
+  effectiveUnifiedDiff,
+  estimateReasoningTokens,
+  extractCodeInput,
+  fileIconForPath,
+  formatReasoningMeta,
+  formatUnknownValue,
+  expansionTargetForToolCall,
+  hasMeaningfulToolCallDetail,
+  hasMeaningfulUnknownValue,
+  isBgWaitTool,
+  isOmpWaitTool,
+  isOpencodeSubagentTool,
+  isSkillTool,
+  isSubagentSupervisorTool,
+  isTodoTool,
+  paseoToolLeafName,
+  parseOpencodeSearchContent,
+  parsePiLsOutput,
+  resolveSearchCounts,
+  MAX_VISIBLE_SUBAGENT_ACTIONS,
+  notInHeader,
+  subAgentLogFullyShown,
+  toolCallHasBody,
+  parseSubAgentActionLog,
+  previewText,
+  readErrorMessage,
+  relativeToRoot,
+  resolveActivityPalette,
+  resolveSubAgentActionPresentation,
+  skillNameForDetail,
+  splitFileDisplay,
+  splitReasoningSteps,
+  splitStepTitle,
+  stripLeadingCwdCd,
+  truncateDirFront,
+  MAX_DIFF_CHARS,
+  PREVIEW_LINES,
+  type ActivityPalette,
+  type ActivityThemeColors,
+  type DiffLine,
+} from "../shared/presentation";
+import { isOmpFindTool } from "../shared/omp-find";
+import { extractCodeModeCode, isCodeModeTool } from "../shared/codemode";
+import { parseInlineMarkdown, parseReasoningMarkdown, type ReasoningMarkdownBlock } from "../shared/markdown";
+import { readImageRpc, shouldAttemptImageLoad } from "../shared/read-image";
+import { exaToolKind } from "../shared/exa";
+import { githubToolKind } from "../shared/github";
+import { activitySettings, DEFAULT_EXPANSION, DEFAULT_PALETTE_MODE } from "../shared/settings";
+import type { ExpansionMode, ExpansionTarget } from "../shared/settings";
+import {
+  isLatestTaskUpdate,
+  resolveExpansion,
+  resolveTaskUpdateExpansion,
+  reasoningItemDataSchema,
+  toolCallItemDataSchema,
+  type ReasoningItemData,
+  type TaskUpdateExpansionOverride,
+  type ToolCallItemData,
+} from "../shared/timeline";
+
+const MAX_DETAIL_HEIGHT = 420;
+
+// Paseo spaces consecutive activity rows by applying its inter-row gap to the row
+// that still has a newer neighbor. On the native inverted timeline the newest live
+// row gets none, leaving no gap above it. The plugin supplies the missing gap on the
+// row itself whenever it is the live tail.
+// 本地补丁：行距按「行密度」取（client/density.ts）：紧凑行间 4px，标准 10px（0.3.0-local.1）。
+
+type Theme = PluginTimelineItemProps["theme"];
+type ReasoningData = z.output<typeof reasoningItemDataSchema>;
+type ToolCallData = z.output<typeof toolCallItemDataSchema>;
+
+const latestReasoningTimestamps = new Map<string, number>();
+const latestReasoningListeners = new Set<() => void>();
+const latestToolCallTimestamps = new Map<string, number>();
+const latestToolCallListeners = new Set<() => void>();
+const latestTaskUpdateTimestamps = new Map<string, number>();
+const latestTaskUpdateListeners = new Set<() => void>();
+const getEmptyTaskUpdateTimestamp = () => 0;
+
+function updateLatestReasoningTimestamp(agentId: string, timestamp: number): void {
+  const current = latestReasoningTimestamps.get(agentId) ?? 0;
+  if (timestamp <= current) return;
+  latestReasoningTimestamps.set(agentId, timestamp);
+  for (const listener of latestReasoningListeners) listener();
+}
+
+function subscribeLatestReasoning(listener: () => void): () => void {
+  latestReasoningListeners.add(listener);
+  return () => latestReasoningListeners.delete(listener);
+}
+
+function useIsLatestReasoning(agentId: string, timestamp: Date, isStreaming: boolean): boolean {
+  const itemTime = timestamp.getTime();
+  if (isStreaming || itemTime > (latestReasoningTimestamps.get(agentId) ?? 0)) {
+    updateLatestReasoningTimestamp(agentId, itemTime);
+  }
+
+  const latestTime = useSyncExternalStore(
+    subscribeLatestReasoning,
+    () => latestReasoningTimestamps.get(agentId) ?? 0,
+    () => 0,
+  );
+  return isStreaming || (latestTime > 0 && itemTime >= latestTime);
+}
+
+function updateLatestToolCallTimestamp(agentId: string, timestamp: number): void {
+  const current = latestToolCallTimestamps.get(agentId) ?? 0;
+  if (timestamp <= current) return;
+  latestToolCallTimestamps.set(agentId, timestamp);
+  for (const listener of latestToolCallListeners) listener();
+}
+
+function subscribeLatestToolCall(listener: () => void): () => void {
+  latestToolCallListeners.add(listener);
+  return () => latestToolCallListeners.delete(listener);
+}
+
+function useIsLatestToolCall(agentId: string, timestamp: Date, isRunning: boolean): boolean {
+  const itemTime = timestamp.getTime();
+  if (isRunning || itemTime > (latestToolCallTimestamps.get(agentId) ?? 0)) {
+    updateLatestToolCallTimestamp(agentId, itemTime);
+  }
+
+  const latestTime = useSyncExternalStore(
+    subscribeLatestToolCall,
+    () => latestToolCallTimestamps.get(agentId) ?? 0,
+    () => 0,
+  );
+  return isRunning || (latestTime > 0 && itemTime >= latestTime);
+}
+
+function updateLatestTaskUpdateTimestamp(agentId: string, timestamp: number): void {
+  const current = latestTaskUpdateTimestamps.get(agentId) ?? 0;
+  if (timestamp <= current) return;
+  latestTaskUpdateTimestamps.set(agentId, timestamp);
+  for (const listener of latestTaskUpdateListeners) listener();
+}
+
+function subscribeLatestTaskUpdate(listener: () => void): () => void {
+  latestTaskUpdateListeners.add(listener);
+  return () => latestTaskUpdateListeners.delete(listener);
+}
+
+function useLatestTaskUpdateTimestamp(agentId: string, timestamp: Date, isTaskUpdate: boolean): number {
+  const itemTime = timestamp.getTime();
+  const subscribe = useCallback(
+    (listener: () => void) => (isTaskUpdate ? subscribeLatestTaskUpdate(listener) : () => {}),
+    [isTaskUpdate],
+  );
+  const getSnapshot = useCallback(
+    () => (isTaskUpdate ? (latestTaskUpdateTimestamps.get(agentId) ?? 0) : 0),
+    [agentId, isTaskUpdate],
+  );
+  const latestTimestamp = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getEmptyTaskUpdateTimestamp,
+  );
+  useLayoutEffect(() => {
+    if (isTaskUpdate) updateLatestTaskUpdateTimestamp(agentId, itemTime);
+  }, [agentId, isTaskUpdate, itemTime]);
+  return isTaskUpdate ? Math.max(latestTimestamp, itemTime) : latestTimestamp;
+}
+
+/**
+ * Whether a row is the live tail: the newest activity row, still being produced, on
+ * the native inverted timeline. Paseo's inverted stream skips the inter-row gap on
+ * that row (the gap lands above the row before it), so only it needs the plugin to
+ * supply its own top spacing. Comparing against both activity stores keeps parallel
+ * (or background) rows from claiming the tail while a newer row exists; the web
+ * timeline is not inverted and already receives the host's gap.
+ */
+function useIsLiveTail(
+  agentId: string,
+  timestamp: Date,
+  active: boolean,
+  platform: PluginTimelineItemProps["layout"]["platform"],
+): boolean {
+  const reasoningLatest = useSyncExternalStore(
+    subscribeLatestReasoning,
+    () => latestReasoningTimestamps.get(agentId) ?? 0,
+    () => 0,
+  );
+  const toolCallLatest = useSyncExternalStore(
+    subscribeLatestToolCall,
+    () => latestToolCallTimestamps.get(agentId) ?? 0,
+    () => 0,
+  );
+  return (
+    active &&
+    platform !== "web" &&
+    timestamp.getTime() >= Math.max(reasoningLatest, toolCallLatest)
+  );
+}
+
+function useExpansionMode(target: ExpansionTarget): ExpansionMode {
+  const settings = useSettings(activitySettings);
+  if (settings.status === "ready") return settings.values.expansion[target] ?? DEFAULT_EXPANSION[target];
+  return DEFAULT_EXPANSION[target];
+}
+
+export function usePalette(theme: Theme): ActivityPalette {
+  const settings = useSettings(activitySettings);
+  const mode = settings.status === "ready" ? settings.values.palette : DEFAULT_PALETTE_MODE;
+  return useMemo(
+    () => (mode === "vivid" ? resolveVividPalette(theme) : resolveActivityPalette(mode === "theme" ? "vivid" : mode, theme.colors as ActivityThemeColors)),
+    [mode, theme],
+  );
+}
+
+export function useActivityStyles(theme: Theme, palette: ActivityPalette, metrics: DensityMetrics) {
+  return useMemo(
+    () => ({
+      card: {
+        marginHorizontal: 0,
+        marginTop: metrics.marginTop,
+        marginBottom: metrics.marginBottom,
+      } satisfies ViewStyle,
+      cardTail: {
+        marginTop: metrics.tailMarginTop,
+      } satisfies ViewStyle,
+      headerButton: {
+        alignItems: "center",
+        borderRadius: 2,
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+        outlineColor: "transparent",
+        outlineStyle: "none" as unknown as ViewStyle["outlineStyle"],
+        outlineWidth: 0,
+        overflow: "hidden",
+        paddingHorizontal: 5,
+        paddingVertical: metrics.plainPaddingVertical,
+      } satisfies ViewStyle,
+      iconBadge: {
+        alignItems: "center",
+        height: 16,
+        justifyContent: "center",
+        width: 16,
+      } satisfies ViewStyle,
+      title: {
+        color: theme.colors.foreground,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 12,
+        fontWeight: "600",
+        lineHeight: 17,
+      } satisfies TextStyle,
+      summary: {
+        color: theme.colors.foregroundMuted,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 12,
+        lineHeight: 17,
+        minWidth: 0,
+      } satisfies TextStyle,
+      filePath: {
+        alignItems: "center",
+        flex: 1,
+        flexDirection: "row",
+        minWidth: 0,
+      } satisfies ViewStyle,
+      fileDir: {
+        color: theme.colors.foregroundMuted,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 12,
+        lineHeight: 17,
+      } satisfies TextStyle,
+      fileName: {
+        color: theme.colors.foreground,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 12,
+        fontWeight: "600",
+        lineHeight: 17,
+      } satisfies TextStyle,
+      status: {
+        alignItems: "center",
+        flexDirection: "row",
+        marginLeft: 2,
+      } satisfies ViewStyle,
+      stats: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 3,
+        marginLeft: 2,
+      } satisfies ViewStyle,
+      additions: {
+        color: theme.colors.statusSuccess,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 15,
+      } satisfies TextStyle,
+      deletions: {
+        color: theme.colors.statusDanger,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 15,
+      } satisfies TextStyle,
+      // 本地补丁（吸收 beautiful-chat 的层次）：展开后是一张圆角卡片，代码和终端是卡片里更深一层的框。
+      // 只用边框和底色分层，不用阴影和毛玻璃：原生端和低端机零额外开销。
+      details: {
+        backgroundColor: theme.colors.surface1,
+        borderColor: theme.colors.border,
+        borderRadius: 10,
+        borderWidth: 1,
+        flexShrink: 1,
+        marginBottom: 2,
+        marginLeft: 2,
+        marginTop: 3,
+        minWidth: 0,
+        overflow: "hidden",
+      } satisfies ViewStyle,
+      detailsScroll: {
+        maxHeight: MAX_DETAIL_HEIGHT,
+      } satisfies ViewStyle,
+      detailsContent: {
+        gap: 8,
+        paddingHorizontal: 8,
+        paddingVertical: 8,
+      } satisfies ViewStyle,
+      frame: {
+        backgroundColor: theme.colors.surface0,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+        borderWidth: 1,
+        minWidth: 0,
+        overflow: "hidden",
+      } satisfies ViewStyle,
+      frameHeader: {
+        alignItems: "center",
+        backgroundColor: theme.colors.surface1,
+        borderBottomColor: theme.colors.border,
+        borderBottomWidth: 1,
+        flexDirection: "row",
+        gap: 6,
+        minHeight: 26,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+      } satisfies ViewStyle,
+      frameTitleRow: {
+        alignItems: "center",
+        flexDirection: "row",
+        flexGrow: 1,
+        flexShrink: 1,
+        gap: 6,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      frameTitle: {
+        color: theme.colors.foreground,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 16,
+      } satisfies TextStyle,
+      frameBody: {
+        flexDirection: "row",
+        minWidth: "100%",
+        paddingHorizontal: 8,
+        paddingVertical: 6,
+      } satisfies ViewStyle,
+      gutter: {
+        alignItems: "flex-end",
+        marginRight: 10,
+      } satisfies ViewStyle,
+      gutterText: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontVariant: ["tabular-nums"],
+        lineHeight: 16,
+        opacity: 0.6,
+      } satisfies TextStyle,
+      termOutput: {
+        borderTopColor: theme.colors.border,
+        borderTopWidth: 1,
+      } satisfies ViewStyle,
+      termOutputHeader: {
+        alignItems: "center",
+        flexDirection: "row",
+        justifyContent: "space-between",
+        paddingHorizontal: 8,
+        paddingTop: 5,
+      } satisfies ViewStyle,
+      // 本地补丁：小节名改为中文后不用等宽、大写和字距（上游为 10px 等宽大写英文）。
+      detailLabel: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 15,
+      } satisfies TextStyle,
+      detailText: {
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      mutedText: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      searchLineNumber: {
+        color: theme.colors.accent,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      pathRow: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      pathText: {
+        color: theme.colors.foreground,
+        flex: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      section: {
+        gap: 3,
+      } satisfies ViewStyle,
+      showMoreButton: {
+        alignSelf: "flex-start",
+        paddingHorizontal: 6,
+        paddingVertical: 3,
+        borderRadius: 2,
+        marginTop: 3,
+      } satisfies ViewStyle,
+      showMoreText: {
+        color: palette.categoryColors.agent,
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 15,
+      } satisfies TextStyle,
+      codeHeader: {
+        alignItems: "center",
+        flexDirection: "row",
+        justifyContent: "space-between",
+        minWidth: "100%",
+      } satisfies ViewStyle,
+      copyButton: {
+        alignItems: "center",
+        borderRadius: 2,
+        flexDirection: "row",
+        gap: 3,
+        paddingHorizontal: 4,
+        paddingVertical: 2,
+      } satisfies ViewStyle,
+      // 本地补丁：中文的按钮、字段名、状态胶囊用 11px 常规字体（上游为 10px 等宽英文）。
+      copyText: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 11,
+        lineHeight: 15,
+      } satisfies TextStyle,
+      todoList: {
+        gap: 2,
+      } satisfies ViewStyle,
+      todoRow: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      todoTitle: {
+        color: theme.colors.foreground,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        minWidth: 0,
+      } satisfies TextStyle,
+      todoDone: {
+        color: theme.colors.foregroundMuted,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        minWidth: 0,
+        textDecorationLine: "line-through",
+      } satisfies TextStyle,
+      imageSurface: {
+        backgroundColor: theme.colors.surface0,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+        borderWidth: 1,
+        minWidth: "100%",
+        overflow: "hidden",
+      } satisfies ViewStyle,
+      imageThumbnail: {
+        height: 200,
+        width: "100%",
+      } satisfies ViewStyle,
+      imageExpanded: {
+        height: 480,
+        width: "100%",
+      } satisfies ViewStyle,
+      codeSurface: {
+        backgroundColor: theme.colors.surface0,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+        borderWidth: 1,
+        minWidth: "100%",
+        paddingHorizontal: 6,
+        paddingVertical: 4,
+      } satisfies ViewStyle,
+      codeScroll: {
+        maxWidth: "100%",
+      } satisfies ViewStyle,
+      codeLine: {
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        minHeight: 16,
+      } satisfies TextStyle,
+      diffSurface: {
+        backgroundColor: theme.colors.surface0,
+        borderColor: theme.colors.border,
+        borderRadius: 8,
+        borderWidth: 1,
+        minWidth: "100%",
+        overflow: "hidden",
+        paddingVertical: 2,
+      } satisfies ViewStyle,
+      diffLine: {
+        flexDirection: "row",
+        minHeight: 16,
+        paddingHorizontal: 5,
+      } satisfies ViewStyle,
+      diffMarker: {
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        width: 12,
+      } satisfies TextStyle,
+      diffText: {
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      diffAdded: {
+        backgroundColor: palette.categoryBackgrounds.agent,
+      } satisfies ViewStyle,
+      diffRemoved: {
+        backgroundColor: palette.statusBackgrounds.failed,
+      } satisfies ViewStyle,
+      diffMeta: {
+        backgroundColor: palette.categoryBackgrounds.search,
+      } satisfies ViewStyle,
+      reasoningBody: {
+        gap: 3,
+        paddingHorizontal: 7,
+        paddingVertical: 5,
+      } satisfies ViewStyle,
+      stepList: {
+        paddingHorizontal: 8,
+        paddingTop: 8,
+        paddingBottom: 2,
+      } satisfies ViewStyle,
+      stepHeader: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+      } satisfies ViewStyle,
+      stepBody: {
+        gap: 3,
+        marginLeft: 16,
+      } satisfies ViewStyle,
+      // 本地补丁：思考步骤的进度轨（beautiful-chat 的连线步骤），完成的步骤实心勾，进行中的空心并呼吸。
+      stepRow: {
+        flexDirection: "row",
+        gap: 8,
+      } satisfies ViewStyle,
+      stepRail: {
+        alignItems: "center",
+        width: 14,
+      } satisfies ViewStyle,
+      stepDot: {
+        alignItems: "center",
+        borderRadius: 7,
+        borderWidth: 1.5,
+        height: 14,
+        justifyContent: "center",
+        marginTop: 1,
+        width: 14,
+      } satisfies ViewStyle,
+      stepLine: {
+        backgroundColor: theme.colors.border,
+        borderRadius: 1,
+        flexGrow: 1,
+        marginBottom: 1,
+        marginTop: 2,
+        width: 2,
+      } satisfies ViewStyle,
+      stepContent: {
+        flexGrow: 1,
+        flexShrink: 1,
+        gap: 3,
+        minWidth: 0,
+        paddingBottom: 10,
+      } satisfies ViewStyle,
+      stepTitle: {
+        color: theme.colors.foreground,
+        fontSize: 12,
+        fontWeight: "700",
+        lineHeight: 16,
+      } satisfies TextStyle,
+      reasoningLine: {
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 12,
+        lineHeight: 17,
+      } satisfies TextStyle,
+      reasoningHeading: {
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 12,
+        fontWeight: "600",
+        lineHeight: 17,
+      } satisfies TextStyle,
+      reasoningBullet: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 12,
+        lineHeight: 17,
+        width: 14,
+      } satisfies TextStyle,
+      reasoningBulletRow: {
+        alignItems: "flex-start",
+        flexDirection: "row",
+        gap: 4,
+      } satisfies ViewStyle,
+      reasoningQuote: {
+        borderLeftColor: theme.colors.border,
+        borderLeftWidth: 1,
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 12,
+        lineHeight: 17,
+        paddingLeft: 6,
+      } satisfies TextStyle,
+      reasoningInlineCode: {
+        backgroundColor: theme.colors.surface2,
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 11,
+        paddingHorizontal: 2,
+      } satisfies TextStyle,
+      reasoningSpacer: {
+        height: 2,
+      } satisfies ViewStyle,
+      subAgentProgress: {
+        borderLeftColor: theme.colors.border,
+        borderLeftWidth: 1,
+        gap: 1,
+        marginLeft: 12,
+        paddingBottom: 2,
+        paddingLeft: 7,
+        paddingTop: 1,
+      } satisfies ViewStyle,
+      subAgentLine: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      subAgentLineIcon: {
+        alignItems: "center",
+        justifyContent: "center",
+        width: 14,
+      } satisfies ViewStyle,
+      subAgentLineLabel: {
+        color: theme.colors.foreground,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 16,
+      } satisfies TextStyle,
+      subAgentLineSummary: {
+        color: theme.colors.foregroundMuted,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        minWidth: 0,
+      } satisfies TextStyle,
+      subAgentMore: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        paddingLeft: 19,
+      } satisfies TextStyle,
+      subAgentAction: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+        paddingLeft: 19,
+      } satisfies ViewStyle,
+      subAgentActionIcon: {
+        alignItems: "center",
+        justifyContent: "center",
+        width: 14,
+      } satisfies ViewStyle,
+      subAgentActionLabel: {
+        color: theme.colors.foreground,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      subAgentActionSummary: {
+        color: theme.colors.foregroundMuted,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        minWidth: 0,
+      } satisfies TextStyle,
+      childTimelineSection: {
+        gap: 2,
+      } satisfies ViewStyle,
+      childTimelineHeader: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+      } satisfies ViewStyle,
+      childTimelineList: {
+        borderLeftColor: theme.colors.border,
+        borderLeftWidth: 1,
+        gap: 1,
+        marginLeft: 7,
+        paddingLeft: 7,
+      } satisfies ViewStyle,
+      childTimelineItem: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 5,
+        minWidth: 0,
+        paddingVertical: 1,
+      } satisfies ViewStyle,
+      childTimelineItemTitle: {
+        color: theme.colors.foreground,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontWeight: "500",
+        lineHeight: 15,
+      } satisfies TextStyle,
+      childTimelineItemSummary: {
+        color: theme.colors.foregroundMuted,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 14,
+        minWidth: 0,
+      } satisfies TextStyle,
+      childTimelineItemMeta: {
+        color: theme.colors.foregroundMuted,
+        flexShrink: 0,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 14,
+      } satisfies TextStyle,
+      empty: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+      } satisfies TextStyle,
+      pendingRow: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 8,
+        paddingVertical: 4,
+      } satisfies ViewStyle,
+      paseoStack: {
+        gap: 6,
+      } satisfies ViewStyle,
+      paseoHero: {
+        borderLeftColor: theme.colors.border,
+        borderLeftWidth: 2,
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+      } satisfies ViewStyle,
+      paseoHeroRow: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 6,
+      } satisfies ViewStyle,
+      paseoHeroIcon: {
+        alignItems: "center",
+        height: 16,
+        justifyContent: "center",
+        width: 16,
+      } satisfies ViewStyle,
+      paseoHeroTitle: {
+        color: theme.colors.foreground,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 16,
+      } satisfies TextStyle,
+      paseoHeroSubtitle: {
+        color: theme.colors.foregroundMuted,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 14,
+      } satisfies TextStyle,
+      paseoRows: {
+        gap: 2,
+      } satisfies ViewStyle,
+      paseoRow: {
+        alignItems: "flex-start",
+        flexDirection: "row",
+        gap: 8,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      paseoKey: {
+        color: theme.colors.foregroundMuted,
+        flexShrink: 0,
+        fontSize: 11,
+        lineHeight: 15,
+        minWidth: 90,
+      } satisfies TextStyle,
+      paseoValue: {
+        color: theme.colors.foreground,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 15,
+        minWidth: 0,
+      } satisfies TextStyle,
+      paseoPrompt: {
+        backgroundColor: theme.colors.surface0,
+        borderLeftColor: theme.colors.border,
+        borderLeftWidth: 1,
+        color: theme.colors.foreground,
+        fontFamily: "monospace",
+        fontSize: 11,
+        lineHeight: 16,
+        paddingHorizontal: 6,
+        paddingVertical: 4,
+      } satisfies TextStyle,
+      paseoList: {
+        gap: 0,
+      } satisfies ViewStyle,
+      paseoListItem: {
+        borderTopColor: theme.colors.border,
+        borderTopWidth: 1,
+        gap: 1,
+        paddingHorizontal: 5,
+        paddingVertical: 3,
+      } satisfies ViewStyle,
+      paseoListItemHeader: {
+        alignItems: "center",
+        flexDirection: "row",
+        gap: 7,
+        minWidth: 0,
+      } satisfies ViewStyle,
+      paseoListItemTitle: {
+        color: theme.colors.foreground,
+        flex: 1,
+        flexShrink: 1,
+        fontFamily: "monospace",
+        fontSize: 11,
+        fontWeight: "500",
+        lineHeight: 15,
+        minWidth: 0,
+      } satisfies TextStyle,
+      paseoListItemMeta: {
+        color: theme.colors.foregroundMuted,
+        fontFamily: "monospace",
+        fontSize: 10,
+        lineHeight: 14,
+      } satisfies TextStyle,
+      paseoChips: {
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 5,
+      } satisfies ViewStyle,
+      paseoChip: {
+        borderColor: theme.colors.border,
+        borderRadius: 2,
+        borderWidth: 1,
+        paddingHorizontal: 4,
+        paddingVertical: 1,
+      } satisfies ViewStyle,
+      paseoChipText: {
+        color: theme.colors.foregroundMuted,
+        fontSize: 11,
+        lineHeight: 15,
+      } satisfies TextStyle,
+      paseoStatus: {
+        alignSelf: "flex-start",
+      } satisfies ViewStyle,
+      paseoStatusText: {
+        color: theme.colors.foreground,
+        fontSize: 11,
+        fontWeight: "600",
+        lineHeight: 15,
+      } satisfies TextStyle,
+    }),
+    [metrics, palette, theme],
+  );
+}
+
+export type ActivityStyles = ReturnType<typeof useActivityStyles>;
+
+function statusIcon(status: ToolCallData["status"]): string {
+  switch (status) {
+    case "running":
+      return "LoaderCircle";
+    case "completed":
+      return "CircleCheck";
+    case "failed":
+      return "CircleX";
+    case "canceled":
+      return "CircleSlash2";
+  }
+}
+
+function asToolCallDetail(value: ToolCallData["detail"]): ToolCallDetail | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = Reflect.get(value, "type");
+  if (typeof type !== "string") return null;
+  return value as unknown as ToolCallDetail;
+}
+
+function DetailLabel({ children, style }: { children: ReactNode; style: TextStyle }) {
+  return <Text style={style}>{typeof children === "string" ? zh(children) : children}</Text>;
+}
+
+function PathRow({
+  icon,
+  path,
+  styles,
+}: {
+  icon: string;
+  path: string;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  return (
+    <View style={styles.pathRow}>
+      <Icon name={icon} color={styles.pathText.color} size={12} />
+      <Text selectable style={styles.pathText}>
+        {path}
+      </Text>
+    </View>
+  );
+}
+
+/** 本地补丁：文件标题行：语言色标 + 路径（相对 Agent 工作目录）。 */
+function FileTitle({ path, styles }: { path: string; styles: ReturnType<typeof useActivityStyles> }) {
+  const chip = fileBadge(path);
+  return (
+    <View style={styles.pathRow}>
+      {chip ? <BrandChip badge={chip} /> : <Icon name="File" color={styles.pathText.color} size={12} />}
+      <Text selectable numberOfLines={2} style={styles.pathText}>
+        {path}
+      </Text>
+    </View>
+  );
+}
+
+function TokenizedLines({
+  lines,
+  styles,
+}: {
+  lines: HighlightToken[][];
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  return (
+    <View>
+      {lines.map((line, lineIndex) => (
+        <Text key={`line-${lineIndex}`} selectable style={styles.codeLine}>
+          {line.length === 0
+            ? " "
+            : line.map((token, tokenIndex) => {
+                const tokenStyle: TextStyle = {
+                  color: token.color ?? styles.codeLine.color,
+                  ...(token.fontStyle && token.fontStyle & 1 ? { fontStyle: "italic" } : {}),
+                  ...(token.fontStyle && token.fontStyle & 2 ? { fontWeight: "700" } : {}),
+                  ...(token.fontStyle && token.fontStyle & 4
+                    ? { textDecorationLine: "underline" }
+                    : {}),
+                };
+                return (
+                  <Text key={`${lineIndex}-${tokenIndex}`} style={tokenStyle}>
+                    {token.content}
+                  </Text>
+                );
+              })}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+/** Copy button with a short 「已复制」 confirmation. */
+function CopyButton({ value, label, theme, styles }: { value: string; label: string; theme: Theme; styles: ReturnType<typeof useActivityStyles> }) {
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+  }, []);
+  const handleCopy = useCallback(() => {
+    void copyText(value).then(
+      () => {
+        setCopied(true);
+        if (copyTimer.current) clearTimeout(copyTimer.current);
+        copyTimer.current = setTimeout(() => setCopied(false), 1500);
+      },
+      () => {
+        toast.error("复制失败");
+      },
+    );
+  }, [toast, value]);
+  return (
+    <Pressable accessibilityLabel={copied ? "已复制" : label} accessibilityRole="button" onPress={handleCopy} style={styles.copyButton}>
+      <Icon name={copied ? "Check" : "Copy"} color={copied ? theme.colors.statusSuccess : styles.copyText.color} size={11} />
+      <Text style={styles.copyText}>{copied ? "已复制" : "复制"}</Text>
+    </Pressable>
+  );
+}
+
+function LineGutter({ start, count, styles }: { start: number; count: number; styles: ReturnType<typeof useActivityStyles> }) {
+  const numbers = useMemo(() => Array.from({ length: count }, (_, index) => String(start + index)), [count, start]);
+  return (
+    <View style={styles.gutter}>
+      {numbers.map((number) => (
+        <Text key={number} style={styles.gutterText}>
+          {number}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+/**
+ * 本地补丁（吸收 beautiful-chat）：代码框。标题栏在框内：语言色标、标题（文件路径或小节名）、附加信息、复制；
+ * 正文可带行号。长内容先显示前 20 行。
+ */
+function HighlightedCodeBlock({
+  code,
+  language,
+  theme,
+  label,
+  styles,
+  chip,
+  title,
+  lineStart,
+  extra,
+  copyLabel = "复制代码",
+}: {
+  code: string;
+  language: string;
+  theme: Theme;
+  label?: string;
+  styles: ReturnType<typeof useActivityStyles>;
+  chip?: Badge | null;
+  /** Shown instead of the label, e.g. the file path. */
+  title?: string;
+  /** First line number; omit for no gutter. */
+  lineStart?: number;
+  extra?: ReactNode;
+  copyLabel?: string;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  // A file's final newline is not a line of its own (no empty numbered line at the end); copying keeps it.
+  const shown = useMemo(() => code.replace(/\r?\n$/, ""), [code]);
+  const preview = useMemo(() => previewText(shown), [shown]);
+  const displayCode = showAll ? shown : preview.text;
+  const tokens = useHighlightTokens(displayCode, language, theme.colors);
+  const lineCount = useMemo(() => (lineStart === undefined ? 0 : displayCode.split("\n").length), [displayCode, lineStart]);
+
+  return (
+    <View {...cmonoViewEscape} style={styles.frame}>
+      <View style={styles.frameHeader}>
+        <View style={styles.frameTitleRow}>
+          {chip ? <BrandChip badge={chip} /> : null}
+          {title ? (
+            <Text selectable numberOfLines={1} style={styles.frameTitle}>
+              {title}
+            </Text>
+          ) : label ? (
+            <DetailLabel style={styles.detailLabel}>{label}</DetailLabel>
+          ) : null}
+        </View>
+        {extra}
+        <CopyButton value={code} label={copyLabel} theme={theme} styles={styles} />
+      </View>
+      <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
+        <View style={styles.frameBody}>
+          {lineStart !== undefined ? <LineGutter start={lineStart} count={lineCount} styles={styles} /> : null}
+          <View>
+            {tokens ? (
+              <TokenizedLines lines={tokens} styles={styles} />
+            ) : (
+              <Text selectable style={styles.codeLine}>
+                {displayCode || " "}
+              </Text>
+            )}
+          </View>
+        </View>
+      </ScrollView>
+      {preview.truncated ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setShowAll(!showAll)}
+          style={styles.showMoreButton}
+        >
+          <Text style={styles.showMoreText}>
+            {showAll
+              ? "收起"
+              : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** Exit code of a shell call: the detail's own, else Claude Code's 「Exit code N」 error text. */
+function shellExitCode(detail: { exitCode?: number | null }, errorText: string | undefined): number | null {
+  if (typeof detail.exitCode === "number") return detail.exitCode;
+  const fromText = /^\s*Exit code (\d+)\b/i.exec(errorText ?? "")?.[1];
+  return fromText ? Number(fromText) : null;
+}
+
+/** 本地补丁（吸收 beautiful-chat）：终端框。标题栏：程序色标、退出码、复制命令；`$ 命令` 高亮；输出在下层。 */
+function TerminalBlock({
+  command,
+  output: rawOutput,
+  errorOutput,
+  exitCode,
+  theme,
+  styles,
+}: {
+  command: string;
+  output: string | undefined;
+  /** Claude Code puts a failed command's output in the error text: shown here, in red, when there is no output. */
+  errorOutput?: string;
+  exitCode: number | null;
+  theme: Theme;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const brand = useMemo(() => commandBadge(command), [command]);
+  const commandTokens = useHighlightTokens(`$ ${command}`, "bash", theme.colors);
+  const [showAll, setShowAll] = useState(false);
+  const isError = !rawOutput && Boolean(errorOutput);
+  // 「Exit code 1」 opens Claude Code's error text; the chip already says it.
+  const output = rawOutput || (errorOutput ? errorOutput.replace(/^\s*Exit code \d+\s*\n?/i, "").replace(/^\s*\n/, "") : undefined) || undefined;
+  const preview = useMemo(() => previewText((output ?? "").replace(/\r?\n$/, "")), [output]);
+  const shownOutput = showAll ? (output ?? "").replace(/\r?\n$/, "") : preview.text;
+  const outputTokens = useHighlightTokens(isError ? "" : shownOutput, "ansi", theme.colors);
+  const failed = exitCode !== null && exitCode !== 0;
+  const exitColor = failed ? theme.colors.statusDanger : theme.colors.statusSuccess;
+  return (
+    <View {...cmonoViewEscape} style={styles.frame}>
+      <View style={styles.frameHeader}>
+        <View style={styles.frameTitleRow}>
+          {brand ? <BrandChip badge={brand} /> : <Icon name="SquareTerminal" size={13} color={styles.copyText.color} />}
+          <DetailLabel style={styles.detailLabel}>命令</DetailLabel>
+        </View>
+        {exitCode !== null ? (
+          <View style={{ height: 16, paddingHorizontal: 5, borderRadius: 8, justifyContent: "center", borderWidth: 1, borderColor: exitColor }}>
+            <Text style={{ color: exitColor, fontSize: 10, fontWeight: "700", lineHeight: 12 }}>{`退出码 ${exitCode}`}</Text>
+          </View>
+        ) : null}
+        <CopyButton value={command} label="复制命令" theme={theme} styles={styles} />
+      </View>
+      <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
+        <View style={styles.frameBody}>
+          {commandTokens ? <TokenizedLines lines={commandTokens} styles={styles} /> : <Text selectable style={styles.codeLine}>{`$ ${command}`}</Text>}
+        </View>
+      </ScrollView>
+      {output ? (
+        <View style={styles.termOutput}>
+          <View style={styles.termOutputHeader}>
+            <DetailLabel style={isError ? { ...styles.detailLabel, color: theme.colors.statusDanger } : styles.detailLabel}>{isError ? "错误输出" : "输出"}</DetailLabel>
+            <CopyButton value={output} label="复制输出" theme={theme} styles={styles} />
+          </View>
+          <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
+            <View style={styles.frameBody}>
+              {outputTokens && !isError ? (
+                <TokenizedLines lines={outputTokens} styles={styles} />
+              ) : (
+                <Text selectable style={isError ? { ...styles.codeLine, color: theme.colors.statusDanger } : styles.codeLine}>{shownOutput || " "}</Text>
+              )}
+            </View>
+          </ScrollView>
+          {preview.truncated ? (
+            <Pressable accessibilityRole="button" onPress={() => setShowAll(!showAll)} style={styles.showMoreButton}>
+              <Text style={styles.showMoreText}>
+                {showAll ? "收起" : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+type ReadImageState =
+  | { status: "loading" }
+  | { status: "ok"; uri: string }
+  | { status: "fallback"; note?: string };
+
+// 本地补丁：预览只读 Agent 工作目录和临时目录（见 server/read-image.ts），其他位置给出原因。
+const IMAGE_NOTES: Partial<Record<string, string>> = {
+  outside: "图片不在 Agent 工作目录或临时目录内，不显示预览。",
+  "too-large": "图片超过 3 MB，不显示预览。",
+};
+
+function ReadImageBlock({
+  filePath,
+  agentId,
+  fallback,
+  styles,
+}: {
+  filePath: string;
+  agentId: string;
+  fallback: ReactNode;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const loadImage = useRpc(readImageRpc);
+  const [image, setImage] = useState<ReadImageState>({ status: "loading" });
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setImage({ status: "loading" });
+    setExpanded(false);
+    void loadImage({ filePath, agentId }).then(
+      (result) => {
+        if (cancelled) return;
+        if (result.status === "ok" && result.data && result.mimeType) {
+          setImage({ status: "ok", uri: `data:${result.mimeType};base64,${result.data}` });
+        } else {
+          const note = IMAGE_NOTES[result.status];
+          setImage(note ? { status: "fallback", note } : { status: "fallback" });
+        }
+      },
+      () => {
+        if (!cancelled) setImage({ status: "fallback" });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, filePath, loadImage]);
+
+  if (image.status === "fallback") {
+    return image.note ? <>
+      <Text style={styles.mutedText}>{image.note}</Text>
+      {fallback}
+    </> : <>{fallback}</>;
+  }
+  if (image.status === "loading") return <Text style={styles.mutedText}>正在加载图片…</Text>;
+  return (
+    <View style={styles.section}>
+      <DetailLabel style={styles.detailLabel}>图片</DetailLabel>
+      <Pressable
+        accessibilityLabel={expanded ? "缩小图片" : "放大图片"}
+        accessibilityRole="button"
+        onPress={() => setExpanded(!expanded)}
+      >
+        <View style={styles.imageSurface}>
+          <Image
+            source={{ uri: image.uri }}
+            style={expanded ? styles.imageExpanded : styles.imageThumbnail}
+            resizeMode="contain"
+          />
+        </View>
+      </Pressable>
+    </View>
+  );
+}
+
+function DiffBlock({
+  detail,
+  palette,
+  styles,
+}: {
+  detail: Extract<ToolCallDetail, { type: "edit" }>;
+  palette: ActivityPalette;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const lines = useMemo(() => diffLinesForDetail(detail), [detail]);
+  const isTruncated = lines.length > PREVIEW_LINES;
+  const displayLines = showAll || !isTruncated ? lines : lines.slice(0, PREVIEW_LINES);
+
+  return (
+    <View style={styles.section}>
+      <DetailLabel style={styles.detailLabel}>改动</DetailLabel>
+      <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
+        <View style={styles.diffSurface}>
+          {displayLines.length === 0 ? (
+            <Text style={styles.empty}>没有可显示的改动。</Text>
+          ) : (
+            displayLines.map((line, index) => <DiffRow key={`${line.kind}-${index}`} line={line} palette={palette} styles={styles} />)
+          )}
+        </View>
+      </ScrollView>
+      {isTruncated ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setShowAll(!showAll)}
+          style={styles.showMoreButton}
+        >
+          <Text style={styles.showMoreText}>
+            {showAll ? "收起" : `展开全部（${lines.length} 行）`}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function DiffRow({
+  line,
+  palette,
+  styles,
+}: {
+  line: DiffLine;
+  palette: ActivityPalette;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const rowStyle =
+    line.kind === "add"
+      ? styles.diffAdded
+      : line.kind === "remove"
+        ? styles.diffRemoved
+        : line.kind === "meta"
+          ? styles.diffMeta
+          : undefined;
+  const marker = line.kind === "add" ? "+" : line.kind === "remove" ? "-" : line.kind === "meta" ? "" : " ";
+  const markerColor =
+    line.kind === "add"
+      ? palette.statusColors.completed
+      : line.kind === "remove"
+        ? palette.statusColors.failed
+        : line.kind === "meta"
+          ? palette.categoryColors.search
+          : palette.categoryColors.unknown;
+  return (
+    <View style={[styles.diffLine, rowStyle]}>
+      <Text style={[styles.diffMarker, { color: markerColor }]}>{marker}</Text>
+      <Text selectable style={[styles.diffText, { color: line.kind === "meta" ? markerColor : styles.codeLine.color }]}>
+        {line.text || " "}
+      </Text>
+    </View>
+  );
+}
+
+function PendingOutput({ styles }: { styles: ReturnType<typeof useActivityStyles> }) {
+  return (
+    <View style={styles.pendingRow}>
+      <ActivityIndicator size="small" color={styles.mutedText.color} />
+      <Text style={styles.mutedText}>等待输出…</Text>
+    </View>
+  );
+}
+
+function SearchDetail({
+  detail,
+  headerSummary,
+  agentId,
+  theme,
+  styles,
+}: {
+  detail: Extract<ToolCallDetail, { type: "search" }>;
+  headerSummary: string | undefined;
+  agentId: string;
+  theme: Theme;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const cwd = useAgent(agentId, (agent) => agent.cwd);
+  const parsed = useMemo(() => parseOpencodeSearchContent(detail.content), [detail.content]);
+  const displayPath = useCallback(
+    (filePath: string) => (cwd ? relativeToRoot(filePath, cwd) : filePath),
+    [cwd],
+  );
+  const { matchCount, fileCount } = resolveSearchCounts(detail, parsed);
+  const meta = [
+    matchCount !== undefined ? `${matchCount} 处匹配` : undefined,
+    fileCount !== undefined ? `${fileCount} 个文件` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <>
+      {notInHeader(detail.query, headerSummary) ? (
+        <Text style={styles.detailText}>查询：{detail.query}</Text>
+      ) : null}
+      {meta ? <Text style={styles.mutedText}>{meta}</Text> : null}
+      {parsed && parsed.files.length > 0 ? (
+        parsed.files.map((file, fileIndex) => {
+          const display = file.filePath ? displayPath(file.filePath) : "";
+          return (
+            <View key={file.filePath || `matches-${fileIndex}`} style={styles.section}>
+              {file.filePath ? (
+                <PathRow icon={fileIconForPath(file.filePath)} path={display} styles={styles} />
+              ) : null}
+              {file.matches.map((match, matchIndex) => (
+                <View
+                  key={`${file.filePath}-${match.lineNumber ?? "line"}-${matchIndex}`}
+                  style={{ flexDirection: "row", gap: 6, minWidth: 0 }}
+                >
+                  {match.lineNumber !== undefined ? (
+                    <Text style={styles.searchLineNumber}>{match.lineNumber}:</Text>
+                  ) : null}
+                  <Text selectable style={[styles.detailText, { flex: 1 }]}>
+                    {match.text || " "}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          );
+        })
+      ) : (
+        <>
+          {detail.filePaths?.map((filePath) => (
+            <PathRow
+              key={filePath}
+              icon={fileIconForPath(filePath)}
+              path={displayPath(filePath)}
+              styles={styles}
+            />
+          ))}
+          {detail.content && matchCount !== 0 ? (
+            <HighlightedCodeBlock code={detail.content} language="text" styles={styles} theme={theme} />
+          ) : null}
+        </>
+      )}
+      {detail.webResults?.map((result) => (
+        <View key={result.url} style={styles.section}>
+          <Text selectable style={styles.detailText}>{result.title}</Text>
+          <Text selectable style={styles.mutedText}>{result.url}</Text>
+        </View>
+      ))}
+      {detail.annotations?.map((annotation, index) => (
+        <Text key={`${annotation}-${index}`} selectable style={styles.mutedText}>{annotation}</Text>
+      ))}
+    </>
+  );
+}
+
+function DetailBody({
+  data,
+  agentId,
+  theme,
+  palette,
+  styles,
+}: {
+  data: ToolCallData;
+  agentId: string;
+  theme: Theme;
+  palette: ActivityPalette;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const detail = asToolCallDetail(data.detail);
+  const cwd = useAgent(agentId, (agent) => agent.cwd);
+  const shownPath = (path: string) => (cwd ? relativeToRoot(path, cwd) : path);
+  // 本地补丁：后台任务通知只列说明、状态和输出文件（原文是 <task-notification> 标签）。
+  if (data.notice) {
+    const fields: Array<[string, string, boolean]> = [
+      ["说明", data.notice.text, false],
+      ["状态", statusLabel(data.status), false],
+      ...(data.notice.outputFile ? ([["输出文件", data.notice.outputFile, true]] as Array<[string, string, boolean]>) : []),
+      ...(data.notice.taskId ? ([["任务", data.notice.taskId, true]] as Array<[string, string, boolean]>) : []),
+    ];
+    return (
+      <>
+        {fields.map(([label, value, mono]) => (
+          <View key={label} style={styles.section}>
+            <DetailLabel style={styles.detailLabel}>{label}</DetailLabel>
+            <Text selectable style={mono ? styles.detailText : { ...styles.detailText, fontFamily: undefined }}>{value}</Text>
+          </View>
+        ))}
+      </>
+    );
+  }
+  if (!detail) return <Text style={styles.empty}>没有工具详情。</Text>;
+
+  if (isSkillTool(data.name)) {
+    const skillName = skillNameForDetail(detail);
+    if (!skillName) return <Text style={styles.empty}>没有技能详情。</Text>;
+    return (
+      <Text selectable style={styles.detailText}>
+        {skillName}
+      </Text>
+    );
+  }
+
+  switch (detail.type) {
+    case "shell": {
+      const shell = detail as typeof detail & { truncated?: boolean; fullOutputPath?: string };
+      return (
+        <>
+          <TerminalBlock
+            command={detail.command}
+            output={detail.output}
+            errorOutput={data.errorText}
+            exitCode={shellExitCode(detail, data.errorText)}
+            styles={styles}
+            theme={theme}
+          />
+          {shell.truncated === true ? (
+            <Text selectable style={styles.mutedText}>
+              {shell.fullOutputPath
+                ? `输出已截断 · 完整输出在 ${compactText(shell.fullOutputPath, 160)}`
+                : "输出已截断"}
+            </Text>
+          ) : null}
+        </>
+      );
+    }
+    case "read":
+      if (readErrorMessage(detail.content) && data.errorText) {
+        return <FileTitle path={shownPath(detail.filePath)} styles={styles} />;
+      }
+      if (!shouldAttemptImageLoad(detail.filePath, detail.content)) {
+        return detail.content ? (
+          <HighlightedCodeBlock
+            code={detail.content}
+            language={data.presentation.language ?? "text"}
+            chip={fileBadge(detail.filePath)}
+            title={shownPath(detail.filePath)}
+            lineStart={typeof detail.offset === "number" && detail.offset > 0 ? detail.offset : 1}
+            copyLabel="复制内容"
+            styles={styles}
+            theme={theme}
+          />
+        ) : (
+          <FileTitle path={shownPath(detail.filePath)} styles={styles} />
+        );
+      }
+      return (
+        <>
+          <FileTitle path={shownPath(detail.filePath)} styles={styles} />
+          <ReadImageBlock
+            filePath={detail.filePath}
+            agentId={agentId}
+            styles={styles}
+            fallback={
+              detail.content ? (
+                <HighlightedCodeBlock
+                  code={detail.content}
+                  language={data.presentation.language ?? "text"}
+                  label="内容"
+                  styles={styles}
+                  theme={theme}
+                />
+              ) : null
+            }
+          />
+        </>
+      );
+    case "write":
+      return detail.content ? (
+        <HighlightedCodeBlock
+          code={detail.content}
+          language={data.presentation.language ?? "text"}
+          chip={fileBadge(detail.filePath)}
+          title={shownPath(detail.filePath)}
+          lineStart={1}
+          copyLabel="复制写入内容"
+          styles={styles}
+          theme={theme}
+        />
+      ) : (
+        <FileTitle path={shownPath(detail.filePath)} styles={styles} />
+      );
+    case "edit": {
+      const isOversized = editDiffContentSize(detail) > MAX_DIFF_CHARS;
+
+      if (isOversized && effectiveUnifiedDiff(detail) === undefined) {
+        return (
+          <>
+            <FileTitle path={shownPath(detail.filePath)} styles={styles} />
+            {detail.oldString ? (
+              <HighlightedCodeBlock
+                code={detail.oldString}
+                language={data.presentation.language ?? "text"}
+                label="改前"
+                styles={styles}
+                theme={theme}
+              />
+            ) : null}
+            {detail.newString ? (
+              <HighlightedCodeBlock
+                code={detail.newString}
+                language={data.presentation.language ?? "text"}
+                label="改后"
+                styles={styles}
+                theme={theme}
+              />
+            ) : null}
+          </>
+        );
+      }
+
+      return (
+        <>
+          <FileTitle path={shownPath(detail.filePath)} styles={styles} />
+          <DiffBlock detail={detail} palette={palette} styles={styles} />
+        </>
+      );
+    }
+    case "search":
+      return (
+        <SearchDetail
+          detail={detail}
+          headerSummary={data.presentation.summary}
+          agentId={agentId}
+          theme={theme}
+          styles={styles}
+        />
+      );
+    case "fetch":
+      return (
+        <>
+          {notInHeader(detail.url, data.presentation.summary) ? (
+            <Text selectable style={styles.detailText}>{detail.url}</Text>
+          ) : null}
+          {detail.result ? <HighlightedCodeBlock code={detail.result} language="text" label="结果" styles={styles} theme={theme} /> : null}
+          {detail.code !== undefined ? <Text style={styles.mutedText}>HTTP {detail.code} {detail.codeText ?? ""}</Text> : null}
+        </>
+      );
+    case "worktree_setup":
+      return (
+        <>
+          <Text style={styles.detailText}>分支：{detail.branchName}</Text>
+          <Text style={styles.mutedText}>路径：{detail.worktreePath}</Text>
+          {detail.log ? <HighlightedCodeBlock code={detail.log} language="ansi" label="准备日志" styles={styles} theme={theme} /> : null}
+        </>
+      );
+    case "sub_agent":
+      if (piSubagentOperation(data.name) && parsePiSubagentCall(undefined, detail.log).lifecycle) {
+        return <PiSubagentToolDetail toolName={data.name} input={undefined} output={detail.log}
+          agentType={detail.subAgentType} description={detail.description} childSessionId={detail.childSessionId}
+          theme={theme} palette={palette} styles={styles} />;
+      }
+      return (
+        <>
+          {notInHeader(detail.subAgentType, data.presentation.summary) ? <Text style={styles.detailText}>{detail.subAgentType}</Text> : null}
+          {notInHeader(detail.description, data.presentation.summary) ? <Text style={styles.mutedText}>{detail.description}</Text> : null}
+          {detail.childSessionId ? <Text style={styles.mutedText}>会话 {detail.childSessionId}</Text> : null}
+          {detail.log && !subAgentLogFullyShown(detail) ? <HighlightedCodeBlock code={detail.log} language="ansi" label="活动日志" styles={styles} theme={theme} /> : null}
+        </>
+      );
+    case "plain_text":
+      return <Text selectable style={styles.detailText}>{detail.text ?? ""}</Text>;
+    case "plan":
+      return <Text selectable style={styles.detailText}>{detail.text}</Text>;
+    case "unknown": {
+      if (piSubagentOperation(data.name)) {
+        return <PiSubagentToolDetail toolName={data.name} input={detail.input} output={detail.output}
+          theme={theme} palette={palette} styles={styles} />;
+      }
+      if (isOpencodeSubagentTool(data.name)) {
+        return (
+          <OpencodeSubagentToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (isCodeModeTool(data.name)) {
+        const code = extractCodeModeCode(detail.input);
+        if (code) {
+          return <CodeModeToolDetail code={code} output={detail.output} theme={theme} styles={styles} />;
+        }
+      }
+      if (data.name.trim().toLowerCase() === "ls") {
+        const entries = parsePiLsOutput(detail.output);
+        if (entries !== null) {
+          return (
+            <View style={styles.section}>
+              <DetailLabel style={styles.detailLabel}>文件</DetailLabel>
+              {entries.length === 0 ? (
+                <Text style={styles.empty}>没有返回文件。</Text>
+              ) : (
+                entries.map((entry) => (
+                  <PathRow
+                    key={entry}
+                    icon={entry.endsWith("/") ? "Folder" : fileIconForPath(entry)}
+                    path={entry}
+                    styles={styles}
+                  />
+                ))
+              )}
+            </View>
+          );
+        }
+      }
+      if (isSubagentSupervisorTool(data.name)) {
+        return (
+          <SupervisorToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (isBgWaitTool(data.name)) {
+        return (
+          <BgWaitToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (isOmpWaitTool(data.name)) {
+        return (
+          <OmpWaitToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (isOmpFindTool(data.name)) {
+        return (
+          <OmpFindToolDetail
+            input={detail.input}
+            output={detail.output}
+            styles={styles}
+          />
+        );
+      }
+      if (isTodoTool(data.name)) {
+        return (
+          <TodoToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (githubToolKind(data.name)) {
+        return (
+          <GithubToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      if (exaToolKind(data.name)) {
+        return (
+          <ExaToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            styles={styles}
+          />
+        );
+      }
+      if (paseoToolLeafName(data.name)) {
+        return (
+          <PaseoToolDetail
+            toolName={data.name}
+            input={detail.input}
+            output={detail.output}
+            theme={theme}
+            palette={palette}
+            styles={styles}
+          />
+        );
+      }
+      const codeInput = extractCodeInput(data.name, detail.input);
+      if (codeInput) {
+        return (
+          <>
+            <HighlightedCodeBlock
+              code={codeInput.code}
+              language={codeInput.language}
+              label="输入"
+              styles={styles}
+              theme={theme}
+            />
+            {hasMeaningfulUnknownValue(detail.output) ? (
+              <HighlightedCodeBlock
+                code={formatUnknownValue(detail.output)}
+                language="json"
+                label="输出"
+                styles={styles}
+                theme={theme}
+              />
+            ) : data.status === "running" ? (
+              <PendingOutput styles={styles} />
+            ) : null}
+          </>
+        );
+      }
+      return (
+        <>
+          {hasMeaningfulUnknownValue(detail.input) ? (
+            <HighlightedCodeBlock
+              code={formatUnknownValue(detail.input)}
+              language="json"
+              label="输入"
+              styles={styles}
+              theme={theme}
+            />
+          ) : null}
+          {hasMeaningfulUnknownValue(detail.output) ? (
+            <HighlightedCodeBlock
+              code={formatUnknownValue(detail.output)}
+              language="json"
+              label="输出"
+              styles={styles}
+              theme={theme}
+            />
+          ) : data.status === "running" ? (
+            <PendingOutput styles={styles} />
+          ) : null}
+        </>
+      );
+    }
+  }
+}
+
+function SubAgentProgress({
+  detail,
+  styles,
+  toolName,
+}: {
+  detail: Extract<ToolCallDetail, { type: "sub_agent" }>;
+  styles: ReturnType<typeof useActivityStyles>;
+  toolName: string;
+}) {
+  const actions = useMemo(() => {
+    const explicitActions = [...(detail.actions ?? [])].sort((left, right) => left.index - right.index);
+    return explicitActions.length > 0 ? explicitActions : parseSubAgentActionLog(detail.log);
+  }, [detail.actions, detail.log]);
+  const hiddenActionCount = Math.max(0, actions.length - MAX_VISIBLE_SUBAGENT_ACTIONS);
+  const visibleActions = actions.slice(hiddenActionCount);
+  const thinking = (actions.length > 0 && !(detail.actions?.length ?? 0)) || (piSubagentOperation(toolName) && parsePiSubagentCall(undefined, detail.log).lifecycle)
+    ? null : detail.log?.replace(/\s+/g, " ").trim();
+
+  if (!thinking && actions.length === 0) return null;
+
+  return (
+    <View style={styles.subAgentProgress}>
+      {thinking ? (
+        <View style={styles.subAgentLine}>
+          <View style={styles.subAgentLineIcon}>
+            <Icon name="Brain" color={styles.subAgentLineSummary.color} size={11} />
+          </View>
+          <Text numberOfLines={1} style={styles.subAgentLineLabel}>
+            思考
+          </Text>
+          <Text numberOfLines={1} style={styles.subAgentLineSummary}>
+            {thinking}
+          </Text>
+        </View>
+      ) : null}
+      {hiddenActionCount > 0 ? <Text style={styles.subAgentMore}>还有 {hiddenActionCount} 步…</Text> : null}
+      {visibleActions.map((action) => {
+        const presentation = resolveSubAgentActionPresentation(action.toolName, action.summary);
+        return (
+          <View key={`${action.index}-${action.toolName}`} style={styles.subAgentAction}>
+            <View style={styles.subAgentActionIcon}>
+              <Icon name={presentation.icon} color={styles.subAgentActionSummary.color} size={11} />
+            </View>
+            <Text numberOfLines={1} style={styles.subAgentActionLabel}>
+              {zh(presentation.label)}
+            </Text>
+            {presentation.summaryIcon && action.summary ? (
+              <Icon name={presentation.summaryIcon} color={styles.subAgentActionSummary.color} size={11} />
+            ) : null}
+            {action.summary ? (
+              <Text numberOfLines={1} style={styles.subAgentActionSummary}>
+                {action.summary}
+              </Text>
+            ) : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function renderInlineReasoning(text: string, styles: ReturnType<typeof useActivityStyles>): ReactNode[] {
+  return parseInlineMarkdown(text).map((part, index) => {
+    if (part.type === "text") return part.text;
+    const style =
+      part.type === "bold"
+        ? [styles.reasoningLine, { fontWeight: "700" as const }]
+        : part.type === "italic"
+          ? [styles.reasoningLine, { fontStyle: "italic" as const }]
+          : styles.reasoningInlineCode;
+    const escape = part.type === "code" ? cmonoTextEscape : undefined;
+    return (
+      <Text {...escape} key={`inline-${index}`} style={style}>
+        {part.text}
+      </Text>
+    );
+  });
+}
+
+function InlineReasoning({
+  text,
+  styles,
+}: {
+  text: string;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  return <Text style={styles.reasoningLine}>{renderInlineReasoning(text, styles)}</Text>;
+}
+
+function ReasoningBlockList({
+  blocks,
+  keyPrefix,
+  theme,
+  styles,
+}: {
+  blocks: ReasoningMarkdownBlock[];
+  keyPrefix: string;
+  theme: Theme;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  return (
+    <>
+      {blocks.map((block, index) => {
+        const key = `${keyPrefix}-${block.type}-${index}`;
+        switch (block.type) {
+          case "code":
+            return (
+              <HighlightedCodeBlock
+                key={key}
+                code={block.text}
+                language={block.language ?? "text"}
+                theme={theme}
+                styles={styles}
+              />
+            );
+          case "spacer":
+            return <View key={key} style={styles.reasoningSpacer} />;
+          case "heading":
+            return (
+              <Text key={key} selectable style={styles.reasoningHeading}>
+                {renderInlineReasoning(block.text, styles)}
+              </Text>
+            );
+          case "unordered":
+            return (
+              <View key={key} style={styles.reasoningBulletRow}>
+                <Text style={styles.reasoningBullet}>•</Text>
+                <InlineReasoning text={block.text} styles={styles} />
+              </View>
+            );
+          case "ordered":
+            return (
+              <View key={key} style={styles.reasoningBulletRow}>
+                <Text style={styles.reasoningBullet}>{block.marker}</Text>
+                <InlineReasoning text={block.text} styles={styles} />
+              </View>
+            );
+          case "quote":
+            return (
+              <Text key={key} selectable style={styles.reasoningQuote}>
+                {renderInlineReasoning(block.text, styles)}
+              </Text>
+            );
+          case "paragraph":
+            return <InlineReasoning key={key} text={block.text} styles={styles} />;
+        }
+      })}
+    </>
+  );
+}
+
+export function ReasoningMarkdown({
+  text,
+  theme,
+  styles,
+}: {
+  text: string;
+  theme: Theme;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const blocks = useMemo(() => parseReasoningMarkdown(text), [text]);
+  return (
+    <View {...cuiViewEscape} style={styles.reasoningBody}>
+      <ReasoningBlockList blocks={blocks} keyPrefix="reasoning" theme={theme} styles={styles} />
+    </View>
+  );
+}
+
+function ReasoningStep({
+  index,
+  text,
+  active,
+  last,
+  theme,
+  palette,
+  styles,
+}: {
+  index: number;
+  text: string;
+  active: boolean;
+  last: boolean;
+  theme: Theme;
+  palette: ActivityPalette;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const { title, body } = useMemo(() => splitStepTitle(text), [text]);
+  const blocks = useMemo(() => parseReasoningMarkdown(body), [body]);
+  const color = active ? palette.statusColors.running : palette.statusColors.completed;
+  const dot = (
+    <View style={[styles.stepDot, { borderColor: color, backgroundColor: active ? "transparent" : color }]}>
+      {active ? null : <Icon name="Check" size={9} color="#ffffff" />}
+    </View>
+  );
+  return (
+    <View style={styles.stepRow}>
+      <View style={styles.stepRail}>
+        {active ? <Breathe>{dot}</Breathe> : dot}
+        {last ? null : <View style={styles.stepLine} />}
+      </View>
+      <View style={styles.stepContent}>
+        <Text style={styles.stepTitle}>{title ? `${index + 1}. ${title}` : `第 ${index + 1} 步`}</Text>
+        {blocks.length > 0 ? (
+          <ReasoningBlockList blocks={blocks} keyPrefix={`step-${index}`} theme={theme} styles={styles} />
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function ReasoningText({
+  text,
+  phase,
+  theme,
+  palette,
+  styles,
+}: {
+  text: string;
+  phase: ReasoningData["phase"];
+  theme: Theme;
+  palette: ActivityPalette;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const preview = useMemo(() => previewText(text), [text]);
+  const targetText = showAll ? text : preview.text;
+  const revealedText = useRevealedText(targetText, phase);
+  const steps = useMemo(() => splitReasoningSteps(revealedText), [revealedText]);
+  const isStreaming = phase === "streaming";
+  const scrollRef = useRef<NativeScrollView | null>(null);
+  const isNearBottom = useRef(true);
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    isNearBottom.current = layoutMeasurement.height + contentOffset.y >= contentSize.height - 32;
+  }, []);
+  const handleContentSizeChange = useCallback(() => {
+    if (isNearBottom.current) scrollRef.current?.scrollToEnd({ animated: false });
+  }, []);
+
+  return (
+    <View>
+      <ScrollView
+        ref={scrollRef}
+        nestedScrollEnabled
+        onContentSizeChange={handleContentSizeChange}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        showsVerticalScrollIndicator
+        style={styles.detailsScroll}
+      >
+        {steps.length <= 1 ? (
+          <ReasoningMarkdown text={revealedText} theme={theme} styles={styles} />
+        ) : (
+          <View {...cuiViewEscape} style={styles.stepList}>
+            {steps.map((step, index) => (
+              <ReasoningStep
+                key={`step-${index}`}
+                index={index}
+                text={step}
+                active={isStreaming && index === steps.length - 1}
+                last={index === steps.length - 1}
+                theme={theme}
+                palette={palette}
+                styles={styles}
+              />
+            ))}
+          </View>
+        )}
+      </ScrollView>
+      {preview.truncated ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setShowAll(!showAll)}
+          style={styles.showMoreButton}
+        >
+          <Text style={styles.showMoreText}>
+            {showAll
+              ? "收起"
+              : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function ActivityHeader({
+  icon,
+  iconColor,
+  title,
+  summary,
+  fileDisplay,
+  status,
+  statusColor,
+  stats,
+  expanded,
+  onPress,
+  expandable = true,
+  styles,
+  vivid,
+}: {
+  vivid?: { theme: Theme; compact: boolean; look: LookKey; status?: RowStatus; statusText?: string; meta?: string; live?: boolean; icon?: string; metrics?: DensityMetrics; timing?: string | null };
+  icon: string;
+  iconColor: string;
+  title: string;
+  summary?: string;
+  fileDisplay?: { dir?: string; base: string };
+  status?: ToolCallData["status"];
+  statusColor?: string;
+  stats?: ToolCallData["presentation"]["diffStats"];
+  expanded: boolean;
+  onPress: () => void;
+  expandable?: boolean;
+  styles: ReturnType<typeof useActivityStyles>;
+}) {
+  if (vivid) {
+    return (
+      <VividHeader
+        theme={vivid.theme}
+        compact={vivid.compact}
+        look={vivid.look}
+        title={title}
+        summary={summary}
+        fileDisplay={fileDisplay}
+        status={vivid.status}
+        statusText={vivid.statusText}
+        stats={stats}
+        meta={vivid.meta}
+        live={vivid.live}
+        icon={vivid.icon}
+        metrics={vivid.metrics}
+        timing={vivid.timing}
+        expanded={expanded}
+        expandable={expandable}
+        chevronColor={styles.summary.color}
+        onPress={onPress}
+        dirText={truncateDirFront}
+        Pressable={({ children, style, onPress: press, label, expanded: open, disabled }) => (
+          <Pressable
+            accessibilityLabel={label}
+            accessibilityRole="button"
+            {...({ "aria-expanded": open } as object)}
+            disabled={disabled}
+            onPress={press}
+            style={[styles.headerButton, style]}
+          >
+            {children}
+          </Pressable>
+        )}
+      />
+    );
+  }
+  const content = (
+    <>
+      <View style={styles.iconBadge}>
+        <Icon name={icon} color={iconColor} size={12} />
+      </View>
+      <Text {...cuiTextEscape} numberOfLines={1} style={styles.title}>{title}</Text>
+      {fileDisplay ? (
+        <View style={styles.filePath}>
+          {fileDisplay.dir ? (
+            <Text numberOfLines={1} style={styles.fileDir}>
+              {truncateDirFront(fileDisplay.dir)}/
+            </Text>
+          ) : null}
+          <Text numberOfLines={1} style={styles.fileName}>
+            {fileDisplay.base}
+          </Text>
+        </View>
+      ) : summary ? (
+        <Text numberOfLines={1} style={styles.summary}>
+          {summary}
+        </Text>
+      ) : null}
+      {stats ? (
+        <View style={styles.stats}>
+          <Text style={styles.additions}>+{stats.additions}</Text>
+          <Text style={styles.deletions}>-{stats.deletions}</Text>
+        </View>
+      ) : null}
+      {status ? (
+        <View style={styles.status}>
+          <Icon name={statusIcon(status)} color={statusColor ?? styles.title.color} size={12} />
+        </View>
+      ) : null}
+      {expandable ? (
+        <Icon name={expanded ? "ChevronDown" : "ChevronRight"} color={styles.summary.color} size={12} />
+      ) : (
+        <Icon name="ChevronRight" color="transparent" size={12} />
+      )}
+    </>
+  );
+  if (!expandable) {
+    return <View style={styles.headerButton}>{content}</View>;
+  }
+  return (
+    <Pressable
+      accessibilityLabel={`${expanded ? "收起" : "展开"} ${title}`}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={styles.headerButton}
+    >
+      {content}
+    </Pressable>
+  );
+}
+
+export function ColorfulReasoning({
+  agentId,
+  item,
+  theme,
+  timestamp,
+  layout,
+}: PluginTimelineItemProps<ReasoningItemData>) {
+  const palette = usePalette(theme);
+  const metrics = densityMetrics(useDensity(), layout.compact, layout.platform !== "web");
+  const styles = useActivityStyles(theme, palette, metrics);
+  const isStreaming = item.data.phase === "streaming";
+  useFoldRow(agentId, item.data.fold, undefined, timestamp);
+  // 本地补丁：「思考了 8.4 秒」；思考中实时走表（只在前台、行在屏幕上时）。
+  const rootRef = useRef<View>(null);
+  const onScreen = useOnScreen(rootRef, isStreaming);
+  const timing = useRowTiming(agentId, item.data.fold, isStreaming);
+  const liveNow = useLiveNow(isStreaming && onScreen && timing?.start != null);
+  const thinkTime = timingText(timing, isStreaming, liveNow);
+  const isLatest = useIsLatestReasoning(agentId, timestamp, isStreaming);
+  const isLiveTail = useIsLiveTail(agentId, timestamp, isStreaming, layout.platform);
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const expanded = resolveExpansion(useExpansionMode("thinking"), isLatest, userExpanded);
+  const meta = useMemo(
+    () =>
+      formatReasoningMeta(
+        splitReasoningSteps(item.data.text).length,
+        estimateReasoningTokens(item.data.text),
+      ),
+    [item.data.text],
+  );
+  const toggle = useCallback(() => {
+    setUserExpanded(!expanded);
+  }, [expanded]);
+  return (
+    <View ref={rootRef} {...pmonoViewEscape} style={[styles.card, isLiveTail ? styles.cardTail : null]}>
+      <ActivityHeader
+        icon="Sparkles"
+        iconColor={palette.categoryColors.reasoning}
+        title={isStreaming ? (thinkTime ? `思考中… ${thinkTime}` : "思考中…") : thinkTime ? `思考了 ${thinkTime}` : "思考"}
+        summary={palette.mode === "vivid" ? undefined : meta}
+        expanded={expanded}
+        onPress={toggle}
+        styles={styles}
+        vivid={palette.mode === "vivid" ? { theme, compact: layout.compact, look: "think", meta, live: isStreaming, metrics } : undefined}
+      />
+      {expanded ? (
+        <View {...cmonoViewEscape} style={styles.details}>
+          <ReasoningText text={item.data.text} phase={item.data.phase} theme={theme} palette={palette} styles={styles} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+export function ColorfulToolCall({
+  agentId,
+  item,
+  theme,
+  timestamp,
+  layout,
+}: PluginTimelineItemProps<ToolCallItemData>) {
+  const palette = usePalette(theme);
+  const metrics = densityMetrics(useDensity(), layout.compact, layout.platform !== "web");
+  const styles = useActivityStyles(theme, palette, metrics);
+  const isRunning = item.data.status === "running";
+  useFoldRow(agentId, item.data.fold, item.data.status, timestamp);
+  // 本地补丁：耗时；运行中实时走表（只在前台、行在屏幕上时每秒刷新）。
+  const rootRef = useRef<View>(null);
+  const onScreen = useOnScreen(rootRef, isRunning);
+  const timing = useRowTiming(agentId, item.data.fold, isRunning);
+  const liveNow = useLiveNow(isRunning && onScreen && timing?.start != null);
+  const durationText = item.data.notice ? null : timingText(timing, isRunning, liveNow);
+  const isLatest = useIsLatestToolCall(agentId, timestamp, isRunning);
+  const isLiveTail = useIsLiveTail(agentId, timestamp, isRunning, layout.platform);
+  const detail = asToolCallDetail(item.data.detail);
+  const isTaskUpdate = isTodoTool(item.data.name);
+  const itemTimestamp = timestamp.getTime();
+  const latestTaskUpdateTimestamp = useLatestTaskUpdateTimestamp(agentId, timestamp, isTaskUpdate);
+  const isLatestTaskCard = isLatestTaskUpdate(itemTimestamp, latestTaskUpdateTimestamp);
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const [taskUpdateOverride, setTaskUpdateOverride] = useState<TaskUpdateExpansionOverride | null>(null);
+  const categoryColor = palette.categoryColors[item.data.presentation.category];
+  const statusColor = palette.statusColors[item.data.status];
+  const configuredExpansion = useExpansionMode(expansionTargetForToolCall(item.data.name, detail?.type ?? "unknown"));
+  // 本地补丁：后台任务通知默认收起（说明已在行头）。
+  const expansionMode = item.data.notice ? "never" : configuredExpansion;
+  const baseExpanded = isTaskUpdate
+    ? resolveTaskUpdateExpansion(expansionMode, isLatestTaskCard, latestTaskUpdateTimestamp, taskUpdateOverride)
+    : resolveExpansion(expansionMode, isLatest, userExpanded);
+  const hasDetails = detail ? hasMeaningfulToolCallDetail(detail) : true;
+  const hasBody = toolCallHasBody(item.data.name, detail, item.data.presentation.summary) || Boolean(item.data.notice?.outputFile || item.data.notice?.taskId);
+  const expandable = hasBody || Boolean(item.data.errorText);
+  const expanded = expandable ? baseExpanded : false;
+  const toggle = useCallback(() => {
+    if (isTaskUpdate) {
+      setTaskUpdateOverride({ expanded: !expanded, latestTimestamp: latestTaskUpdateTimestamp });
+    } else {
+      setUserExpanded(!expanded);
+    }
+  }, [expanded, isTaskUpdate, latestTaskUpdateTimestamp]);
+  const operation = piSubagentOperation(item.data.name);
+  const subAgentDetail = detail?.type === "sub_agent" ? detail : null;
+  const cwd = useAgent(agentId, (agent) => agent.cwd);
+  const headerFile = useMemo(() => {
+    const filePath = item.data.presentation.filePath;
+    if (!filePath) return null;
+    const relative = cwd ? relativeToRoot(filePath, cwd) : filePath;
+    return splitFileDisplay(compactText(relative) ?? relative);
+  }, [cwd, item.data.presentation.filePath]);
+  const headerSummary =
+    detail?.type === "shell" && item.data.presentation.summary
+      ? stripLeadingCwdCd(item.data.presentation.summary, cwd)
+      : item.data.presentation.summary;
+  // 本地补丁：最新一条运行中的工具 + Agent 正在等权限 = 「等你批准」（琥珀）。
+  const pending = usePendingPermissions(agentId);
+  const callId = item.data.callId;
+  const waiting = isRunning && (callId ? pending.ids.has(callId) : pending.any && pending.ids.size === 0 && isLatest);
+  const rowStatus: RowStatus = waiting ? "waiting" : item.data.status;
+  const look = lookFor(item.data.name, detail, item.data.presentation);
+  const mcp = look === "mcp" ? mcpParts(item.data.name) : null;
+  const vividTitle = mcp ? "MCP" : zh(item.data.presentation.label);
+  const vividSummary = mcp ? [`${mcp.server} · ${mcp.tool}`, headerSummary].filter(Boolean).join("  ") : headerSummary;
+  const statusText = rowStatus === "failed" ? failureText(detail, item.data.errorText) : undefined;
+  const vivid = palette.mode === "vivid";
+  return (
+    <View ref={rootRef} {...pmonoViewEscape} style={[styles.card, isLiveTail ? styles.cardTail : null]}>
+      <ActivityHeader
+        icon={item.data.presentation.icon}
+        iconColor={categoryColor}
+        title={vividTitle}
+        summary={vividSummary}
+        fileDisplay={headerFile ?? undefined}
+        status={item.data.status}
+        statusColor={statusColor}
+        stats={item.data.presentation.diffStats}
+        expanded={expanded}
+        onPress={toggle}
+        expandable={expandable}
+        styles={styles}
+        vivid={vivid ? { theme, compact: layout.compact, look, status: rowStatus, statusText, icon: item.data.presentation.fileIcon, metrics, timing: durationText } : undefined}
+      />
+      {operation && detail ? <PiSubagentLifecycleSummary toolName={item.data.name} input={undefined}
+        output={detail.type === "sub_agent" ? detail.log : detail.type === "unknown" ? detail.output : undefined}
+        theme={theme} palette={palette} styles={styles} /> : null}
+      {hasDetails && subAgentDetail ? <SubAgentProgress detail={subAgentDetail} toolName={item.data.name} styles={styles} /> : null}
+      {expandable && expanded ? (
+        <View {...cmonoViewEscape} style={styles.details}>
+          <ScrollView style={styles.detailsScroll} contentContainerStyle={styles.detailsContent} nestedScrollEnabled showsVerticalScrollIndicator>
+            {hasBody ? (
+              <DetailBody data={item.data} agentId={agentId} theme={theme} palette={palette} styles={styles} />
+            ) : null}
+            {item.data.errorText && !(detail?.type === "shell" && !detail.output) ? (
+              <View style={styles.section}>
+                <DetailLabel style={styles.detailLabel}>错误</DetailLabel>
+                <Text selectable style={{ ...styles.detailText, color: theme.colors.statusDanger }}>{item.data.errorText}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+

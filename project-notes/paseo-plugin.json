@@ -1,0 +1,30 @@
+{
+  "id": "project-notes",
+  "name": "Project Notes",
+  "description": "Tasks, prompts and ideas per project, with a launcher that starts an agent from a note and a CLI for agents. Interface in Simplified Chinese.",
+  "icon": "assets/icon.png",
+  "media": [
+    "assets/screenshot-board.png",
+    "assets/screenshot-launch.png",
+    "assets/screenshot-prompts.png",
+    "assets/screenshot-phone.png"
+  ],
+  "requirements": {
+    "paseo": ">=0.11.1"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ],
+    [
+      "npm",
+      "run",
+      "build"
+    ]
+  ]
+}

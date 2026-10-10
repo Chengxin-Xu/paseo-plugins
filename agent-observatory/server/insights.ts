@@ -1,0 +1,461 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { PaseoApi } from "./paseo-types";
+import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { cancelInsight, getInsightState, getInsightReport, listInsightJobs, listInsightRunners, listInsightModels, insightReportSchema, setFindingFeedback, startInsight, updateInsightSettings,
+  type FindingFeedback, type InsightJob, type InsightListState, type InsightSettings, type InsightRunner } from "../shared/insights";
+import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
+import { assessTrajectory, buildAnalysisRequest, InsightReportError, isUsefulInsightReport, parseGrokReport, redactSecrets, trajectoryFingerprint } from "./insight-analysis";
+import { excerptText } from "../shared/evidence";
+import { ANALYSIS_SYSTEM_PROMPT, findGrokBinary, runGrokAnalysis } from "./grok-runner";
+import { abortable, fetchTrajectory } from "./trajectory";
+import { telemetryDirectory } from "./telemetry";
+import { fitInsightReport, InsightStorage, retainInsightJobs, summarizeInsight, type InsightActivity, type InsightCooldown } from "./insight-storage";
+
+import { AUTO_RUNNER_LABEL, BUILTIN_INSIGHT_RUNNER, InsightRunnerRegistry, NO_RUNNER_ERROR, cleanupInsightAgents, runPaseoStructured } from "./insight-runner";
+import { isInsightAgent, isKnownInsightAgent, markInsightAgent } from "./insight-runner-lifecycle";
+import { getInsightOverview, getInsightSuggestions, startInsightSuggestions, cancelInsightSuggestions, setActionFeedback,
+  suggestionReportSchema, type OverviewDays, type SuggestionJob, type ActionFeedback } from "../shared/insight-overview";
+import { buildInsightOverview, getSuggestionTiming, summarizeSuggestion } from "./insight-overview";
+import { collectSuggestionContext, buildSuggestionPrompt, parseSuggestionText, SUGGESTION_SYSTEM_PROMPT } from "./insight-suggestions";
+import { SuggestionStorage, retainSuggestionJobs } from "./insight-suggestions-storage";
+
+const ACTIVE = new Set<InsightJob["status"]>(["queued", "collecting", "analyzing"]);
+const defaults: InsightSettings = { autoEnabled: false, minTurns: 3, minTools: 3, cooldownHours: 6, runner: { kind: "auto" } };
+type ReportQueueEntry = { kind: "report"; id: string; paseo: PaseoApi; question?: string; mode: "full" | "incremental"; runner?: InsightRunner };
+type SuggestionQueueEntry = { kind: "suggestion"; id: string; paseo: PaseoApi; runner?: InsightRunner };
+type QueueEntry = ReportQueueEntry | SuggestionQueueEntry;
+export interface InsightManagerOptions { directory?: string; now?: () => number; findBinary?: typeof findGrokBinary; run?: typeof runGrokAnalysis; fetch?: typeof fetchTrajectory }
+export class InsightManager {
+  private settings = structuredClone(defaults);
+  private readonly registries = new WeakMap<PaseoApi, InsightRunnerRegistry>();
+  private cleanup: Promise<void> | null = null;
+  private lastPaseo: PaseoApi | undefined;
+  private jobs: InsightJob[] = [];
+  private suggestionJobs: SuggestionJob[] = [];
+  private readonly suggestionStorage: SuggestionStorage;
+  private cooldowns: Record<string, InsightCooldown> = {};
+  private activity: Record<string, InsightActivity> = {};
+  private revision = 1;
+  private queue: QueueEntry[] = [];
+  private readonly autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly autoDue = new Map<string, number>();
+  private readonly storage: InsightStorage;
+  private readonly now: () => number;
+  private readonly run: typeof runGrokAnalysis;
+  private readonly fetch: typeof fetchTrajectory;
+  private readonly findBinary: typeof findGrokBinary;
+  private binary: string | null = null;
+  private ready: Promise<void>;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveLazy = false;
+  private processing: Promise<void> | null = null;
+  private current: { id: string; abort: AbortController } | null = null;
+  private readonly executions = new Set<Promise<unknown>>();
+  private closed = false;
+  private initialized = false;
+  private deferredLifecycle: Array<{ id: string; started: boolean }> = [];
+  constructor(options: InsightManagerOptions = {}) {
+    this.storage = new InsightStorage(options.directory ?? telemetryDirectory());
+    this.suggestionStorage = new SuggestionStorage(options.directory ?? telemetryDirectory()); this.now = options.now ?? Date.now;
+    this.run = options.run ?? runGrokAnalysis; this.fetch = options.fetch ?? fetchTrajectory; this.findBinary = options.findBinary ?? findGrokBinary;
+    this.ready = this.initialize();
+  }
+  private async initialize() {
+    const data = await this.storage.load(defaults); this.settings = data.settings; this.cooldowns = data.cooldowns; this.activity = data.activity;
+    this.revision = data.revision + 1;
+    this.suggestionJobs = (await this.suggestionStorage.load()).map(job => ACTIVE.has(job.status)
+      ? { ...job, status: "canceled", stage: "插件重新加载，未完成建议已取消", updatedAt: this.iso() } : job);
+    this.jobs = retainInsightJobs(data.jobs.map(job => ACTIVE.has(job.status) ? { ...job, status: "canceled", stage: "插件重新加载，未完成分析已取消", updatedAt: this.iso() }
+      : job.status === "completed" && !isUsefulInsightReport(job.report) ? { ...job, status: "failed", stage: "历史报告未通过内容质量检查", error: "旧报告没有具体分析结论，已改为失败。可重新发起分析。", updatedAt: this.iso() } : job));
+    await this.refreshBinary(); this.initialized = true;
+    for (const event of this.deferredLifecycle) event.started ? this.turnStarted(event.id) : this.turnEnded(event.id);
+    this.deferredLifecycle = []; await this.persist();
+  }
+  attach(paseo: PaseoApi) {
+    this.lastPaseo = paseo;
+    // PluginServerContext exposes its PaseoApi on the first RPC/hook, not at contribution startup.
+    this.cleanup ??= this.ready.then(() => cleanupInsightAgents(paseo, new Set(this.current ? [this.current.id] : []))).then(result => {
+      for (const error of result.errors) console.error(redactSecrets(error).slice(0, 500));
+    }, error => {
+      console.error("观测台分析会话清理失败：", redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 500));
+    });
+  }
+  private registry(paseo: PaseoApi) {
+    let registry = this.registries.get(paseo);
+    if (!registry) { registry = new InsightRunnerRegistry(paseo, { now: this.now, findBinary: this.findBinary }); this.registries.set(paseo, registry); }
+    return registry;
+  }
+  async runners(paseo: PaseoApi) { await this.ready; this.attach(paseo); return this.registry(paseo).runners(); }
+  async models(paseo: PaseoApi, provider: string) { await this.ready; this.attach(paseo); return this.registry(paseo).models(provider); }
+  async overview(paseo: PaseoApi, days: OverviewDays, utcOffsetMinutes: number, revision?: string) {
+    await this.ready; this.attach(paseo);
+    const runnerLabel = await this.runnerLabel(paseo);
+    return buildInsightOverview({ jobs: this.jobs, suggestionJobs: this.suggestionJobs, autoEnabled: this.settings.autoEnabled, runnerLabel, now: this.now(), days, utcOffsetMinutes, revision });
+  }
+  private async available() {
+    if (this.settings.runner.kind === "grok" || (this.settings.runner.kind === "auto" && this.binary)) return !!this.binary;
+    if (!this.lastPaseo) return false;
+    try { await this.registry(this.lastPaseo).resolve(this.settings.runner); return true; } catch { return false; }
+  }
+  private async runnerLabel(paseo = this.lastPaseo) {
+    const runner = this.settings.runner;
+    if (runner.kind === "grok" || (runner.kind === "auto" && this.binary)) return runner.kind === "auto" ? `${AUTO_RUNNER_LABEL} · ${BUILTIN_INSIGHT_RUNNER.label}` : BUILTIN_INSIGHT_RUNNER.label;
+    try {
+      if (paseo) { const label = (await this.registry(paseo).resolve(runner)).info.label; return (runner.kind === "auto" ? `${AUTO_RUNNER_LABEL} · ${label}` : label).slice(0, 160); }
+    } catch { /* preserve the configured identity when unavailable */ }
+    if (runner.kind === "auto") return `${AUTO_RUNNER_LABEL}（暂无可用执行器）`;
+    return (runner.kind === "profile" ? `Profile ${runner.profileId.slice(0, 140)}（不可用）` : `${runner.provider.slice(0, 140)}（不可用）`).slice(0, 160);
+  }
+  private async refreshBinary() { const binary = await this.findBinary().catch(() => null); if (binary !== this.binary) { this.binary = binary; this.revision++; } }
+  private iso() { return new Date(this.now()).toISOString(); }
+  /** Job changes persist promptly; turn-activity counters only feed freshness hints and are saved lazily. */
+  private changed(lazy = false) {
+    this.revision++;
+    if (this.closed || this.saveTimer && (lazy || !this.saveLazy)) return;
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveLazy = lazy;
+    this.saveTimer = setTimeout(() => { this.saveTimer = null; void this.persist(); }, lazy ? 30_000 : 200); this.saveTimer.unref();
+  }
+  private persist() {
+    this.jobs = retainInsightJobs(this.jobs);
+    const limit = <T,>(values: Record<string, T>) => Object.fromEntries(Object.entries(values).slice(-2000));
+    this.cooldowns = limit(this.cooldowns); this.activity = limit(this.activity);
+    this.suggestionJobs = retainSuggestionJobs(this.suggestionJobs);
+    return Promise.all([this.storage.save({ settings: this.settings, jobs: this.jobs, cooldowns: this.cooldowns, activity: this.activity, revision: this.revision }),
+      this.suggestionStorage.save(this.suggestionJobs)]).then(() => {});
+  }
+  private update(id: string, patch: Partial<InsightJob>) {
+    const index = this.jobs.findIndex(job => job.id === id); if (index < 0) return;
+    let updated = { ...this.jobs[index], ...patch, updatedAt: this.iso() };
+    if (updated.report) updated = fitInsightReport(updated);
+    this.jobs[index] = updated; this.changed();
+  }
+  private decorate(job: InsightJob): InsightJob {
+    const progress = this.activity[job.agentId]; const source = job.source;
+    const newTurns = source ? Math.max(0, (progress?.turns ?? source.observedTurnCounter) - source.observedTurnCounter) : null;
+    const newer = !!source && ((newTurns ?? 0) > 0 || (progress?.generation ?? 0) > (source.observedGeneration ?? Infinity));
+    const success = this.cooldowns[job.agentId];
+    return { ...job, freshness: { state: !source ? "unknown" : newer ? "new_activity" : "current", newTurns, latestTurnAt: progress?.latestTurnAt ?? null },
+      nextAutoAt: success ? new Date(Date.parse(success.analyzedAt) + this.settings.cooldownHours * 3600000).toISOString() : null };
+  }
+  async state(agentId?: string) {
+    await this.ready;
+    return structuredClone({ settings: this.settings, jobs: this.jobs.filter(job => !agentId || job.agentId === agentId).map(job => this.decorate(job)), persistenceError: this.storage.error ?? this.suggestionStorage.error, available: await this.available() });
+  }
+  async list(agentId?: string, revision?: number): Promise<InsightListState> {
+    await this.ready; await this.refreshBinary();
+    const relevant = this.jobs.filter(job => !agentId || job.agentId === agentId);
+    const due = [...this.autoDue].filter(([id]) => !agentId || id === agentId);
+    const content = { settings: this.settings, runnerLabel: await this.runnerLabel(), jobs: relevant.map(job => summarizeInsight(this.decorate(job))), persistenceError: this.storage.error ?? this.suggestionStorage.error, available: await this.available(),
+      activeCount: relevant.filter(job => ACTIVE.has(job.status)).length, nextScheduledAt: due.length ? new Date(Math.min(...due.map(([, at]) => at))).toISOString() : null };
+    // A content revision (a 48-bit integer): turn activity of Agents without reports and other
+    // scopes no longer resend the list, while any visible change still does.
+    const current = parseInt(createHash("sha1").update(JSON.stringify(content)).digest("hex").slice(0, 12), 16);
+    return structuredClone({ ...content, jobs: revision === current ? [] : content.jobs, revision: current, unchanged: revision === current });
+  }
+  async report(jobId: string) { await this.ready; const job = this.jobs.find(item => item.id === jobId); return { job: job ? structuredClone(this.decorate(job)) : null, revision: this.revision }; }
+  async feedback(jobId: string, findingId: string, status: FindingFeedback["status"]) {
+    await this.ready; const job = this.jobs.find(item => item.id === jobId);
+    if (!job?.report?.findings.some(finding => finding.id === findingId)) throw new Error("报告发现不存在或已超出保留范围。");
+    this.update(jobId, { findingFeedback: { ...job.findingFeedback, [findingId]: { status, updatedAt: this.iso() } } }); await this.persist();
+    return structuredClone(this.decorate(this.jobs.find(item => item.id === jobId)!));
+  }
+  async configure(input: boolean | { autoEnabled?: boolean; runner?: InsightRunner }) {
+    await this.ready; const patch = typeof input === "boolean" ? { autoEnabled: input } : input;
+    this.settings = { ...this.settings, ...(patch.autoEnabled !== undefined ? { autoEnabled: patch.autoEnabled } : {}), ...(patch.runner ? { runner: structuredClone(patch.runner) } : {}) };
+    if (patch.autoEnabled === false) { for (const timer of this.autoTimers.values()) clearTimeout(timer); this.autoTimers.clear(); this.autoDue.clear();
+      for (const entry of [...this.queue]) if (this.queuedJob(entry)?.trigger === "auto") { if (entry.kind === "suggestion") await this.cancelSuggestion(entry.id); else await this.cancel(entry.id); } }
+    this.changed(); await this.storage.saveSettings(this.settings); await this.persist(); return structuredClone(this.settings);
+  }
+  private skip(agentId: string, reason: string, existing?: InsightJob): InsightJob {
+    const previous = this.jobs.find(job => job.agentId === agentId && job.status === "skipped");
+    const job: InsightJob = { ...(existing ?? previous ?? this.newJob(agentId, "auto")), status: "skipped", stage: reason,
+      createdAt: this.iso(), updatedAt: this.iso(), skipCount: (previous?.skipCount ?? 0) + 1 };
+    this.jobs = this.jobs.filter(item => item.id !== previous?.id && item.id !== existing?.id); this.jobs.unshift(job); this.changed();
+    return structuredClone(this.decorate(job));
+  }
+  private newJob(agentId: string, trigger: "manual" | "auto", selection?: InsightRunner): InsightJob {
+    const at = this.iso();
+    // Until the runner is resolved, a queued job names the chosen kind instead of looking like a Grok run.
+    const pending = selection && selection.kind !== "grok" ? { runner: { ...BUILTIN_INSIGHT_RUNNER, kind: selection.kind, model: null, thinkingOptionId: null,
+      label: selection.kind === "auto" ? AUTO_RUNNER_LABEL : "等待解析分析执行器", provider: selection.kind === "provider" ? selection.provider : null } } : {};
+    return { id: randomUUID(), agentId, agentTitle: this.jobs.find(job => job.agentId === agentId)?.agentTitle ?? "正在读取会话",
+      projectName: this.jobs.find(job => job.agentId === agentId)?.projectName ?? "正在读取项目", createdAt: at, updatedAt: at, status: "queued", trigger,
+      stage: "已加入分析队列", eligibility: null, coverage: null, report: null, model: "grok-4.7", effort: "xhigh", usage: null, error: null, ...pending };
+  }
+  async start(paseo: PaseoApi, agentId: string, trigger: "manual" | "auto" = "manual", question?: string, mode: "full" | "incremental" = "incremental", runner?: InsightRunner): Promise<InsightJob> {
+    await this.ready;
+    if (this.closed) throw new Error("分析服务正在关闭");
+    if (trigger === "auto" && !this.settings.autoEnabled) throw new Error("自动分析已关闭");
+    this.attach(paseo);
+    const existing = this.jobs.find(job => job.agentId === agentId && ACTIVE.has(job.status));
+    if (existing) {
+      if (trigger === "manual" && existing.trigger === "auto" && existing.status === "queued") {
+        this.update(existing.id, { trigger: "manual", stage: "手动分析已提升队列优先级" });
+        const entry = this.queue.find(entry => entry.id === existing.id); if (entry?.kind === "report") { this.queue = this.queue.filter(item => item !== entry); entry.question = question; entry.mode = mode; entry.runner = runner; this.enqueue(entry, "manual"); }
+      }
+      return structuredClone(this.decorate(this.jobs.find(job => job.id === existing.id)!));
+    }
+    if (trigger === "auto") {
+      const last = this.cooldowns[agentId];
+      if (last && this.now() < Date.parse(last.analyzedAt) + this.settings.cooldownHours * 3600000)
+        return this.skip(agentId, `仍在自动分析冷却期内；下次可分析时间 ${new Date(Date.parse(last.analyzedAt) + this.settings.cooldownHours * 3600000).toISOString()}。`);
+    }
+    await this.refreshBinary();
+    if (this.closed) throw new Error("分析服务正在关闭");
+    if (trigger === "auto" && !this.settings.autoEnabled) throw new Error("自动分析已关闭");
+    if (this.jobs.some(job => job.agentId === agentId && ACTIVE.has(job.status))) return this.start(paseo, agentId, trigger, question, mode, runner);
+    const selection = runner ?? this.settings.runner;
+    if (selection.kind === "grok" && !this.binary) throw new Error("未找到 Grok CLI。安装并登录后可刷新重试，或在「分析设置」里换一个执行器。");
+    if (selection.kind === "auto" && !this.binary) await this.registry(paseo).resolve(selection).catch(error => { throw error instanceof Error && error.message === NO_RUNNER_ERROR ? error : new Error(`${NO_RUNNER_ERROR}（${error instanceof Error ? error.message : String(error)}）`); });
+    if (this.queue.length >= 8) throw new Error("分析队列已满，请等待当前任务完成。");
+    const job = this.newJob(agentId, trigger, selection); this.jobs.unshift(job); this.enqueue({ kind: "report", id: job.id, paseo, question, mode, runner }, trigger); this.changed(); this.kick();
+    return structuredClone(job);
+  }
+  private queuedJob(entry: QueueEntry) { return (entry.kind === "report" ? this.jobs : this.suggestionJobs).find(job => job.id === entry.id); }
+  private enqueue(entry: QueueEntry, trigger: "manual" | "auto") {
+    const index = trigger === "manual" ? this.queue.findIndex(item => this.queuedJob(item)?.trigger === "auto") : -1;
+    if (index < 0) this.queue.push(entry); else this.queue.splice(index, 0, entry);
+  }
+  private kick() { if (this.processing || this.closed) return; this.processing = this.drain().finally(() => { this.processing = null; if (this.queue.length && !this.closed) this.kick(); }); }
+  private async drain() {
+    while (this.queue.length && !this.closed) {
+      const entry = this.queue.shift()!;
+      if (entry.kind === "suggestion") { await this.runSuggestion(entry); continue; }
+      const job = this.jobs.find(job => job.id === entry.id); if (!job || job.status === "canceled") continue;
+      const selection = structuredClone(entry.runner ?? this.settings.runner);
+      const abort = new AbortController(); this.current = { id: job.id, abort };
+      try {
+        this.update(job.id, { status: "collecting", stage: "读取执行版本、增量轨迹与未解决发现" });
+        if (this.cleanup) await abortable(this.cleanup, abort.signal);
+        const plan = await abortable(this.registry(entry.paseo).resolve(selection), abort.signal);
+        this.update(job.id, { model: plan.model, effort: plan.effort, runner: plan.info });
+        const baseline = { ...(this.activity[job.agentId] ?? { turns: 0, generation: 0, latestTurnAt: null }) };
+        const prior = this.jobs.find(previous => previous.agentId === job.agentId && previous.status === "completed" && previous.report);
+        const incremental = entry.mode !== "full" && !!prior?.source;
+        const after = incremental ? { epoch: prior!.source!.epoch, seq: prior!.source!.endSeq } : undefined;
+        const trajectory = await abortable(this.fetch(entry.paseo, job.agentId, { limit: 1500, maxCharacters: 400000, signal: abort.signal, after }), abort.signal);
+        if (abort.signal.aborted || this.closed) continue;
+        const sameEpoch = !!after && trajectory.coverage.epoch === after.epoch;
+        if (sameEpoch) trajectory.rows = trajectory.rows.filter(row => row.seqEnd > after.seq);
+        const assessed: SessionTrajectory = sameEpoch && prior ? { ...trajectory, counts: { ...trajectory.counts,
+          userTurns: prior.source!.userTurns + trajectory.rows.filter(row => row.kind === "user_message" && row.seqStart > after!.seq).length,
+          tools: (prior.eligibility?.toolCount ?? 0) + trajectory.rows.filter(row => row.kind === "tool_call" && row.seqStart > after!.seq).length } } : trajectory;
+        const eligibility = assessTrajectory(assessed, job.trigger, this.settings.minTurns, this.settings.minTools);
+        this.update(job.id, { agentTitle: trajectory.agent.title || "未命名 Agent", projectName: trajectory.project?.name || "未关联项目", eligibility,
+          coverage: { rows: trajectory.rows.length, characters: trajectory.rows.reduce((sum, row) => sum + row.text.length, 0), truncated: !trajectory.coverage.complete, oldestAt: trajectory.coverage.firstAt, newestAt: trajectory.coverage.lastAt } });
+        if (job.trigger === "auto" && (this.activity[job.agentId]?.generation ?? 0) > baseline.generation) { this.skip(job.agentId, "采集期间 Agent 出现新进展，等待下一轮结束。", this.jobs.find(item => item.id === job.id)); continue; }
+        if (!eligibility.eligible) { this.update(job.id, { status: "skipped", stage: eligibility.reason }); continue; }
+        if (sameEpoch && !trajectory.rows.length) { this.skip(job.agentId, "没有新增执行轨迹；已有报告继续有效，可选择完整复盘重新检查。", this.jobs.find(item => item.id === job.id)); continue; }
+        const fingerprint = trajectoryFingerprint(trajectory), last = this.cooldowns[job.agentId];
+        const sourceUnchanged = !!last?.source && last.source.epoch === trajectory.coverage.epoch && Math.max(0, ...trajectory.rows.map(row => row.seqEnd)) <= last.source.endSeq;
+        if (job.trigger === "auto" && (last?.fingerprint === fingerprint || sourceUnchanged)) { this.skip(job.agentId, "轨迹没有实质变化，保留已有报告。", this.jobs.find(item => item.id === job.id)); continue; }
+        const currentPrior = this.jobs.find(item => item.id === prior?.id) ?? prior;
+        const unresolved = sameEpoch && currentPrior?.report ? currentPrior.report.findings.filter(finding => !["resolved", "false_positive"].includes(currentPrior.findingFeedback?.[finding.id]?.status ?? "open")) : [];
+        const neededRefs = new Set(unresolved.flatMap(finding => finding.evidence));
+        const historicalEvidence: TrajectoryRow[] = (prior?.evidence ?? []).filter(row => neededRefs.has(row.ref)).slice(0, 40).map(row => ({
+          ref: row.ref, epoch: prior?.source?.epoch ?? "legacy", seqStart: 0, seqEnd: 0, at: row.at, turnId: null, kind: row.kind, text: row.text, toolName: row.toolName, toolStatus: null }));
+        const source = { epoch: trajectory.coverage.epoch, endSeq: trajectory.coverage.endSeq ?? Math.max(0, sameEpoch ? after!.seq : 0, ...trajectory.rows.map(row => row.seqEnd)), capturedAt: trajectory.capturedAt,
+          userTurns: eligibility.turnCount, lastTurnId: [...trajectory.rows].reverse().find(row => row.turnId)?.turnId ?? null,
+          observedTurnCounter: baseline.turns, observedGeneration: baseline.generation };
+        this.update(job.id, { source, reviewContext: { mode: sameEpoch ? "incremental" : "full", baseJobId: sameEpoch ? prior!.id : null,
+          newRows: trajectory.rows.length, unresolvedFindings: unresolved.length }, status: "analyzing", stage: sameEpoch ? "正在复盘新增轨迹，并跟进尚未解决的问题" : `${plan.info.label} 正在分析执行证据` });
+        const context = { previousReview: sameEpoch && prior ? { jobId: prior.id, summary: prior.report!.summary, findings: unresolved } : undefined, historicalEvidence };
+        let request = buildAnalysisRequest(trajectory, entry.question, context);
+        let parsed: ReturnType<typeof parseGrokReport> | null = null, priorUsage: InsightJob["usage"] = null; let retried = false;
+        if (plan.info.kind !== "grok") {
+          const result = await runPaseoStructured<ReturnType<typeof parseGrokReport>>({ paseo: entry.paseo, plan,
+            parent: { id: job.agentId, cwd: trajectory.agent.cwd ?? "", workspaceId: trajectory.agent.workspaceId, archived: !!trajectory.agent.archivedAt, title: trajectory.agent.title },
+            jobId: job.id, prompt: request.prompt, systemPrompt: ANALYSIS_SYSTEM_PROMPT, schema: insightReportSchema,
+            parse: text => parseGrokReport(text, request.references), signal: abort.signal, now: this.now,
+            onSession: runner => { markInsightAgent(runner.sessionAgentId!); this.update(job.id, { runner }); },
+            onRetry: () => this.update(job.id, { stage: "首份报告未通过质量检查，在原分析会话中重试一次" }) });
+          parsed = { ...result.value, usage: result.usage };
+        } else for (let attempt = 0; attempt < 2; attempt++) {
+          if (abort.signal.aborted || this.closed) break;
+          if (!this.binary) await this.refreshBinary();
+          if (!this.binary) throw new Error("未找到 Grok CLI。安装并登录后可刷新重试，或在「分析设置」里换一个执行器。");
+          const execution = this.run({ binary: this.binary, prompt: request.prompt, signal: abort.signal });
+          this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
+          const output = await abortable(execution, abort.signal);
+          if (abort.signal.aborted || this.closed) break;
+          try { parsed = parseGrokReport(output, request.references); break; }
+          catch (error) { if (!(error instanceof InsightReportError) || attempt > 0) throw error; priorUsage = error.usage; retried = true;
+            this.update(job.id, { stage: "首份报告未通过质量检查，使用精简证据重试一次" }); request = buildAnalysisRequest(trajectory, entry.question, { ...context, compact: true }); }
+        }
+        if (abort.signal.aborted || this.closed) continue; if (!parsed) throw new Error("分析未返回可用报告");
+        if (retried) { const sum = (a: number | null | undefined, b: number | null | undefined) => a == null || b == null ? null : a + b;
+          parsed.usage = { inputTokens: sum(priorUsage?.inputTokens, parsed.usage?.inputTokens), outputTokens: sum(priorUsage?.outputTokens, parsed.usage?.outputTokens), costUsd: sum(priorUsage?.costUsd, parsed.usage?.costUsd) }; }
+        if (!trajectory.coverage.complete || request.sampled) { parsed.report.limitations = [...parsed.report.limitations.slice(0, 7), `本次分析 ${request.evidence.length} 条精简证据；被省略的内容与缺失历史未纳入。`]; if (parsed.report.confidence === "high") parsed.report.confidence = "medium"; }
+        const cited = new Set(parsed.report.findings.flatMap(finding => finding.evidence));
+        const evidence = request.evidence.filter(row => cited.has(row.ref)).slice(0, 80).map(row => ({ ref: row.ref, at: row.at, kind: row.kind.slice(0, 100), toolName: row.toolName?.slice(0, 200) ?? null, text: excerptText(row.text, 2000).text }));
+        this.update(job.id, { status: "completed", stage: "分析完成 · 可查看对应执行版本与证据", report: parsed.report, evidence, usage: parsed.usage, error: null });
+        delete this.cooldowns[job.agentId]; this.cooldowns[job.agentId] = { fingerprint, analyzedAt: this.iso(), reportId: job.id, source };
+        if (getSuggestionTiming({ jobs: this.jobs, suggestionJobs: this.suggestionJobs, autoEnabled: this.settings.autoEnabled, now: this.now() }).ready)
+          await this.suggest(entry.paseo, 7, undefined, "auto").catch(() => {});
+      } catch (error) { if (!abort.signal.aborted && !this.closed) this.update(job.id, { status: "failed", stage: "分析未完成，已有有效报告仍可查看", error: error instanceof Error ? redactSecrets(error.message).slice(0, 2000) : "分析发生未知错误" }); }
+      finally { if (this.current?.id === job.id) this.current = null; await this.persist(); }
+    }
+  }
+  private updateSuggestion(id: string, patch: Partial<SuggestionJob>) {
+    const index = this.suggestionJobs.findIndex(job => job.id === id); if (index < 0) return;
+    this.suggestionJobs[index] = { ...this.suggestionJobs[index], ...patch, updatedAt: this.iso() }; this.changed();
+  }
+  async suggestions(jobId?: string) {
+    await this.ready;
+    const history = retainSuggestionJobs(this.suggestionJobs);
+    return structuredClone({ job: (jobId ? history.find(job => job.id === jobId) : history.find(job => job.status === "completed" && job.report)) ?? null,
+      history: history.map(summarizeSuggestion) });
+  }
+  async suggest(paseo: PaseoApi, days: OverviewDays, runner?: InsightRunner, trigger: "manual" | "auto" = "manual"): Promise<SuggestionJob> {
+    await this.ready;
+    if (this.closed) throw new Error("分析服务正在关闭");
+    if (trigger === "auto" && !this.settings.autoEnabled) throw new Error("自动分析已关闭");
+    this.attach(paseo);
+    const existing = this.suggestionJobs.find(job => ACTIVE.has(job.status) && job.window.days === days);
+    if (existing) {
+      if (trigger === "manual" && existing.trigger === "auto" && existing.status === "queued") {
+        this.updateSuggestion(existing.id, { trigger: "manual", stage: "手动建议已提升队列优先级" });
+        const entry = this.queue.find(entry => entry.id === existing.id);
+        if (entry?.kind === "suggestion") { this.queue = this.queue.filter(item => item !== entry); entry.runner = runner; this.enqueue(entry, "manual"); }
+      }
+      return structuredClone(this.suggestionJobs.find(job => job.id === existing.id)!);
+    }
+    if (this.queue.length >= 8) throw new Error("分析队列已满，请等待当前任务完成。");
+    const at = this.iso(), selection = runner ?? this.settings.runner;
+    const job: SuggestionJob = { id: randomUUID(), createdAt: at, updatedAt: at, status: "queued", trigger, stage: "已加入建议队列",
+      window: { days, from: at, to: at, reports: 0, findings: 0, agents: 0 },
+      runner: { ...BUILTIN_INSIGHT_RUNNER, kind: selection.kind, label: selection.kind === "grok" ? BUILTIN_INSIGHT_RUNNER.label : selection.kind === "auto" ? AUTO_RUNNER_LABEL : "等待解析分析执行器",
+        ...(selection.kind !== "grok" ? { provider: selection.kind === "provider" ? selection.provider : null, model: null, thinkingOptionId: null } : {}) },
+      usage: null, error: null, report: null, basis: [] };
+    this.suggestionJobs.unshift(job); this.enqueue({ kind: "suggestion", id: job.id, paseo, runner }, trigger); this.changed(); this.kick();
+    return structuredClone(job);
+  }
+  private async runSuggestion(entry: SuggestionQueueEntry) {
+    const job = this.suggestionJobs.find(job => job.id === entry.id); if (!job || job.status === "canceled") return;
+    const selection = structuredClone(entry.runner ?? this.settings.runner);
+    const abort = new AbortController(); this.current = { id: job.id, abort };
+    try {
+      this.updateSuggestion(job.id, { status: "collecting", stage: "汇总近期报告与发现反馈" });
+      const context = collectSuggestionContext(this.jobs, job.window.days, this.now());
+      this.updateSuggestion(job.id, { window: context.window, basis: context.basis });
+      if (!context.eligible) { this.updateSuggestion(job.id, { status: "skipped", stage: context.reason }); return; }
+      if (this.cleanup) await abortable(this.cleanup, abort.signal);
+      const plan = await abortable(this.registry(entry.paseo).resolve(selection), abort.signal);
+      this.updateSuggestion(job.id, { runner: plan.info, status: "analyzing", stage: `${plan.info.label} 正在分析跨会话模式与可执行建议` });
+      let parsed: ReturnType<typeof parseSuggestionText>;
+      if (plan.info.kind !== "grok") {
+        const source = context.parentJob!;
+        let parent;
+        try { parent = (await abortable(entry.paseo.agents.ref(source.agentId).refresh(), abort.signal))?.agent; }
+        catch (error) { if (abort.signal.aborted) throw error; throw new Error("无法在该会话的工作区启动建议（可能已归档），可以在「分析设置」里换一个执行器"); }
+        if (!parent) throw new Error("无法找到建议来源会话的工作区，可以在「分析设置」里换一个执行器");
+        const result = await runPaseoStructured<ReturnType<typeof parseSuggestionText>>({ paseo: entry.paseo, plan,
+          parent: { id: source.agentId, cwd: parent.cwd, workspaceId: parent.workspaceId ?? null, archived: !!parent.archivedAt, title: parent.title ?? source.agentTitle },
+          jobId: job.id, title: `观测台建议 · 近 ${job.window.days} 天`, prompt: buildSuggestionPrompt(context),
+          systemPrompt: SUGGESTION_SYSTEM_PROMPT, schema: suggestionReportSchema, parse: text => parseSuggestionText(text, context.references),
+          signal: abort.signal, now: this.now, onSession: runner => { markInsightAgent(runner.sessionAgentId!); this.updateSuggestion(job.id, { runner }); },
+          onRetry: () => this.updateSuggestion(job.id, { stage: "首份建议未通过检查，在原分析会话中重试一次" }) });
+        parsed = { ...result.value, usage: result.usage };
+      } else {
+        await this.refreshBinary(); if (!this.binary) throw new Error("未找到 Grok CLI。安装并登录后可刷新重试，或在「分析设置」里换一个执行器。");
+        let result: ReturnType<typeof parseSuggestionText> | null = null, priorUsage: InsightJob["usage"] = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (abort.signal.aborted || this.closed) return;
+          const execution = this.run({ binary: this.binary, prompt: buildSuggestionPrompt(context, { compact: attempt > 0 }),
+            signal: abort.signal, schema: suggestionReportSchema, systemPrompt: SUGGESTION_SYSTEM_PROMPT });
+          this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
+          const output = await abortable(execution, abort.signal);
+          try { result = parseSuggestionText(output, context.references); }
+          catch (error) { if (!(error instanceof InsightReportError) || attempt) throw error; priorUsage = error.usage;
+            this.updateSuggestion(job.id, { stage: "首份建议未通过检查，使用精简报告重试一次" }); continue; }
+          if (attempt) {
+            const sum = (a: number | null | undefined, b: number | null | undefined) => a == null || b == null ? null : a + b;
+            result.usage = { inputTokens: sum(priorUsage?.inputTokens, result.usage?.inputTokens), outputTokens: sum(priorUsage?.outputTokens, result.usage?.outputTokens), costUsd: sum(priorUsage?.costUsd, result.usage?.costUsd) };
+          }
+          break;
+        }
+        if (!result) throw new Error("建议未返回有效结果"); parsed = result;
+      }
+      if (abort.signal.aborted || this.closed) return;
+      this.updateSuggestion(job.id, { status: "completed", stage: "建议已生成，可查看依据并标记行动", report: parsed.report, evidence: parsed.evidence, usage: parsed.usage, error: null });
+    } catch (error) {
+      if (!abort.signal.aborted && !this.closed) this.updateSuggestion(job.id, { status: "failed", stage: "建议未完成，已有建议仍可查看", error: redactSecrets(error instanceof Error ? error.message : "生成建议时发生未知错误").slice(0, 2000) });
+    } finally { if (this.current?.id === job.id) this.current = null; await this.persist(); }
+  }
+  async cancelSuggestion(jobId: string): Promise<SuggestionJob> {
+    await this.ready; const job = this.suggestionJobs.find(job => job.id === jobId); if (!job) throw new Error("建议任务不存在或已超出保留范围");
+    if (ACTIVE.has(job.status)) { this.queue = this.queue.filter(entry => entry.id !== job.id); this.updateSuggestion(job.id, { status: "canceled", stage: "建议已取消" }); if (this.current?.id === job.id) this.current.abort.abort(); }
+    return structuredClone(this.suggestionJobs.find(job => job.id === jobId)!);
+  }
+  async actionFeedback(jobId: string, actionId: string, status: ActionFeedback["status"]): Promise<SuggestionJob> {
+    await this.ready; const job = this.suggestionJobs.find(job => job.id === jobId);
+    if (!job?.report?.actions.some(action => action.id === actionId)) throw new Error("建议行动不存在或已超出保留范围");
+    this.updateSuggestion(jobId, { feedback: { ...job.feedback, [actionId]: { status, updatedAt: this.iso() } } }); await this.persist();
+    return structuredClone(this.suggestionJobs.find(job => job.id === jobId)!);
+  }
+  async cancel(jobId: string): Promise<InsightJob> {
+    await this.ready; const job = this.jobs.find(job => job.id === jobId); if (!job) throw new Error("分析任务不存在或已超出保留范围");
+    if (ACTIVE.has(job.status)) { this.queue = this.queue.filter(entry => entry.id !== job.id); this.update(job.id, { status: "canceled", stage: "分析已取消" }); if (this.current?.id === job.id) this.current.abort.abort(); }
+    return structuredClone(this.decorate(this.jobs.find(item => item.id === jobId)!));
+  }
+  turnStarted(agentId: string, labels?: Record<string, string>) {
+    if (this.closed) return;
+    if (isKnownInsightAgent(agentId) || labels?.["observatory.role"] === "insight") { markInsightAgent(agentId); return; }
+    if (!this.initialized) { this.deferredLifecycle.push({ id: agentId, started: true }); return; }
+    const timer = this.autoTimers.get(agentId); if (timer) clearTimeout(timer); this.autoTimers.delete(agentId); this.autoDue.delete(agentId);
+    const state = this.activity[agentId] ?? { turns: 0, generation: 0, latestTurnAt: null }; delete this.activity[agentId];
+    this.activity[agentId] = { turns: state.turns + 1, generation: state.generation + 1, latestTurnAt: this.iso() }; this.changed(true);
+  }
+  turnEnded(agentId: string, labels?: Record<string, string>) { if (this.closed) return; if (isKnownInsightAgent(agentId) || labels?.["observatory.role"] === "insight") { markInsightAgent(agentId); return; } if (!this.initialized) { this.deferredLifecycle.push({ id: agentId, started: false }); return; } const state = this.activity[agentId] ?? { turns: 0, generation: 0, latestTurnAt: null }; this.activity[agentId] = { ...state, generation: state.generation + 1 }; this.changed(true); }
+  async scheduleAuto(paseo: PaseoApi, agentId: string, observedUserTurns: number, observedTools: number, labels?: Record<string, string>) {
+    if (this.closed) return;
+    if (isKnownInsightAgent(agentId) || labels?.["observatory.role"] === "insight") { markInsightAgent(agentId); return; }
+    await this.ready; if (this.closed || !this.settings.autoEnabled || observedUserTurns < this.settings.minTurns || observedTools < this.settings.minTools) return;
+    const old = this.autoTimers.get(agentId); if (old) clearTimeout(old);
+    const timer = setTimeout(() => { this.autoTimers.delete(agentId); this.autoDue.delete(agentId); void this.start(paseo, agentId, "auto").catch(() => {}); }, 90000);
+    timer.unref(); this.autoTimers.set(agentId, timer); this.autoDue.set(agentId, this.now() + 90000); this.changed(true);
+  }
+  async close() {
+    await this.ready; this.closed = true; for (const timer of this.autoTimers.values()) clearTimeout(timer); this.autoTimers.clear(); this.autoDue.clear();
+    this.jobs = this.jobs.map(job => ACTIVE.has(job.status) ? { ...job, status: "canceled", stage: "插件关闭，分析已取消", updatedAt: this.iso() } : job);
+    this.suggestionJobs = this.suggestionJobs.map(job => ACTIVE.has(job.status) ? { ...job, status: "canceled", stage: "插件关闭，建议已取消", updatedAt: this.iso() } : job);
+    this.queue = []; this.current?.abort.abort(); if (this.saveTimer) clearTimeout(this.saveTimer); this.saveTimer = null;
+    await this.processing;
+    if (this.executions.size) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...this.executions]), new Promise<void>(resolve => { timeout = setTimeout(resolve, 4000); })]);
+      if (timeout) clearTimeout(timeout);
+    }
+    await this.persist(); await this.storage.close(); await this.suggestionStorage.close();
+  }
+}
+export function registerInsights(server: PluginServerContext): () => Promise<void> {
+  const manager = new InsightManager();
+  server.handle(getInsightState, ({ agentId }, { paseo }) => { manager.attach(paseo); return manager.state(agentId); });
+  server.handle(listInsightJobs, ({ agentId, revision }, { paseo }) => { manager.attach(paseo); return manager.list(agentId, revision); });
+  server.handle(listInsightRunners, (_, { paseo }) => manager.runners(paseo));
+  server.handle(listInsightModels, ({ provider }, { paseo }) => manager.models(paseo, provider));
+  server.handle(getInsightOverview, ({ days, utcOffsetMinutes, revision }, { paseo }) => manager.overview(paseo, days, utcOffsetMinutes, revision));
+  server.handle(getInsightSuggestions, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.suggestions(jobId); });
+  server.handle(startInsightSuggestions, ({ days, runner }, { paseo }) => manager.suggest(paseo, days, runner));
+  server.handle(cancelInsightSuggestions, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.cancelSuggestion(jobId); });
+  server.handle(setActionFeedback, ({ jobId, actionId, status }, { paseo }) => { manager.attach(paseo); return manager.actionFeedback(jobId, actionId, status); });
+  server.handle(getInsightReport, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.report(jobId); });
+  server.handle(setFindingFeedback, ({ jobId, findingId, status }, { paseo }) => { manager.attach(paseo); return manager.feedback(jobId, findingId, status); });
+  server.handle(startInsight, ({ agentId, question, mode, runner }, { paseo }) => manager.start(paseo, agentId, "manual", question, mode, runner));
+  server.handle(cancelInsight, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.cancel(jobId); });
+  server.handle(updateInsightSettings, (input, { paseo }) => { manager.attach(paseo); return manager.configure(input); });
+  const observe = (paseo: PaseoApi, agent: { id: string }, action: () => void | Promise<void>) => {
+    manager.attach(paseo);
+    // Hooks never wait for metadata or cleanup; labels are absent on the 0.9 hook projection.
+    void isInsightAgent(paseo, agent).then(insight => { if (!insight) return action(); }).catch(() => {});
+  };
+  const removers = [server.on("agent.turn_started", ({ agent }, { paseo }) => observe(paseo, agent, () => manager.turnStarted(agent.id))),
+    server.on("agent.turn_ended", (event, { paseo }) => observe(paseo, event.agent, () => {
+      manager.turnEnded(event.agent.id); if (event.outcome.kind === "canceled") return;
+      return manager.scheduleAuto(paseo, event.agent.id, event.timeline.filter(item => item.type === "user_message").length,
+        new Set(event.timeline.filter(item => item.type === "tool_call").map(item => item.callId)).size);
+    }))];
+  return async () => { removers.forEach(remove => remove()); await manager.close(); };
+}

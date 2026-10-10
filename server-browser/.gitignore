@@ -1,0 +1,24 @@
+# Browser sessions and generated evidence belong only on the operator's machine.
+runtime/
+visual/
+profile/
+profiles/
+downloads/
+private/
+.auth/
+**/profile/
+**/session.json
+**/state.json
+**/storage-state*.json
+**/storageState*.json
+**/cookies*.json
+**/Cookies
+**/History
+**/Login Data
+**/Web Data
+**/Local State
+**/Preferences
+artifacts/
+node_modules/
+test-results/
+playwright-report/

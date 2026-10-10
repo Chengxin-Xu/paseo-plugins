@@ -1,0 +1,22 @@
+{
+  "name": "paseo-terracotta-themes",
+  "private": true,
+  "type": "module",
+  "version": "0.4.0",
+  "description": "Six color themes for Paseo, three dark and three light, derived from one perceptual tonal ladder",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "preview": "node --experimental-strip-types scripts/preview.mjs"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.11.0",
+    "@types/node": "^22.20.3",
+    "@types/react": "~19.2.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

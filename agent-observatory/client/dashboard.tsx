@@ -1,0 +1,359 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Text, View, type FlatList as NativeFlatList } from "react-native";
+import type { PluginSurfaceProps, PluginWorkspacePanelProps, PluginAgentPanelProps } from "@getpaseo/plugin/client";
+import { copyText, useToast } from "@getpaseo/plugin/client/react-native";
+import { useQueryClient } from "@tanstack/react-query";
+import { applyArchiveReadOrigin, applyReadReceipt, completionReadState, isUnreadCompletion, knownCompletionAt, matchesStatus, type AgentRecord, type AgentStatus } from "../shared/model";
+import { enrichAgents, type BackgroundState } from "../shared/background";
+import { buildDashboardRows, groupDashboardRows, needsAttention } from "../shared/dashboard-model";
+import type { TelemetrySnapshot } from "../shared/telemetry";
+import { nextRangeChange, nextWindowExit, withinRange, rangeLabels, type TimeRange } from "../shared/time-range";
+import type { AnalyticsSnapshot } from "../shared/analytics";
+import { decisionSignals } from "../shared/decision-signals";
+import { isCompletionSnoozed, nextSnoozeExpiry, type CompletionSnooze, type ViewPreferences } from "../shared/preferences";
+import type { ReadReceipt } from "../shared/read-state";
+import type { StatsRange } from "../shared/stats";
+import { useObservatory } from "./use-observatory";
+import { telemetryQueryKey, useTelemetry } from "./use-telemetry";
+import { useAnalytics } from "./use-analytics";
+import { useViewPreferences } from "./use-view-preferences";
+import { readReceiptQueryKey, useReadReceipts } from "./use-read-receipts";
+import { useAgentActivity } from "./use-agent-activity";
+import { backgroundQueryKey, useBackground } from "./use-background";
+import { useStats } from "./use-stats";
+import { useTokenLive, useTokens } from "./use-tokens";
+import { AgentDetail } from "./agent-detail";
+import { AnalyticsDashboard } from "./analytics-dashboard";
+import { InsightsHub } from "./insights";
+import { ActivityFeed } from "./activity-feed";
+import { StatsBoard, type SessionScopeTarget } from "./stats-board";
+import { StatsBreakdown, type BreakdownDimension } from "./stats-breakdown";
+import { StatsCompare } from "./stats-compare";
+import { TokenBoard } from "./token-board";
+import { tokenTotal } from "../shared/tokens";
+import { ViewTabs, type ViewTab } from "./view-tabs";
+import { Swimlane } from "./swimlane";
+import { SessionList, countRunningDescendants, countUnreadDescendants, groupTitles, type SessionItem } from "./session-list";
+import { LiveDot, PhaseLegend, StatusChip, hueColor } from "./status";
+import { FilterSheet, ProjectSheet, RangeSheet, readFilterNames, sessionScopeNames, type FilterState, type SessionScope } from "./filters";
+import { ActionMenu, Banner, Chip, ChipBar, EmptyState, IconButton, SearchField, Sheet, Skeleton, Spacer, SplitView, SyncStatus, Toolbar, fontSize, hueFor, space, useCompactLayout, type MenuAction } from "./kit";
+import { checkoutName, statusNames, useClock } from "./ui";
+import type { ScheduleFocus } from "./schedule-focus";
+
+type DashboardProps = PluginSurfaceProps & { workspaceId?: string; initialAgentId?: string; archiveMode?: boolean; onOpenArchive?: () => void; onOpenOverview?: () => void;
+  /** Opens 定时运行 on one schedule (from an Agent's 定时任务 card). */ onOpenSchedules?: (focus: ScheduleFocus) => void };
+type ScheduleLink = { onOpenSchedules?: (focus: ScheduleFocus) => void };
+export type ObservatoryData = ReturnType<typeof useObservatory>;
+/** 会话 · 看板 · Token · 明细 (internal value "analytics") · 横评 · 事件 · 分析 */
+export type DashboardTab = "agents" | "board" | "tokens" | "analytics" | "compare" | "activity" | "insights";
+export type { DashboardRow } from "../shared/dashboard-model";
+const noSnoozes: CompletionSnooze[] = [];
+// Set when the overview opens the archive page or returns from it; only such a return restores the list position.
+// A cold open starts at the top, where 需要处理 and 执行中 are.
+let returningAt = 0;
+// Search text stays on this device for this app session. Synced, it followed people to other devices and emptied the list there.
+const sessionQueries = new Map<string, string>();
+
+export function DashboardSurface(props: DashboardProps) {
+  const data = useObservatory({ includeArchived: props.archiveMode === true });
+  const [observing, setObserving] = useState(false);
+  const telemetry = useTelemetry(props.host.id);
+  // Observation analytics (明细 → 观测) is only read while it is on screen.
+  const analytics = useAnalytics(props.host.id, observing && props.archiveMode !== true);
+  const readReceipts = useReadReceipts();
+  // Archived sessions have no running subagents.
+  const background = useBackground(props.host.id, props.archiveMode !== true);
+  const cache = useQueryClient();
+  // Directory events from the owned observation refresh lifecycle data sooner than the fallback polls. A turn that just
+  // ended may leave subagents working (后台执行中); the 看板 counts (read only while shown) follow too.
+  useAgentActivity(() => { for (const queryKey of [telemetryQueryKey(props.host.id), readReceiptQueryKey, backgroundQueryKey(props.host.id), ["agent-observatory", props.host.id, "stats"]]) void cache.invalidateQueries({ queryKey }); });
+  return <DashboardView key={props.host.id} {...props} readReceipts={readReceipts.data?.receipts} archiveOrigins={readReceipts.data?.archiveOrigins} readReceiptError={readReceipts.error?.message ?? readReceipts.data?.error ?? undefined} analytics={analytics.data} analyticsLoading={analytics.isPending} analyticsError={analytics.error?.message} data={data} telemetry={telemetry.data} telemetryError={telemetry.error?.message} background={background.data} onAnalyticsVisible={setObserving} onRefresh={() => { void data.refresh(); void telemetry.refetch(); if (observing) void analytics.refetch(); void readReceipts.refetch(); void cache.invalidateQueries({ queryKey: backgroundQueryKey(props.host.id) }); }} />;
+}
+export function ArchivedSurface(props: DashboardProps) { return <DashboardSurface {...props} archiveMode />; }
+export function WorkspaceDashboard(props: PluginWorkspacePanelProps & ScheduleLink) { return <DashboardSurface {...props} />; }
+export function AgentDashboard(props: PluginAgentPanelProps & ScheduleLink) { return <DashboardSurface {...props} initialAgentId={props.agentId} />; }
+
+const projectKey = (agent: AgentRecord) => agent.projectId || agent.projectRootPath || agent.projectName;
+const checkoutKey = (agent: AgentRecord) => agent.worktreePath || agent.checkoutKind;
+const finished = (agent: AgentRecord) => ["completed", "closed", "canceled"].includes(agent.status);
+
+export function DashboardView({ theme, layout, host, navigation, workspaceId, initialAgentId, data, telemetry, telemetryError, background, analytics, analyticsLoading, analyticsError, readReceipts, archiveOrigins, readReceiptError, archiveMode = false, onOpenArchive, onOpenOverview, onOpenSchedules, onRefresh, onAnalyticsVisible }: DashboardProps & {
+  data: ObservatoryData; readReceipts?: ReadReceipt[]; archiveOrigins?: Array<{agentId:string;archivedAt:string;lastUserMessageAt:string|null}>; readReceiptError?: string; analytics?: AnalyticsSnapshot; analyticsLoading?: boolean; analyticsError?: string; telemetry?: TelemetrySnapshot; telemetryError?: string;
+  /** Provider subagents still working after their parent's turn (后台执行中). */ background?: BackgroundState;
+  onRefresh: () => void; onAnalyticsVisible?: (visible: boolean) => void;
+}) {
+  const { colors } = theme;
+  const { compact, width: surfaceWidth, onLayout } = useCompactLayout(layout.compact);
+  const toast = useToast();
+  const viewStorageKey = `${host.id}:${workspaceId ?? "global"}:${archiveMode ? "archives" : "overview"}`;
+  const preferences = useViewPreferences(viewStorageKey);
+  const hydrated = useRef(false);
+  const list = useRef<NativeFlatList<SessionItem>>(null);
+  const scrollOffset = useRef(0), pendingScroll = useRef<number | null>(null), scrollSave = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [harvestQueue, setHarvestQueue] = useState<Array<{ id: string; token: string }>>([]);
+  const [queuePosition, setQueuePosition] = useState(0);
+  const [showSnoozed, setShowSnoozed] = useState(false);
+  const [query, setQuery] = useState("");
+  const [readFilter, setReadFilter] = useState<"all" | "unread" | "read">("all");
+  const [status, setStatus] = useState<AgentStatus | "all">("all");
+  const [focus, setFocus] = useState<"all" | "attention">("all");
+  const [workspace, setWorkspace] = useState(workspaceId ?? "all");
+  const [project, setProject] = useState("all");
+  const [range, setRange] = useState<TimeRange>("7d");
+  const [provider, setProvider] = useState("all");
+  const [sessionScope, setSessionScope] = useState<SessionScope>("all");
+  const [tab, setTab] = useState<DashboardTab>("agents");
+  const [view, setView] = useState<"tree" | "list">(archiveMode ? "list" : "tree");
+  const [sort, setSort] = useState<"attention" | "recent">(archiveMode ? "recent" : "attention");
+  const [evidenceTarget, setEvidenceTarget] = useState<{ agentId: string; ref: string } | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialAgentId ?? null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [checkout, setCheckout] = useState("all");
+  const [sheet, setSheet] = useState<"filters" | "project" | "range" | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [hubPushed, setHubPushed] = useState(false);
+  const [statsRange, setStatsRange] = useState<StatsRange>("30d");
+  const [dimension, setDimension] = useState<BreakdownDimension>("models");
+  const now = useClock(30_000);
+  const observing = tab === "analytics" && dimension === "observed";
+  // Statistics are read only while 看板 / 明细 / 横评 show them.
+  const statsTab = !archiveMode && (tab === "board" || tab === "compare" || (tab === "analytics" && !observing));
+  const stats = useStats(host.id, statsRange, statsTab);
+  const [liveWindow, setLiveWindow] = useState<30 | 60>(30);
+  const tokenTab = !archiveMode && tab === "tokens";
+  // 看板 shows today's tokens as a shortcut into the Token view.
+  const tokens = useTokens(host.id, statsRange, tokenTab || (!archiveMode && tab === "board")), tokenLive = useTokenLive(host.id, tokenTab, "full", liveWindow);
+  // Running rows show their live output speed; read only while the session list shows something running.
+  const runningCount = useMemo(() => data.agents.filter(agent => agent.status === "running" && !agent.archivedAt).length + (background?.agents.length ?? 0), [data.agents, background]);
+  const rowLive = useTokenLive(host.id, !archiveMode && tab === "agents" && runningCount > 0, "agents");
+  const rates = useMemo(() => new Map((rowLive.data?.agents ?? []).flatMap(agent => agent.agentId && agent.outputPerSec > 0 ? [[agent.agentId, agent.outputPerSec] as const] : [])), [rowLive.data]);
+  useEffect(() => { setWorkspace(workspaceId ?? "all"); }, [workspaceId]);
+  useEffect(() => { onAnalyticsVisible?.(observing); }, [observing, onAnalyticsVisible]);
+  const syncedView: ViewPreferences = useMemo(() => ({ query: "", status, readFilter, workspace, project, checkout, provider, range, sessionScope, view, sort, expanded: [...expanded], scrollOffset: 0, focus }), [status, readFilter, workspace, project, checkout, provider, range, sessionScope, view, sort, expanded, focus]);
+  const currentView: ViewPreferences = useMemo(() => ({ ...syncedView, query }), [syncedView, query]);
+  const withScroll = (next: ViewPreferences): ViewPreferences => ({ ...next, scrollOffset: Math.round(scrollOffset.current) });
+  const applyView = (next: ViewPreferences, restoreScroll = false) => { setQuery(next.query); setStatus(next.status); setReadFilter(next.readFilter); setWorkspace(workspaceId ?? next.workspace); setProject(next.project); setCheckout(next.checkout); setProvider(next.provider); setRange(next.range); setSessionScope(next.sessionScope); setView(next.view); setSort(next.sort); setExpanded(new Set(next.expanded)); setFocus(next.focus ?? "all"); pendingScroll.current = restoreScroll ? next.scrollOffset : 0; };
+  useEffect(() => { hydrated.current = false; }, [viewStorageKey]);
+  useEffect(() => { if (!preferences.snapshot || hydrated.current) return; applyView({ ...preferences.snapshot.view, query: sessionQueries.get(viewStorageKey) ?? "" }, Date.now() - returningAt < 300_000); hydrated.current = true; }, [preferences.snapshot]);
+  useEffect(() => { if (!hydrated.current) return; if (query) sessionQueries.set(viewStorageKey, query); else sessionQueries.delete(viewStorageKey); }, [query, viewStorageKey]);
+  useEffect(() => { if (!hydrated.current) return; const timer = setTimeout(() => { void preferences.saveView(withScroll(syncedView)).catch(() => {}); }, 650); return () => clearTimeout(timer); }, [syncedView, preferences.saveView]);
+  useEffect(() => () => { if (scrollSave.current) clearTimeout(scrollSave.current); }, []);
+  const snoozes = preferences.snapshot?.snoozes ?? noSnoozes;
+  // Analysis sessions the observatory starts itself (智能分析 runners) are reached from their reports, not listed as work.
+  const loadedAgents = useMemo(() => { const receipts = new Map((readReceipts ?? []).map(receipt => [receipt.agentId, receipt])); const origins = new Map((archiveOrigins ?? []).map(origin => [origin.agentId, origin])); return enrichAgents(data.agents.filter(agent => agent.labels["observatory.role"] !== "insight"), telemetry, background).map(agent => applyReadReceipt(applyArchiveReadOrigin(agent, origins.get(agent.id)), receipts.get(agent.id))); }, [data.agents, telemetry, background, readReceipts, archiveOrigins]);
+  const agents = useMemo(() => loadedAgents.filter(agent => archiveMode ? !!agent.archivedAt : !agent.archivedAt), [loadedAgents, archiveMode]);
+  // Range, snooze and event-window filters change only at exact boundaries; between them the
+  // derived lists keep their identity while displayed relative times still tick with `now`.
+  const filterClock = useRef<{ at: number; until: number; agents: AgentRecord[]; range: TimeRange; snoozes: readonly CompletionSnooze[]; events?: TelemetrySnapshot["events"] } | null>(null);
+  const clock = filterClock.current;
+  if (!clock || clock.agents !== agents || clock.range !== range || clock.snoozes !== snoozes || clock.events !== telemetry?.events || now >= clock.until) {
+    filterClock.current = { at: now, agents, range, snoozes, events: telemetry?.events, until: Math.min(nextRangeChange(agents, range, now), nextSnoozeExpiry(snoozes, now),
+      nextWindowExit((telemetry?.events ?? []).map(event => Date.parse(event.at)), range, now)) };
+  }
+  const filterNow = filterClock.current!.at;
+  const ranged = useMemo(() => agents.filter(agent => withinRange(agent, range, filterNow)), [agents, range, filterNow]);
+  const inPlace = useCallback((agent: AgentRecord) => (checkout === "all" || checkoutKey(agent) === checkout) && (project === "all" || projectKey(agent) === project) && (!workspaceId || agent.workspaceId === workspaceId) && (workspace === "all" || agent.workspaceId === workspace) && (provider === "all" || agent.provider === provider), [checkout, project, workspaceId, workspace, provider]);
+  const harvestScope = useMemo(() => ranged.filter(inPlace), [ranged, inPlace]);
+  const scoped = useMemo(() => harvestScope.filter(agent => sessionScope === "all" || (sessionScope === "history" ? !!agent.archivedAt || finished(agent) : !agent.archivedAt && !finished(agent))), [harvestScope, sessionScope]);
+  const projects = useMemo(() => { const found = new Map<string, { id: string; name: string; count: number }>(); for (const agent of ranged) { const key = projectKey(agent); const entry = found.get(key) ?? { id: key, name: agent.projectName, count: 0 }; entry.count++; found.set(key, entry); } return [...found.values()].sort((a, b) => a.name.localeCompare(b.name)); }, [ranged]);
+  const workspaces = useMemo(() => {
+    const found = new Map<string, { name: string; folder: string }>();
+    for (const agent of agents) if (agent.workspaceId && !found.has(agent.workspaceId)) { const folder = agent.cwd?.split("/").filter(Boolean).pop() || "工作区"; found.set(agent.workspaceId, { name: agent.workspaceName || folder, folder }); }
+    const repeated = new Set([...found.values()].map(item => item.name).filter((name, index, names) => names.indexOf(name) !== index));
+    // Workspaces may share a title; the folder tells them apart.
+    return [...found.entries()].map(([id, item]) => [id, repeated.has(item.name) ? `${item.name}（${item.folder}）` : item.name] as const).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [agents]);
+  const checkouts = useMemo(() => [...new Map(agents.map(a => [checkoutKey(a), checkoutName(a)] as const)).entries()].sort((a, b) => a[1].localeCompare(b[1])), [agents]);
+  const providers = useMemo(() => [...new Set(agents.map(a => a.provider))].sort(), [agents]);
+  const snoozedAt = useCallback((agent: AgentRecord) => isCompletionSnoozed(agent, snoozes, filterNow), [snoozes, filterNow]);
+  const attentionOf = useCallback((agent: AgentRecord) => needsAttention(agent, snoozedAt(agent)), [snoozedAt]);
+  const counts = useMemo(() => { let attention = 0, approvals = 0, running = 0, unread = 0, snoozed = 0, idle = 0; for (const agent of harvestScope) { if (attentionOf(agent)) attention++; if (!agent.archivedAt && (agent.pendingPermissionCount > 0 || agent.status === "waiting")) approvals++; if (matchesStatus(agent.status, "running")) running++; if (agent.status === "idle" && !agent.archivedAt && !agent.pendingPermissionCount) idle++; if (isUnreadCompletion(agent)) { if (snoozedAt(agent)) snoozed++; else unread++; } } return { attention, approvals, running, unread, snoozed, idle }; }, [harvestScope, attentionOf, snoozedAt]);
+  // Search and state filters reveal matching descendants (see buildDashboardRows); place filters keep the tree as is.
+  const revealing = !!query.trim() || status !== "all" || readFilter !== "all" || focus !== "all";
+  const filtered = revealing || workspace !== (workspaceId ?? "all") || project !== "all" || checkout !== "all" || provider !== "all" || sessionScope !== "all";
+  const { rows } = useMemo(() => buildDashboardRows(scoped.filter(agent => readFilter !== "unread" || showSnoozed || !snoozedAt(agent)), { query, status, view, sort, expanded, readFilter, focus: focus === "attention" ? attentionOf : undefined }), [scoped, query, status, view, sort, expanded, readFilter, showSnoozed, snoozedAt, focus, attentionOf]);
+  const items = useMemo(() => {
+    const grouped = sort === "attention" && !archiveMode;
+    const sections = grouped ? groupDashboardRows(rows, attentionOf) : [{ group: "recent" as const, rows, threads: 0 }];
+    const result: SessionItem[] = [];
+    for (const section of sections) {
+      if (grouped) result.push({ kind: "section", key: `section:${section.group}`, group: section.group, title: groupTitles[section.group], count: section.threads });
+      for (const row of section.rows) result.push({ kind: "row", key: row.node.agent.id, row, childUnread: row.node.children.length ? countUnreadDescendants(row) : 0, childRunning: row.node.children.length ? countRunningDescendants(row) : 0, snoozed: isUnreadCompletion(row.node.agent) && snoozedAt(row.node.agent) });
+    }
+    return result;
+  }, [rows, sort, archiveMode, attentionOf, snoozedAt]);
+  useEffect(() => { if (pendingScroll.current === null || !items.length) return; const offset = pendingScroll.current; pendingScroll.current = null; scrollOffset.current = offset; if (offset > 0) setTimeout(() => list.current?.scrollToOffset({ offset, animated: false }), 0); }, [items.length]);
+  const selected = selectedId ? agents.find(agent => agent.id === selectedId) : undefined;
+  const scopeIds = useMemo(() => new Set(scoped.filter(agent => matchesStatus(agent.status, status) && (readFilter === "all" || completionReadState(agent) === readFilter) && (focus === "all" || attentionOf(agent))).map(a => a.id)), [scoped, status, readFilter, focus, attentionOf]);
+  const eventSince = range === "all" ? -Infinity : filterNow - (range === "24h" ? 1 : range === "7d" ? 7 : 30) * 86400_000;
+  const events = useMemo(() => (telemetry?.events ?? []).filter(event => scopeIds.has(event.agentId) && Date.parse(event.at) >= eventSince), [telemetry, scopeIds, eventSince]);
+  const signals = useMemo(() => { const labels = new Map<string, string>(); for (const signal of decisionSignals(agents, telemetry?.events ?? [], now)) { if (signal.kind === "quiet") labels.set(signal.agentId, "久无更新"); else if (signal.kind === "repeated_failure") labels.set(signal.agentId, `失败 ${signal.count} 次`); } return labels; }, [agents, telemetry, now]);
+  // A live directory observation is current by definition; polling-only syncs are stale after missing a cycle.
+  const stale = !data.live && !!data.lastSyncedAt && now - new Date(data.lastSyncedAt).getTime() > 25000;
+  const sync = data.error ? { state: "error" as const, label: "同步失败" } : data.loading && !data.agents.length ? { state: "syncing" as const, label: "连接中" } : data.isRefreshing ? { state: "syncing" as const, label: "同步中" } : stale ? { state: "stale" as const, label: "等待同步" } : { state: "live" as const, label: data.live ? "实时" : "已同步" };
+  const toggle = useCallback((id: string) => setExpanded(previous => { const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next; }), []);
+  async function exportSnapshot() {
+    try { await copyText(JSON.stringify({ exportedAt: new Date().toISOString(), host: host.label, agents: scoped, observation: telemetry ? { startedAt: telemetry.startedAt, agents: telemetry.agents.filter(item => scopeIds.has(item.agentId)) } : null }, null, 2)); toast.show("观测快照已复制", { variant: "success" }); }
+    catch { toast.error("复制失败，请检查剪贴板权限后重试"); }
+  }
+  const navigatePage = (action?: () => void) => { if (!action) return; returningAt = Date.now(); void preferences.saveView(withScroll(syncedView)).catch(() => {}).finally(action); };
+  const onScrollEnd = (offset: number) => {
+    const moved = Math.abs(offset - scrollOffset.current) > 40; scrollOffset.current = offset;
+    if (!moved || !hydrated.current) return;
+    if (scrollSave.current) clearTimeout(scrollSave.current);
+    scrollSave.current = setTimeout(() => { void preferences.saveView(withScroll(syncedView)).catch(() => {}); }, 1500);
+  };
+  function resetFilters() { setReadFilter("all"); setQuery(""); setStatus("all"); setFocus("all"); setShowSnoozed(false); setWorkspace(workspaceId ?? "all"); setProvider("all"); setProject("all"); setSessionScope("all"); setCheckout("all"); }
+  function selectAgent(agentId: string) {
+    const agent = agents.find(candidate => candidate.id === agentId);
+    if (agent) {
+      if (!harvestQueue.length && isUnreadCompletion(agent)) { const queue = harvestScope.filter(item => isUnreadCompletion(item) && !isCompletionSnoozed(item, snoozes, Date.now())).map(item => ({ id: item.id, token: knownCompletionAt(item)! })); setHarvestQueue(queue); setQueuePosition(Math.max(0, queue.findIndex(item => item.id === agentId))); }
+      setSelectedId(agentId); return;
+    }
+    setSelectedId(null);
+    if (!navigation?.openAgent) { toast.error("这个 Agent 不在当前列表中，请在 Paseo 会话列表中打开"); return; }
+    try { Promise.resolve(navigation.openAgent({ agentId })).catch(error => toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`)); }
+    catch (error) { toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`); }
+  }
+  function selectProject(projectId: string) {
+    setReadFilter("all"); setFocus("all"); setProject(projectId); setCheckout("all"); setRange("all"); setSessionScope("all"); setQuery(""); setStatus("all"); setProvider("all");
+    setWorkspace(workspaceId ?? "all"); setSelectedId(null); setTab("agents");
+  }
+  const selectRef = useRef(selectAgent);
+  selectRef.current = selectAgent;
+  const selectRow = useCallback((agentId: string) => selectRef.current(agentId), []);
+  const openFromView = (agentId: string) => { setTab("agents"); selectAgent(agentId); };
+  const nextHarvest = (currentId: string) => { const start = harvestQueue.findIndex(item => item.id === currentId); for (let offset = 1; offset <= harvestQueue.length; offset++) { const index = (Math.max(0, start) + offset) % harvestQueue.length; const item = harvestQueue[index]!; const next = agents.find(agent => agent.id === item.id); if (item.id !== currentId && next && isUnreadCompletion(next) && knownCompletionAt(next) === item.token && !isCompletionSnoozed(next, snoozes, Date.now())) { setQueuePosition(index); setSelectedId(item.id); return; } } setSelectedId(null); setHarvestQueue([]); toast.show("这一批未读结果已处理完", { variant: "success" }); };
+  const snoozeAgent = async (agent: AgentRecord) => { const token = knownCompletionAt(agent); if (!token) return; await preferences.mutate({ snooze: { agentId: agent.id, completionAt: token, until: new Date(Date.now() + 3600000).toISOString() } }); toast.show("已延后 1 小时，有新结果仍会提醒"); nextHarvest(agent.id); };
+  // From the 看板 hero: show exactly the sessions behind the tapped live count.
+  const showScope = (target: SessionScopeTarget) => {
+    resetFilters(); setRange("all"); setSelectedId(null); setTab("agents");
+    if (target === "unread") setReadFilter("unread"); else setStatus(target === "approval" ? "waiting" : target);
+  };
+  const refresh = () => { onRefresh(); if (statsTab) void stats.refetch(); if (tokenTab) { void tokens.refetch(); void tokenLive.refetch(); } };
+  const detailQueue = harvestQueue.length ? { index: queuePosition + 1, total: harvestQueue.length } : undefined;
+  const detailClosed = () => { setSelectedId(null); setHarvestQueue([]); setEvidenceTarget(null); };
+  const openScope = (next: { focus?: "attention"; status?: "running" | "idle"; readFilter?: "unread"; snoozed?: boolean }) => {
+    const same = next.focus ? focus === "attention" : next.status ? status === next.status : next.snoozed ? showSnoozed : readFilter === "unread" && !showSnoozed;
+    setFocus(!same && next.focus ? "attention" : "all"); setStatus(!same && next.status ? next.status : "all");
+    setReadFilter(!same && (next.readFilter || next.snoozed) ? "unread" : "all"); setShowSnoozed(!same && !!next.snoozed); setSessionScope("all");
+  };
+  // Counts are only meaningful once a snapshot exists.
+  const known = data.agents.length > 0 || (!data.loading && !data.error);
+  const filterState: FilterState = { status, readFilter, sessionScope, checkout, workspace, provider };
+  const changeFilters = (patch: Partial<FilterState>) => { if (patch.status !== undefined) setStatus(patch.status); if (patch.readFilter !== undefined) { setReadFilter(patch.readFilter); setShowSnoozed(false); } if (patch.sessionScope !== undefined) setSessionScope(patch.sessionScope); if (patch.checkout !== undefined) setCheckout(patch.checkout); if (patch.workspace !== undefined) { setWorkspace(patch.workspace); const chosen = agents.find(agent => agent.workspaceId === patch.workspace); if (chosen) setProject(projectKey(chosen)); } if (patch.provider !== undefined) setProvider(patch.provider); };
+  const workspaceDefault = workspaceId ?? "all";
+  const applied: Array<{ key: string; label: string; clear: () => void }> = [
+    ...(status !== "all" && status !== "running" && status !== "idle" ? [{ key: "status", label: statusNames[status], clear: () => setStatus("all") }] : []),
+    ...(readFilter === "read" ? [{ key: "read", label: readFilterNames.read, clear: () => setReadFilter("all") }] : []),
+    ...(sessionScope !== "all" ? [{ key: "scope", label: sessionScopeNames[sessionScope], clear: () => setSessionScope("all") }] : []),
+    ...(checkout !== "all" ? [{ key: "checkout", label: checkouts.find(([id]) => id === checkout)?.[1] ?? "检出", clear: () => setCheckout("all") }] : []),
+    ...(workspace !== workspaceDefault ? [{ key: "workspace", label: workspaces.find(([id]) => id === workspace)?.[1] ?? "工作区", clear: () => setWorkspace(workspaceDefault) }] : []),
+    ...(provider !== "all" ? [{ key: "provider", label: provider, clear: () => setProvider("all") }] : []),
+  ];
+  const projectLabel = projects.find(item => item.id === project)?.name ?? (project === "all" ? "全部项目" : "项目");
+  const savedViews = preferences.snapshot?.savedViews ?? [];
+  const sessionsTab = tab === "agents", listTab = tab === "agents" || tab === "activity";
+  const archiveSummary = useMemo(() => { const worktrees = new Set(scoped.filter(a => a.checkoutKind === "worktree").map(a => a.worktreePath)).size; return [`${scoped.length} 个会话`, `${new Set(scoped.map(projectKey)).size} 个项目`, worktrees ? `${worktrees} 个 worktree` : null].filter(Boolean).join(" · "); }, [scoped]);
+  const banners = [
+    data.error && data.agents.length ? <Banner key="sync" theme={theme} tone="danger" message={`同步失败：${String(data.error)}。显示的是上次结果。`} action={{ label: "重试", onPress: onRefresh }} /> : null,
+    data.truncated ? <Banner key="truncated" theme={theme} message="会话较多，只加载了一部分；计数只覆盖已加载的会话。" /> : null,
+    telemetryError ? <Banner key="telemetry" theme={theme} tone="warning" message="事件记录暂不可用，会话状态仍会实时更新。" /> : null,
+    telemetry?.persistenceError ? <Banner key="persist" theme={theme} tone="warning" message={`事件无法保存：${telemetry.persistenceError}`} /> : null,
+    readReceiptError ? <Banner key="receipts" theme={theme} tone="warning" message={`已读状态同步异常：${readReceiptError}`} /> : null,
+    preferences.error ? <Banner key="preferences" theme={theme} tone="warning" message={`视图无法保存：${preferences.error}`} /> : null,
+  ].filter(Boolean);
+  const detail = selected
+    ? <AgentDetail key={`${host.id}:${selected.id}`} agent={selected} agents={loadedAgents} theme={theme} compact={compact} navigation={navigation} onSelectAgent={selectAgent} onClose={detailClosed} telemetry={telemetry} onReadNext={harvestQueue.length ? receipt => nextHarvest(receipt.agentId) : undefined} onSnooze={preferences.ready ? snoozeAgent : undefined} queue={detailQueue} onOpenSchedules={onOpenSchedules} initialEvidenceRef={evidenceTarget?.agentId === selected.id ? evidenceTarget.ref : undefined} />
+    : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" title="选择一个会话" message="结果、时间线和子任务会显示在这里" /></View>;
+  const empty = data.loading ? <Skeleton theme={theme} rows={6} />
+    : data.error ? <EmptyState theme={theme} icon="WifiOff" title="暂时无法读取会话" message="恢复连接后会自动重试" action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />
+    : readFilter === "unread" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title={counts.snoozed && !showSnoozed ? "未读结果都已稍后处理" : "没有未读结果"} message="新一轮任务完成后会出现在这里" action={{ label: "查看全部", onPress: resetFilters }} />
+    : focus === "attention" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title="没有需要处理的会话" message="新的审批、异常和未读结果会出现在这里" action={{ label: "查看全部", onPress: resetFilters }} />
+    : filtered ? <EmptyState theme={theme} icon="SearchX" title="没有匹配的会话" action={{ label: "清除筛选", onPress: resetFilters }} />
+    : archiveMode ? <EmptyState theme={theme} icon="Archive" title="这个时间范围没有归档会话" action={range !== "all" ? { label: "查看全部时间", onPress: () => setRange("all") } : undefined} />
+    : <EmptyState theme={theme} icon="Orbit" title="还没有会话" message="在 Paseo 新建 Agent 后会自动出现在这里" />;
+  const menu: MenuAction[] = [
+    ...(archiveMode ? onOpenOverview ? [{ key: "overview", label: "返回观测台", icon: "ArrowLeft", onPress: () => navigatePage(onOpenOverview) }] : [] : onOpenArchive ? [{ key: "archives", label: "已归档会话", icon: "Archive", onPress: () => navigatePage(onOpenArchive) }] : []),
+    ...(sessionsTab ? [
+      { key: "view", label: view === "tree" ? "切换为列表" : "切换为树状", icon: view === "tree" ? "List" : "ListTree", hint: view === "tree" ? "子 Agent 与上级分开显示" : "子 Agent 收在上级下面", onPress: () => setView(view === "tree" ? "list" : "tree") },
+      { key: "sort", label: sort === "attention" ? "按最近活动排序" : "按需要处理排序", icon: "ArrowDownWideNarrow", onPress: () => setSort(sort === "attention" ? "recent" : "attention") },
+      ...(view === "tree" ? [{ key: "expand", label: expanded.size ? "收起全部子 Agent" : "展开全部子 Agent", icon: "ChevronsUpDown", onPress: () => setExpanded(expanded.size ? new Set() : new Set(scoped.map(agent => agent.id))) }] : []),
+    ] : []),
+    ...(listTab ? [{ key: "export", label: "导出快照", icon: "Download", hint: "复制当前筛选下的会话与观测记录", onPress: () => void exportSnapshot() }] : []),
+    ...(sessionsTab ? [{ key: "legend", label: "状态图例", icon: "Palette", tone: "violet" as const, hint: "每种颜色和标记代表什么", onPress: () => setLegendOpen(true) }] : []),
+    { key: "refresh", label: "刷新", icon: "RefreshCw", disabled: data.isRefreshing, onPress: refresh },
+  ];
+  // Each view has its own colours. Phones show the unselected views as coloured icons only.
+  const tabs: ViewTab<DashboardTab>[] = [
+    { value: "agents", label: "会话", icon: "MessagesSquare", colors: ["sky", "blue"], count: !compact && known ? scoped.length : undefined },
+    { value: "board", label: "看板", icon: "LayoutDashboard", colors: ["pink", "fuchsia"] },
+    { value: "tokens", label: "Token", icon: "Coins", colors: ["amber", "orange"] },
+    { value: "analytics", label: "明细", icon: "ChartColumn", colors: ["violet", "indigo"] },
+    { value: "compare", label: "横评", icon: "Swords", colors: ["cyan", "blue"] },
+    { value: "activity", label: compact ? "事件" : "事件流", icon: "Activity", colors: ["orange", "red"] },
+    { value: "insights", label: compact ? "分析" : "智能分析", icon: "Sparkles", colors: ["teal", "green"] },
+  ];
+  const iconTabs = compact && surfaceWidth > 0 && surfaceWidth < 560;
+  const statsProps = { theme, compact, stats: stats.data, loading: stats.isPending, error: stats.error?.message, range: statsRange, onRange: setStatsRange, onRefresh: refresh };
+  const searching = sessionsTab && compact && (searchOpen || !!query);
+  const sessionList = <SessionList items={items} theme={theme} compact={compact} selectedId={selectedId} expanded={expanded} forceExpanded={revealing} now={now} signals={signals} rates={rates} empty={empty} listRef={list} onScrollEnd={onScrollEnd} onToggle={toggle} onSelect={selectRow} />;
+  const pushDetail = compact && !!selected && listTab;
+  const chrome = !(compact && tab === "insights" && hubPushed);
+  return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>
+    {pushDetail ? detail : <>
+      {chrome ? <Toolbar theme={theme}>
+        {archiveMode ? <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>{archiveSummary}</Text>
+          : <ViewTabs theme={theme} value={tab} onChange={setTab} tabs={tabs} iconOnly={iconTabs} accessibilityLabel="视图" />}
+        <Spacer />
+        {sessionsTab && !compact ? <View style={{ width: 240, flexShrink: 1 }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder="搜索任务、项目或分支" accessibilityLabel="搜索会话" /></View> : null}
+        {sessionsTab && compact ? <IconButton theme={theme} icon="Search" label="搜索" active={searching} onPress={() => { if (searching) { setQuery(""); setSearchOpen(false); } else setSearchOpen(true); }} /> : null}
+        <View accessibilityLabel={sync.label}>{sync.state === "live" ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+          <LiveDot color={hueColor(theme, "ok")} size={6} live={data.live} />
+          {compact ? null : <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{sync.label}</Text>}
+        </View> : <SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} />}</View>
+        <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
+      </Toolbar> : null}
+      {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder="搜索任务、项目或分支" accessibilityLabel="搜索会话" autoFocus={!query} grow={false} /></View> : null}
+      {sessionsTab ? <ChipBar>
+        {!archiveMode ? <>
+          <StatusChip theme={theme} label="需要处理" count={known ? counts.attention : undefined} hue="warn" motion={counts.approvals ? "ping" : undefined} selected={focus === "attention"} onPress={() => openScope({ focus: "attention" })} />
+          <StatusChip theme={theme} label="执行中" count={known ? counts.running : undefined} hue="run" motion="spin" selected={status === "running"} onPress={() => openScope({ status: "running" })} />
+          <StatusChip theme={theme} label="未读" count={known ? counts.unread : undefined} hue="pink" motion={counts.unread ? "ping" : undefined} selected={readFilter === "unread" && !showSnoozed} onPress={() => openScope({ readFilter: "unread" })} />
+          <StatusChip theme={theme} label="待回复" count={known ? counts.idle : undefined} hue="violet" selected={status === "idle"} onPress={() => openScope({ status: "idle" })} />
+          {counts.snoozed > 0 ? <Chip theme={theme} label="稍后处理" count={counts.snoozed} icon="Clock3" selected={showSnoozed} onPress={() => openScope({ snoozed: true })} /> : null}
+        </> : null}
+        <Chip theme={theme} label={projectLabel} icon="Folder" tone={project !== "all" ? hueFor(projectLabel) : undefined} selected={project !== "all"} onPress={() => setSheet("project")} />
+        <Chip theme={theme} label={rangeLabels[range]} icon="Calendar" selected={range !== "7d"} onPress={() => setSheet("range")} />
+        <Chip theme={theme} label="筛选" icon="SlidersHorizontal" count={applied.length || undefined} selected={applied.length > 0} onPress={() => setSheet("filters")} />
+        {!archiveMode ? <Chip theme={theme} label="图例" icon="Palette" tone="violet" onPress={() => setLegendOpen(true)} /> : null}
+        {applied.map(item => <Chip key={item.key} theme={theme} label={item.label} selected onRemove={item.clear} />)}
+        {savedViews.map(saved => <Chip key={saved.id} theme={theme} label={saved.name} icon="Bookmark" onPress={() => applyView(saved.view)} />)}
+      </ChipBar> : null}
+      {banners.length ? <View style={{ gap: space.sm, paddingHorizontal: space.md, paddingTop: sessionsTab ? 0 : space.sm, paddingBottom: space.sm }}>{banners}</View> : null}
+      {sessionsTab ? <SplitView theme={theme} compact={compact} showDetail={false} list={sessionList} detail={detail} />
+        : tab === "activity" ? <>
+          {!compact && events.length ? <Swimlane theme={theme} events={events} agents={agents} now={now} compact={false} onSelect={selectAgent} inset={space.lg} /> : null}
+          <SplitView theme={theme} compact={compact} showDetail={false} list={<ActivityFeed events={events} theme={theme} telemetry={telemetry} onSelect={selectAgent} now={now} selectedId={selectedId} agents={agents} swimlane={compact} />} detail={detail} />
+        </>
+        : tab === "board" ? <StatsBoard {...statsProps} onOpenScope={showScope} onOpenAgent={openFromView} onOpenBreakdown={() => { setDimension("models"); setTab("analytics"); }}
+          tokens={tokens.data?.daily.length ? { today: tokenTotal(tokens.data.daily.at(-1)!), onOpen: () => setTab("tokens") } : undefined} />
+        : tab === "analytics" ? <StatsBreakdown {...statsProps} dimension={dimension} onDimension={setDimension}
+          observed={<AnalyticsDashboard theme={theme} hostId={host.id} compact={compact} agents={agents} analytics={analytics} loading={analyticsLoading} error={analyticsError} onSelectAgent={openFromView} onSelectProject={selectProject} />} />
+        : tab === "compare" ? <StatsCompare {...statsProps} />
+        : tab === "tokens" ? <TokenBoard theme={theme} compact={compact} range={statsRange} onRange={setStatsRange} onRefresh={refresh} tokens={tokens.data} loading={tokens.isPending} error={tokens.error?.message}
+          live={tokenLive.data} liveError={tokenLive.error?.message} liveWindow={liveWindow} onLiveWindow={setLiveWindow} onOpenAgent={openFromView} />
+        : <InsightsHub theme={theme} compact={compact} agents={agents} onSelectAgent={openFromView} onOpenEvidence={target => { setEvidenceTarget(target); openFromView(target.agentId); }} onPush={setHubPushed} />}
+    </>}
+    <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
+    <Sheet title="状态图例" open={legendOpen} onClose={() => setLegendOpen(false)}><PhaseLegend theme={theme} /></Sheet>
+    <ProjectSheet theme={theme} open={sheet === "project"} onClose={() => setSheet(null)} projects={projects} total={ranged.length} value={project} onChange={value => { setProject(value); setWorkspace(workspaceDefault); setCheckout("all"); }} />
+    <RangeSheet theme={theme} open={sheet === "range"} onClose={() => setSheet(null)} value={range} onChange={setRange} />
+    <FilterSheet theme={theme} open={sheet === "filters"} onClose={() => setSheet(null)} archiveMode={archiveMode} state={filterState} checkouts={checkouts} workspaces={workspaces} providers={providers} showWorkspace={!workspaceId}
+      onChange={changeFilters} onReset={resetFilters} savedViews={savedViews} canSave={preferences.ready}
+      onSaveView={name => preferences.mutate({ saveView: { name, view: withScroll(currentView) } }).then(() => { toast.show("已保存视图", { variant: "success" }); })}
+      onApplyView={saved => applyView(saved.view)} onDeleteView={saved => { void preferences.mutate({ deleteSavedViewId: saved.id }).catch(() => {}); }} />
+  </View>;
+}

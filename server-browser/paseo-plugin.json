@@ -1,0 +1,15 @@
+{
+  "id": "server-browser",
+  "name": "Server Browser",
+  "description": "A Chromium browser on the daemon host, shared by your phone, your computer and a dedicated browser Agent, with explicit handover between you and the Agent.",
+  "icon": "assets/icon.png",
+  "media": [
+    "assets/screenshot-overview.png",
+    "assets/screenshot-browser.png",
+    "assets/screenshot-phone-overview.png",
+    "assets/screenshot-phone-manual.webp"
+  ],
+  "requirements": {
+    "paseo": ">=0.11.1"
+  }
+}

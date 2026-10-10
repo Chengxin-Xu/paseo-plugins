@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import { forgetTurnStarts, handleFoldIndex, knownTurnStart, noteTurnStarted } from "./fold-index";
+
+function context(refetch: (options: unknown) => Promise<unknown>, calls: unknown[] = []): PluginHandlerContext {
+  return {
+    paseo: {
+      agents: {
+        ref: (agentId: string) => ({
+          timeline: {
+            refetch: (options: unknown) => {
+              calls.push({ agentId, options });
+              return refetch(options);
+            },
+          },
+        }),
+      },
+    },
+  } as unknown as PluginHandlerContext;
+}
+
+const payload = {
+  epoch: "e1",
+  entries: [
+    { provider: "claude", item: { type: "user_message", text: "hi" }, timestamp: "2026-10-09T10:00:00.000Z", seqStart: 1, seqEnd: 1 },
+    { provider: "claude", item: { type: "tool_call", callId: "c1", name: "Bash", status: "running", error: null, detail: { type: "shell", command: "npm run secret-build", output: "SECRET OUTPUT" } }, timestamp: "2026-10-09T10:00:01.000Z", seqStart: 2, seqEnd: 2 },
+    { provider: "claude", item: { nope: true }, timestamp: "x", seqStart: 3, seqEnd: 3 },
+  ],
+  startCursor: { epoch: "e1", seq: 1 },
+  endCursor: { epoch: "e1", seq: 3 },
+  hasOlder: true,
+  hasNewer: false,
+  reset: false,
+  staleCursor: false,
+  gap: false,
+  agent: { status: "running" },
+  error: null,
+};
+
+describe("fold-index RPC", () => {
+  it("reads the projected timeline inside the daemon and returns only the compact rows", async () => {
+    const calls: unknown[] = [];
+    const out = await handleFoldIndex({ agentId: "a1", direction: "after", cursor: { epoch: "e1", seq: 7 }, limit: 50 }, context(async () => payload, calls));
+    expect(calls).toEqual([{ agentId: "a1", options: { direction: "after", cursor: { epoch: "e1", seq: 7 }, limit: 50, projection: "projected" } }]);
+    expect(out.now).toBeGreaterThan(0);
+    expect({ ...out, now: undefined }).toEqual({
+      now: undefined,
+      status: "ok",
+      epoch: "e1",
+      rows: [
+        { s: 1, at: Date.parse("2026-10-09T10:00:00.000Z"), k: "b", w: "user_message" },
+        { s: 2, at: Date.parse("2026-10-09T10:00:01.000Z"), k: "t", key: "t:c1", st: "running", look: "shell" },
+      ],
+      startCursor: { epoch: "e1", seq: 1 },
+      endCursor: { epoch: "e1", seq: 3 },
+      hasOlder: true,
+      hasNewer: false,
+      reset: false,
+      running: true,
+      turns: [],
+      active: null,
+    });
+    expect(JSON.stringify(out)).not.toMatch(/secret-build|SECRET OUTPUT/);
+  });
+
+  it("drops the cursor for tail reads and reports stale cursors and gaps as a reset", async () => {
+    const calls: unknown[] = [];
+    const out = await handleFoldIndex({ agentId: "a1", direction: "tail", cursor: { epoch: "e1", seq: 3 } }, context(async () => ({ ...payload, staleCursor: true, agent: null }), calls));
+    expect(calls).toEqual([{ agentId: "a1", options: { direction: "tail", limit: 150, projection: "projected" } }]);
+    expect(out).toMatchObject({ reset: true, running: null });
+    expect((await handleFoldIndex({ agentId: "a1", direction: "after" }, context(async () => ({ ...payload, gap: true })))).reset).toBe(true);
+  });
+
+  it("answers unavailable when the daemon cannot read the timeline, and missing when it has no such Agent", async () => {
+    expect((await handleFoldIndex({ agentId: "a1", direction: "tail" }, context(async () => { throw new Error("gone"); }))).status).toBe("unavailable");
+    expect((await handleFoldIndex({ agentId: "a1", direction: "tail" }, context(async () => ({ ...payload, error: "timed out" })))).status).toBe("unavailable");
+    // A provider subagent's own view (as seen in the live daemon log): the client must stop asking.
+    const subagent = "provider:6f1c2d3e-4a5b-4c6d-8e7f-90a1b2c3d4e5:toolu_01ExampleSubagentCall";
+    expect((await handleFoldIndex({ agentId: subagent, direction: "tail" }, context(async () => { throw new Error(`Agent not found: ${subagent}`); }))).status).toBe("missing");
+    expect((await handleFoldIndex({ agentId: "a1", direction: "tail" }, context(async () => ({ ...payload, error: "Agent not found" })))).status).toBe("missing");
+  });
+
+  it("tells each row's turn and the turn starts it knows: turn_started, then the running turn's startedAt", async () => {
+    forgetTurnStarts();
+    const at = (time: string) => `2026-10-10T${time}.000Z`;
+    const turns = {
+      ...payload,
+      entries: [
+        { provider: "claude", item: { type: "user_message", text: "go" }, timestamp: at("03:51:48"), seqStart: 1, seqEnd: 1, turnId: "foreground-turn-31" },
+        { provider: "claude", item: { type: "assistant_message", text: "ok" }, timestamp: at("03:53:30"), seqStart: 2, seqEnd: 2, turnId: "foreground-turn-31" },
+        // Claude Code woke up by itself an hour later: no user message in this turn.
+        { provider: "claude", item: { type: "reasoning", text: "ready" }, timestamp: at("04:52:53"), seqStart: 3, seqEnd: 3, turnId: "autonomous-turn-32" },
+        { provider: "claude", item: { type: "reasoning", text: "next" }, timestamp: at("04:53:10"), seqStart: 4, seqEnd: 4, turnId: "autonomous-turn-33" },
+      ],
+      agent: { status: "running", activeTurn: { turnId: "autonomous-turn-33", startedAt: at("04:53:05") } },
+    };
+    noteTurnStarted("a1", "autonomous-turn-32", Date.parse(at("04:52:40")));
+    noteTurnStarted("a1", null);
+    const out = await handleFoldIndex({ agentId: "a1", direction: "tail" }, context(async () => turns));
+    expect(out.turns).toEqual([
+      { id: "foreground-turn-31", at: null },
+      { id: "autonomous-turn-32", at: Date.parse(at("04:52:40")) },
+      { id: "autonomous-turn-33", at: Date.parse(at("04:53:05")) },
+    ]);
+    expect(out.rows.map((row) => row.u)).toEqual([0, 0, 1, 2]);
+    expect(out.active).toEqual({ id: "autonomous-turn-33", at: Date.parse(at("04:53:05")) });
+    // Starts are per Agent.
+    expect(knownTurnStart("a2", "autonomous-turn-32")).toBeNull();
+    // A reopened session reusing an id: the newest start wins.
+    noteTurnStarted("a1", "autonomous-turn-32", Date.parse(at("05:00:00")));
+    expect(knownTurnStart("a1", "autonomous-turn-32")).toBe(Date.parse(at("05:00:00")));
+    forgetTurnStarts();
+  });
+});
