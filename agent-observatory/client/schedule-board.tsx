@@ -1,10 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
+import type { PluginScreenParams, PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import { FlatList, Icon, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
-import { EMPTY_RUN_FILTER, cadenceText, describeRunError, deviceTimeZone, filterRuns, groupRunsByDay, parseTime, type RunFilter, type RunStatus, type RunWindow,
+import { cadenceText, describeRunError, deviceTimeZone, filterRuns, groupRunsByDay, normalizeRunQuery, parseTime, runQuota, type RunFilter, type RunStatus, type RunWindow,
   type ScheduleRunRow, type ScheduleSummary } from "../shared/schedules";
 import { getAgentResult } from "../shared/results";
 import { ActionMenu, Badge, Banner, Button, Chip, ChipBar, EmptyState, IconButton, MetaLine, SearchField, Skeleton, Spacer, SplitView, SyncStatus, Toolbar,
@@ -15,7 +15,7 @@ import { InfoButton, KeyValue, PaneLabel, useClock } from "./ui";
 import { OutputText } from "./result-view";
 import { openExternalUrl } from "./open-url";
 import { RunGlyph, linkTone, runDurationLabel, runLooks, runMoment, runTimeLabel, untilLabel } from "./schedule-looks";
-import { clearScheduleFocus, onScheduleFocus, peekScheduleFocus, type ScheduleFocus } from "./schedule-focus";
+import { clearScheduleFocus, focusFromParams, onScheduleFocus, peekScheduleFocus, type ScheduleFocus } from "./schedule-focus";
 import { useScheduleRun, useScheduleRuns } from "./use-schedules";
 
 /**
@@ -23,9 +23,18 @@ import { useScheduleRun, useScheduleRuns } from "./use-schedules";
  * merge/pull requests. Paseo's own 计划 page manages schedules; this page only reads.
  */
 const DAY = 86_400_000;
-type Remembered = Omit<RunFilter, "query"> & { window: RunWindow };
+/** `heartbeats` null: not chosen on this device yet — shown only when every schedule is a heartbeat (see ScheduleSurface). */
+type ViewChoice = { status: RunStatus | "all"; scheduleId: string | "all"; heartbeats: boolean | null };
+const DEFAULT_VIEW: ViewChoice = { status: "all", scheduleId: "all", heartbeats: null };
 // Filters stay for this app session on this device (never synced); search text is not kept.
-const remembered = new Map<string, Remembered>();
+const remembered = new Map<string, ViewChoice & { window: RunWindow }>();
+
+/** `value` once it has stopped changing for `ms` (search runs on the server, so not on every keystroke). */
+function useSettled<Value>(value: Value, ms: number): Value {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => { const timer = setTimeout(() => setSettled(value), ms); return () => clearTimeout(timer); }, [value, ms]);
+  return settled;
+}
 
 /** Last ten runs as small blocks, oldest first: a schedule's health at a glance. */
 function HealthStrip({ theme, recent }: { theme: PluginTheme; recent: readonly RunStatus[] }) {
@@ -42,7 +51,8 @@ function ScheduleCard({ theme, schedule, selected, now, zone, onPress }: { theme
   const accent = failing ? hueColor(theme, "fail") : schedule.running ? hueColor(theme, "run") : heartbeat ? hueColor(theme, "pink") : hueColor(theme, "violet");
   const next = schedule.status === "active" ? untilLabel(schedule.nextRunAt, now) : null;
   const state = deleted ? "已删除" : schedule.status === "paused" ? "已暂停" : schedule.status === "completed" ? "已结束" : next ? `下次 ${next}` : null;
-  const cadence = [heartbeat ? schedule.target : null, cadenceText(schedule, zone)].filter(Boolean).join(" · ");
+  // The plan first: when the line is cut, the heartbeat's Agent goes before a one-shot's local time does.
+  const cadence = [cadenceText(schedule, zone, now), heartbeat ? schedule.target : null].filter(Boolean).join(" · ");
   return <Pressable accessibilityRole="button" accessibilityLabel={`${schedule.name}，${schedule.total} 次运行${schedule.failed ? `，失败 ${schedule.failed} 次` : ""}${state ? `，${state}` : ""}`} accessibilityState={{ selected }} aria-pressed={selected} onPress={onPress}
     style={pressState => ({ width: CARD_WIDTH, gap: 6, paddingVertical: 9, paddingHorizontal: 11, borderRadius: radius.lg, borderWidth: selected ? 1.5 : hairline,
       borderColor: selected ? accent : failing ? tint(accent, 0.55) : colors.border,
@@ -54,9 +64,10 @@ function ScheduleCard({ theme, schedule, selected, now, zone, onPress }: { theme
     </View>
     <HealthStrip theme={theme} recent={schedule.recent} />
     <View style={{ gap: 1 }}>
-      <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{cadence || "计划未知"}</Text>
+      {/* Two lines: a one-shot in another zone also gives its local time (一次性 · 10月11日 22:35（东京时间）· 本地 09:35). */}
+      <Text numberOfLines={2} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{cadence || "计划未知"}</Text>
       <Text numberOfLines={1} style={{ color: deleted || schedule.status !== "active" ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.meta, lineHeight: 17, fontVariant: ["tabular-nums"] }}>
-        {[state, `共 ${schedule.total} 次`].filter(Boolean).join(" · ")}
+        {[state, runQuota(schedule.total, schedule.maxRuns)].filter(Boolean).join(" · ")}
       </Text>
     </View>
   </Pressable>;
@@ -183,7 +194,7 @@ function RunDetail({ run, schedule, theme, compact, navigation, onClose, now, zo
         {!compact ? <><IconButton theme={theme} icon="Copy" label="复制运行 ID" size="sm" onPress={copyId} /><IconButton theme={theme} icon="X" label="关闭详情" size="sm" onPress={onClose} /></> : null}
       </View>
       <Text selectable style={{ color: colors.foreground, fontSize: fontSize.heading, fontWeight: "600", lineHeight: 26 }}>{run.scheduleName}</Text>
-      <MetaLine theme={theme} numberOfLines={2} parts={[run.kind === "heartbeat" ? `心跳 · ${heartbeatTarget ?? "Agent"}` : null, schedule ? cadenceText(schedule, zone) : null, schedule?.provider, run.projectName, runMoment(run.startedAt)]} />
+      <MetaLine theme={theme} numberOfLines={2} parts={[run.kind === "heartbeat" ? `心跳 · ${heartbeatTarget ?? "Agent"}` : null, schedule ? cadenceText(schedule, zone, now) : null, schedule?.provider, run.projectName, runMoment(run.startedAt)]} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, paddingTop: space.xs }}>
         {agentId && navigation && !unlisted ? <Button theme={theme} variant="primary" icon="ArrowUpRight" label={run.agent?.archivedAt ? "打开会话（已归档）" : "打开会话"} onPress={() => open(() => navigation.openAgent({ agentId }), "会话打开失败")} /> : null}
         {run.workspace && navigation && !unlisted ? <Button theme={theme} icon="FolderGit2" label="打开工作区" onPress={() => open(() => navigation.openWorkspace({ workspaceId: run.workspace!.id }), "工作区打开失败")} /> : null}
@@ -236,92 +247,130 @@ function RunDetail({ run, schedule, theme, compact, navigation, onClose, now, zo
   </View>;
 }
 
-export function ScheduleSurface({ theme, layout, host, navigation }: PluginSurfaceProps) {
+/**
+ * Paseo 0.11 opens this as a screen with `params` (`schedule`, optional `run`: see schedule-focus.ts), an older host as a
+ * surface without them; there the focus comes from `focusScheduleRuns`. Opened from the sidebar, params are `{}`.
+ */
+export function ScheduleSurface({ theme, layout, host, navigation, params }: PluginSurfaceProps & { params?: PluginScreenParams }) {
   const { colors } = theme;
   const { compact, onLayout } = useCompactLayout(layout.compact);
   const zone = useMemo(deviceTimeZone, []);
   const now = useClock(30_000);
-  // A 「查看全部运行」 request waiting for this page wins over the remembered filter.
-  const [initialFocus] = useState<ScheduleFocus | null>(peekScheduleFocus);
-  const [filter, setFilterState] = useState<RunFilter>(() => ({ ...EMPTY_RUN_FILTER, ...remembered.get(host.id), query: "", ...(initialFocus ? { scheduleId: initialFocus.scheduleId, status: "all" as const } : {}) }));
+  // 「查看全部运行」 wins over the remembered view: the screen's params, or a request an older host left before opening the page.
+  // Any param counts as a new request (an opener may add a nonce such as `t` so that tapping the same card again re-applies it).
+  const paramFocus = focusFromParams(params), paramKey = paramFocus ? Object.entries(params ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("&") : "";
+  const [initialFocus] = useState<ScheduleFocus | null>(() => paramFocus ?? peekScheduleFocus());
+  const [view, setViewState] = useState<ViewChoice>(() => {
+    const saved = remembered.get(host.id), base = saved ? { status: saved.status, scheduleId: saved.scheduleId, heartbeats: saved.heartbeats } : DEFAULT_VIEW;
+    return initialFocus ? { ...base, scheduleId: initialFocus.scheduleId, status: "all" } : base;
+  });
   const [window, setWindowState] = useState<RunWindow>(() => remembered.get(host.id)?.window ?? "recent");
+  const [searchText, setSearchText] = useState("");
   // On a phone a selected run fills the page, so 「查看全部运行」 there shows the schedule's list instead of that one run.
   const compactRef = useRef(compact);
   compactRef.current = compact;
   const [selectedId, setSelectedId] = useState<string | null>(() => initialFocus?.runId && !compact ? initialFocus.runId : null);
-  const remember = (next: RunFilter, nextWindow: RunWindow) => { const { query: _query, ...kept } = next; remembered.set(host.id, { ...kept, window: nextWindow }); };
-  const setFilter = (next: RunFilter) => { remember(next, window); setFilterState(next); };
-  const setWindow = (next: RunWindow) => { remember(filter, next); setWindowState(next); };
-  useEffect(() => { clearScheduleFocus(initialFocus); }, [initialFocus]);
-  useEffect(() => onScheduleFocus(focus => {
-    clearScheduleFocus(focus);
-    setFilterState(previous => ({ ...previous, scheduleId: focus.scheduleId, status: "all", query: "" }));
+  const remember = (next: ViewChoice, nextWindow: RunWindow) => { remembered.set(host.id, { ...next, window: nextWindow }); };
+  const setView = (next: ViewChoice) => { remember(next, window); setViewState(next); };
+  const setWindow = (next: RunWindow) => { remember(view, next); setWindowState(next); };
+  const applyFocus = useCallback((focus: ScheduleFocus) => {
+    setViewState(previous => ({ ...previous, scheduleId: focus.scheduleId, status: "all" }));
+    setSearchText("");
     setSelectedId(compactRef.current ? null : focus.runId ?? null);
-  }), []);
-  const query = useScheduleRuns(host.id, window);
+  }, []);
+  // A screen that is already open gets new params when another card asks for another schedule.
+  const appliedParams = useRef(paramKey);
+  useEffect(() => {
+    if (paramKey === appliedParams.current) return;
+    appliedParams.current = paramKey;
+    const focus = focusFromParams(params);
+    if (focus) applyFocus(focus);
+  }, [paramKey]);
+  useEffect(() => { clearScheduleFocus(initialFocus); }, [initialFocus]);
+  useEffect(() => onScheduleFocus(focus => { clearScheduleFocus(focus); applyFocus(focus); }), [applyFocus]);
+  // Searched on the server through every reply; the list on screen is narrowed locally until the server's answer arrives.
+  const typed = normalizeRunQuery(searchText), settled = useSettled(typed, 300), search = typed ? settled : "";
+  const query = useScheduleRuns(host.id, window, true, search);
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const data = query.data;
   const runs = data?.runs ?? [];
   const schedules = data?.schedules ?? [];
+  // Heartbeats stay out of the list unless asked for, except on a host whose only schedules are heartbeats: there the page
+  // would otherwise always open empty. Hiding them is remembered like any other choice, and the empty page then says so.
+  const onlyHeartbeats = schedules.length > 0 && schedules.every(schedule => schedule.kind === "heartbeat");
+  const heartbeats = view.heartbeats ?? onlyHeartbeats;
+  const setHeartbeats = (next: boolean) => setView({ ...view, heartbeats: next });
+  const serverSearched = (data?.query ?? "") === typed;
+  const filter: RunFilter = { status: view.status, scheduleId: view.scheduleId, heartbeats, query: serverSearched ? "" : typed };
   // A focused run older than the 30-day window: load everything once so it can be shown.
-  useEffect(() => { if (selectedId && data && window === "recent" && data.older + data.olderHeartbeats > 0 && !runs.some(run => run.id === selectedId)) setWindow("all"); }, [selectedId, data, window]);
-  // Counts follow the schedule and heartbeat choice but not the status choice, so the chips never hide their own numbers.
-  const scoped = useMemo(() => filterRuns(runs, { ...filter, status: "all", query: "" }), [runs, filter]);
+  useEffect(() => { if (selectedId && data && !search && window === "recent" && data.older + data.olderHeartbeats > 0 && !runs.some(run => run.id === selectedId)) setWindow("all"); }, [selectedId, data, window, search]);
+  // Counts follow the schedule, heartbeat and search choices but not the status choice, so the chips never hide their own numbers.
+  const scoped = useMemo(() => filterRuns(runs, { ...filter, status: "all" }), [runs, filter.scheduleId, filter.heartbeats, filter.query]);
   const counts = useMemo(() => { const result = { running: 0, succeeded: 0, failed: 0, unknown: 0, recentFailed: 0 }; for (const run of scoped) { result[run.status]++; if (run.status === "failed" && now - parseTime(run.startedAt) < DAY) result.recentFailed++; } return result; }, [scoped, now]);
-  const heartbeatRuns = useMemo(() => runs.filter(run => run.kind === "heartbeat").length, [runs]);
-  const visible = useMemo(() => filterRuns(runs, filter), [runs, filter]);
-  const filtered = filter.status !== "all" || filter.scheduleId !== "all" || !!filter.query.trim();
+  const heartbeatRuns = useMemo(() => filterRuns(runs, { status: "all", scheduleId: "all", heartbeats: true, query: filter.query }).filter(run => run.kind === "heartbeat").length, [runs, filter.query]);
+  const heartbeatTotal = useMemo(() => schedules.reduce((sum, schedule) => schedule.kind === "heartbeat" ? sum + schedule.total : sum, 0), [schedules]);
+  const visible = useMemo(() => filterRuns(runs, filter), [runs, filter.status, filter.scheduleId, filter.heartbeats, filter.query]);
+  const filtered = view.status !== "all" || view.scheduleId !== "all" || !!typed;
   const scheduleOf = useCallback((id: string) => schedules.find(schedule => schedule.id === id), [schedules]);
-  const focused = filter.scheduleId !== "all" ? scheduleOf(filter.scheduleId) : undefined;
-  // Runs outside the window that this view would show: one schedule's own count, else the kinds on screen.
-  const older = !data ? 0 : focused ? Math.max(0, focused.total - runs.filter(run => run.scheduleId === focused.id).length) : data.older + (filter.heartbeats ? data.olderHeartbeats : 0);
+  const focused = view.scheduleId !== "all" ? scheduleOf(view.scheduleId) : undefined;
+  // Runs outside the window that this view would show: one schedule's own count, else the kinds on screen. The server counts a
+  // search's older matches over every schedule, so for one schedule it can only tell whether there may be some.
+  const olderAll = data ? data.older + (heartbeats ? data.olderHeartbeats : 0) : 0;
+  const older = !data ? 0 : focused && !search ? Math.max(0, focused.total - runs.filter(run => run.scheduleId === focused.id).length) : focused ? 0 : olderAll;
+  const olderMaybe = !!focused && !!search && data?.window === "recent" && data.older + data.olderHeartbeats > 0;
   const items = useMemo(() => {
     const result: FeedItem[] = [];
     for (const group of groupRunsByDay(visible, now)) {
       result.push({ kind: "group", key: `g:${group.key}`, label: group.label, count: group.runs.length, failed: group.runs.filter(run => run.status === "failed").length });
       for (const run of group.runs) result.push({ kind: "run", key: run.id, run });
     }
-    if (older > 0 && visible.length) result.push({ kind: "more", key: "more" });
+    if ((older > 0 || olderMaybe) && visible.length) result.push({ kind: "more", key: "more" });
     return result;
-  }, [visible, now, older]);
+  }, [visible, now, older, olderMaybe]);
   // The header sums the last 7 days: the server's count over every run, or the focused schedule's own runs.
   const week = useMemo(() => {
     if (!data) return null;
-    if (!focused) return { total: data.week.runs + (filter.heartbeats ? data.week.heartbeats : 0), failed: data.week.failed + (filter.heartbeats ? data.week.heartbeatsFailed : 0) };
+    if (!focused) return { total: data.week.runs + (heartbeats ? data.week.heartbeats : 0), failed: data.week.failed + (heartbeats ? data.week.heartbeatsFailed : 0) };
     let total = 0, failed = 0;
     for (const run of runs) if (run.scheduleId === focused.id && (parseTime(run.startedAt) || parseTime(run.scheduledFor)) >= now - 7 * DAY) { total++; if (run.status === "failed") failed++; }
     return { total, failed };
-  }, [data, focused, runs, now, filter.heartbeats]);
+  }, [data, focused, runs, now, heartbeats]);
   const selected = selectedId ? runs.find(run => run.id === selectedId) : undefined;
   const select = useCallback((id: string) => setSelectedId(id), []);
-  const toggle = (status: RunStatus) => setFilter({ ...filter, status: filter.status === status ? "all" : status });
+  const toggle = (status: RunStatus) => setView({ ...view, status: view.status === status ? "all" : status });
   // Running and failing schedules first, deleted ones last.
-  const shownSchedules = useMemo(() => schedules.filter(schedule => filter.heartbeats || schedule.kind !== "heartbeat" || schedule.id === filter.scheduleId)
+  const shownSchedules = useMemo(() => schedules.filter(schedule => heartbeats || schedule.kind !== "heartbeat" || schedule.id === view.scheduleId)
     .map((schedule, index) => ({ schedule, index, rank: schedule.running ? 0 : schedule.recent.at(-1) === "failed" ? 1 : { active: 2, paused: 3, completed: 4, deleted: 5 }[schedule.status] }))
-    .sort((a, b) => a.rank - b.rank || a.index - b.index).map(item => item.schedule), [schedules, filter.heartbeats, filter.scheduleId]);
-  const sync = query.isError && !data ? { state: "error" as const, label: "读取失败" } : query.isFetching ? { state: "syncing" as const, label: "同步中" } : { state: "live" as const, label: "已同步" };
+    .sort((a, b) => a.rank - b.rank || a.index - b.index).map(item => item.schedule), [schedules, heartbeats, view.scheduleId]);
+  const sync = query.isError && !data ? { state: "error" as const, label: "读取失败" } : query.isFetching ? { state: "syncing" as const, label: typed ? "搜索中" : "同步中" } : { state: "live" as const, label: "已同步" };
+  const clearFilters = () => { setView({ ...DEFAULT_VIEW, heartbeats: view.heartbeats }); setSearchText(""); };
   const menu: MenuAction[] = [
-    { key: "heartbeats", label: filter.heartbeats ? "隐藏心跳" : "显示心跳", icon: "HeartPulse", tone: "pink", hint: "心跳是定时提醒已有 Agent 的任务，默认不混在列表里", onPress: () => setFilter({ ...filter, heartbeats: !filter.heartbeats }) },
+    { key: "heartbeats", label: heartbeats ? "隐藏心跳" : "显示心跳", icon: "HeartPulse", tone: "pink", hint: "心跳是定时提醒已有 Agent 的任务，默认不混在列表里", onPress: () => setHeartbeats(!heartbeats) },
     ...(window === "recent" ? [{ key: "older", label: "加载更早的运行", icon: "History", hint: "默认只读取最近 30 天、最多 200 次运行", onPress: () => setWindow("all") }]
       : [{ key: "recent", label: "只看最近 30 天", icon: "CalendarRange", onPress: () => setWindow("recent") }]),
     { key: "refresh", label: "刷新", icon: "RefreshCw", disabled: query.isFetching, onPress: () => void query.refetch() },
   ];
   const empty = query.isPending ? <Skeleton theme={theme} rows={6} />
     : query.isError && !data ? <EmptyState theme={theme} icon="WifiOff" tone="danger" title="暂时读不到定时运行" message={query.error instanceof Error ? query.error.message : undefined} action={{ label: "重试", icon: "RefreshCw", onPress: () => void query.refetch() }} />
-    : older && data?.window === "recent" ? <EmptyState theme={theme} icon="History" tone="violet" title={filtered ? "最近 30 天没有匹配的运行" : "最近 30 天没有定时运行"} message={`还有 ${older} 次更早的运行`} action={{ label: query.isPlaceholderData ? "正在加载…" : "加载更早", icon: "History", onPress: () => setWindow("all") }} />
-    : filtered ? <EmptyState theme={theme} icon="SearchX" title="没有匹配的运行" action={{ label: "清除筛选", onPress: () => setFilter({ ...EMPTY_RUN_FILTER, heartbeats: filter.heartbeats }) }} />
+    : (older > 0 || olderMaybe) && data?.window === "recent" ? <EmptyState theme={theme} icon="History" tone="violet" title={filtered ? "最近 30 天没有匹配的运行" : "最近 30 天没有定时运行"}
+      message={older > 0 ? `还有 ${older} 次更早的运行` : "更早的运行里可能有匹配"} action={{ label: query.isPlaceholderData ? "正在加载…" : "加载更早", icon: "History", onPress: () => setWindow("all") }} />
+    : filtered ? <EmptyState theme={theme} icon="SearchX" title="没有匹配的运行" message={!heartbeats && heartbeatTotal ? "心跳运行没有算在内，可在「心跳」里打开。" : undefined} action={{ label: "清除筛选", onPress: clearFilters }} />
+    // Heartbeats were hidden on purpose and nothing else ever ran: say what is hidden instead of 「还没有定时运行」.
+    : !heartbeats && heartbeatTotal > 0 ? <EmptyState theme={theme} icon="HeartPulse" tone="pink" title={`只有心跳运行（${heartbeatTotal} 次）`} message="心跳是定时提醒已有 Agent 的任务，默认不混在列表里。"
+      action={{ label: "显示心跳", icon: "HeartPulse", onPress: () => setHeartbeats(true) }} />
     : <EmptyState theme={theme} icon="CalendarClock" tone="violet" title="还没有定时运行" message="在左侧「计划」里新建定时任务，或让 Agent 运行 paseo schedule create。每次运行的结果都会出现在这里。" />;
-  const more = older > 0 ? <View style={{ alignItems: "center", gap: space.sm, paddingVertical: space.lg }}>
-    <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{data?.window === "recent" ? `还有 ${older} 次更早的运行` : `更早的 ${older} 次运行没有列出`}</Text>
+  const more = older > 0 || olderMaybe ? <View style={{ alignItems: "center", gap: space.sm, paddingVertical: space.lg }}>
+    <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{older > 0 ? data?.window === "recent" ? `还有 ${older} 次更早的${search ? "匹配" : "运行"}` : `更早的 ${older} 次${search ? "匹配" : "运行"}没有列出` : "更早的运行里可能还有匹配"}</Text>
     {data?.window === "recent" ? <Button theme={theme} size="sm" icon="History" label="加载更早" busy={query.isPlaceholderData} onPress={() => setWindow("all")} /> : null}
   </View> : null;
-  const strip = <ScheduleStrip theme={theme} compact={compact} schedules={shownSchedules} selectedId={filter.scheduleId} now={now} zone={zone}
-    onSelect={id => setFilter({ ...filter, scheduleId: filter.scheduleId === id ? "all" : id })} />;
+  const strip = <ScheduleStrip theme={theme} compact={compact} schedules={shownSchedules} selectedId={view.scheduleId} now={now} zone={zone}
+    onSelect={id => setView({ ...view, scheduleId: view.scheduleId === id ? "all" : id })} />;
   const banners = [
     data?.error ? <Banner key="error" theme={theme} tone="warning" message={data.error} /> : null,
     data?.notice ? <Banner key="notice" theme={theme} tone="warning" message={data.notice} /> : null,
     data?.reconstructed ? <Banner key="rebuilt" theme={theme} tone="info" icon="History" message={`${data.reconstructed} 次运行来自已删除的定时任务，只能从 Agent 还原`} /> : null,
+    data?.searchLimited && serverSearched ? <Banner key="search" theme={theme} tone="info" icon="SearchSlash" message="回复太多，一部分运行只按名称、错误和链接搜索了。" /> : null,
   ].filter(Boolean);
   const list = <View style={{ flex: 1, minHeight: 0 }}>
     {banners.length ? <View style={{ gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm }}>{banners}</View> : null}
@@ -334,7 +383,7 @@ export function ScheduleSurface({ theme, layout, host, navigation }: PluginSurfa
   const detail = selected ? <RunDetail key={selected.id} run={selected} schedule={scheduleOf(selected.scheduleId)} theme={theme} compact={compact} navigation={navigation} onClose={() => setSelectedId(null)} now={now} zone={zone} />
     : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" tone="violet" title="选择一次运行" message="回复、错误、Agent 和合并请求会显示在这里" /></View>;
   if (compact && selected) return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>{detail}</View>;
-  const searching = compact && (searchOpen || !!filter.query);
+  const searching = compact && (searchOpen || !!searchText);
   const rate = week && week.total ? Math.round(100 * (week.total - week.failed) / week.total) : null;
   return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>
     <Toolbar theme={theme}>
@@ -346,22 +395,23 @@ export function ScheduleSurface({ theme, layout, host, navigation }: PluginSurfa
         </Text>
       </View>
       <Spacer />
-      {!compact ? <View style={{ width: 260, flexShrink: 1 }}><SearchField theme={theme} value={filter.query} onChangeText={value => setFilter({ ...filter, query: value })} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" /></View>
-        : <IconButton theme={theme} icon="Search" label="搜索" active={searching} onPress={() => { if (searching) { setFilter({ ...filter, query: "" }); setSearchOpen(false); } else setSearchOpen(true); }} />}
+      {!compact ? <View style={{ width: 260, flexShrink: 1 }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" /></View>
+        : <IconButton theme={theme} icon="Search" label="搜索" active={searching} onPress={() => { if (searching) { setSearchText(""); setSearchOpen(false); } else setSearchOpen(true); }} />}
       <SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} />
       <InfoButton theme={theme} title="关于定时运行" lines={["定时运行列出这台主机上所有定时任务的每一次运行：状态、耗时、生成的 Agent 与工作区、最终回复，以及回复里提到的合并请求（GitLab 式合并请求显示为 !编号，GitHub PR 显示为 #编号）。",
-        "数据来自 Paseo 的定时任务记录，只读。删除定时任务会连同它的运行记录一起删除；观测台另存每次运行的时间、状态和链接（不存回复和提示词），所以删除后仍能看到。",
-        "默认读取最近 30 天、最多 200 次运行，更早的可以「加载更早」。心跳（定时提醒已有 Agent）默认隐藏。",
+        "数据来自 Paseo 的定时任务记录，只读。删除定时任务会连同它的运行记录一起删除；观测台在后台另存每次运行的时间、状态和链接（不存回复和提示词），所以删除后仍能看到，不需要先打开这个页面。",
+        "默认读取最近 30 天、最多 200 次运行，更早的可以「加载更早」。搜索会查找完整回复。心跳（定时提醒已有 Agent）默认隐藏；这台主机只有心跳时直接显示。",
+        "一次性任务（只运行 1 次）写出它的日期和时间；时区和设备不同时，后面注明这台设备上的时间。",
         "新建、暂停、修改、立即运行定时任务请用左侧的「计划」。"]} />
       <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
     </Toolbar>
-    {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={filter.query} onChangeText={value => setFilter({ ...filter, query: value })} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" autoFocus={!filter.query} grow={false} /></View> : null}
+    {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" autoFocus={!searchText} grow={false} /></View> : null}
     <ChipBar>
-      {filter.scheduleId !== "all" ? <Chip theme={theme} label={focused?.name ?? "定时任务"} icon="CalendarClock" tone="violet" selected onRemove={() => setFilter({ ...filter, scheduleId: "all" })} /> : null}
-      <StatusChip theme={theme} label="失败" count={data ? counts.failed : undefined} hue="fail" motion={counts.recentFailed ? "ping" : undefined} selected={filter.status === "failed"} onPress={() => toggle("failed")} />
-      <StatusChip theme={theme} label="执行中" count={data ? counts.running : undefined} hue="run" motion="spin" selected={filter.status === "running"} onPress={() => toggle("running")} />
-      <StatusChip theme={theme} label="成功" count={data ? counts.succeeded : undefined} hue="ok" selected={filter.status === "succeeded"} onPress={() => toggle("succeeded")} />
-      <Chip theme={theme} label="心跳" icon="HeartPulse" tone={filter.heartbeats ? "pink" : undefined} count={heartbeatRuns || undefined} selected={filter.heartbeats} onPress={() => setFilter({ ...filter, heartbeats: !filter.heartbeats })} />
+      {view.scheduleId !== "all" ? <Chip theme={theme} label={focused?.name ?? "定时任务"} icon="CalendarClock" tone="violet" selected onRemove={() => setView({ ...view, scheduleId: "all" })} /> : null}
+      <StatusChip theme={theme} label="失败" count={data ? counts.failed : undefined} hue="fail" motion={counts.recentFailed ? "ping" : undefined} selected={view.status === "failed"} onPress={() => toggle("failed")} />
+      <StatusChip theme={theme} label="执行中" count={data ? counts.running : undefined} hue="run" motion="spin" selected={view.status === "running"} onPress={() => toggle("running")} />
+      <StatusChip theme={theme} label="成功" count={data ? counts.succeeded : undefined} hue="ok" selected={view.status === "succeeded"} onPress={() => toggle("succeeded")} />
+      <Chip theme={theme} label="心跳" icon="HeartPulse" tone={heartbeats ? "pink" : undefined} count={heartbeatRuns || undefined} selected={heartbeats} onPress={() => setHeartbeats(!heartbeats)} />
     </ChipBar>
     {strip}
     <SplitView theme={theme} compact={compact} showDetail={false} list={list} detail={detail} listWidth={430} />

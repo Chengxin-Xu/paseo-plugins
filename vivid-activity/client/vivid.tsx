@@ -3,7 +3,7 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useMemo, type ReactNode } from "react";
 import { StyleSheet, Text, View, type TextStyle, type ViewStyle } from "react-native";
 import { hue, isDarkTheme, withAlpha, type Hue } from "./kit";
-import { looks, rowLabel, rowMotion, statusLooks, washAlpha, type LookKey, type RowStatus } from "../shared/vivid-model";
+import { looks, rowLabel, rowMotion, statusLooks, VIVID_CATEGORY_HUES, washAlpha, type LookKey, type RowStatus } from "../shared/vivid-model";
 export { failureText, lookFor, mcpParts, zh, type LookKey, type RowStatus } from "../shared/vivid-model";
 import { Breathe, Flash, Ping, Pop, Spin, Sweep, useChangeCount } from "./motion";
 import type { ActivityPalette } from "../shared/presentation";
@@ -23,17 +23,17 @@ export function statusColor(theme: PluginTheme, status: RowStatus, use: "solid" 
 export function resolveVividPalette(theme: PluginTheme): ActivityPalette {
   const dark = isDarkTheme(theme);
   const soft = (name: Hue) => withAlpha(hue(theme, name), dark ? 0.2 : 0.12);
-  const categoryColors = {
-    reasoning: hue(theme, "violet"), shell: hue(theme, "orange"), file: hue(theme, "blue"), search: hue(theme, "indigo"),
-    agent: hue(theme, "fuchsia"), plan: hue(theme, "teal"), communication: hue(theme, "pink"), unknown: theme.colors.foregroundMuted,
-  };
+  // 0.5.0: one table for both, so a category's tint always matches its icon (the sub-agent tint used to be green).
+  const categories = Object.entries(VIVID_CATEGORY_HUES) as Array<[keyof typeof VIVID_CATEGORY_HUES, Hue | null]>;
+  const categoryColors = Object.fromEntries(
+    categories.map(([category, name]) => [category, name ? hue(theme, name) : theme.colors.foregroundMuted]),
+  ) as ActivityPalette["categoryColors"];
   return {
     mode: "vivid",
     categoryColors,
-    categoryBackgrounds: {
-      reasoning: soft("violet"), shell: soft("orange"), file: soft("blue"), search: soft("indigo"),
-      agent: soft("green"), plan: soft("teal"), communication: soft("pink"), unknown: theme.colors.surface2,
-    },
+    categoryBackgrounds: Object.fromEntries(
+      categories.map(([category, name]) => [category, name ? soft(name) : theme.colors.surface2]),
+    ) as ActivityPalette["categoryBackgrounds"],
     statusColors: { running: hue(theme, "blue"), completed: hue(theme, "green"), failed: hue(theme, "red"), canceled: theme.colors.foregroundMuted },
     statusBackgrounds: { running: soft("blue"), completed: soft("green"), failed: soft("red"), canceled: theme.colors.surface2 },
     borderWidth: 1,
@@ -127,14 +127,25 @@ export function StatusPill({ theme, status, text }: { theme: PluginTheme; status
   </View>;
 }
 
+/** How much more readily the summary gives way than the title (flexShrink weights; Yoga and CSS weight them by size too). */
+const GIVE_WAY = 1000;
+/** A title longer than this (an unknown tool's own name) ends in an ellipsis even on a wide row, so the summary keeps room. */
+const TITLE_MAX = 240;
+
 export function useVividText(theme: PluginTheme, lineHeight = 18) {
   return useMemo(() => ({
-    label: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600", lineHeight, flexShrink: 0 } satisfies TextStyle,
-    summary: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, fontFamily: "monospace", flexShrink: 1, minWidth: 0 } satisfies TextStyle,
+    // 0.6.0-local.2 (codex-vivid-F3): title, summary and meta share the row's one area that gives way (VividHeader). The
+    // summary gives way first (GIVE_WAY), then the meta, the title last: 「命令」 keeps its words while a summary is left.
+    // A long title (an unknown tool's own name) still stops at half of that area. Native Text does not shrink by default.
+    label: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600", lineHeight, flexShrink: 1, minWidth: 0, maxWidth: TITLE_MAX } satisfies TextStyle,
+    summary: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, fontFamily: "monospace", flexShrink: GIVE_WAY, minWidth: 0 } satisfies TextStyle,
     fileDir: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, fontFamily: "monospace", flexShrink: 1 } satisfies TextStyle,
-    fileBase: { color: theme.colors.foreground, fontSize: 12, lineHeight, fontFamily: "monospace", fontWeight: "600", flexShrink: 0 } satisfies TextStyle,
-    // Proportional: 「2 步 · 约 22 token」 reads oddly spaced in a monospace face.
+    // The directory gives way first; a file name longer than the room left ends in an ellipsis instead of overflowing.
+    fileBase: { color: theme.colors.foreground, fontSize: 12, lineHeight, fontFamily: "monospace", fontWeight: "600", flexShrink: 0, maxWidth: "100%" } satisfies TextStyle,
+    // Proportional: 「2 步 · 约 22 token」 reads oddly spaced in a monospace face. Timing beside the status keeps its width.
     meta: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, flexShrink: 0, fontVariant: ["tabular-nums"] } satisfies TextStyle,
+    // The meta after a summary gives way after the summary and before the title.
+    metaText: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, flexShrink: 30, minWidth: 0, fontVariant: ["tabular-nums"] } satisfies TextStyle,
   }), [lineHeight, theme]);
 }
 
@@ -171,19 +182,23 @@ export function VividHeader(props: VividHeaderProps) {
   const { theme, compact, look, title, summary, fileDisplay, status, statusText, stats, meta, live, icon, expanded, expandable, chevronColor, onPress, metrics, timing } = props;
   const text = useVividText(theme, metrics?.lineHeight ?? 18);
   // Attention states get words on phones too (「等你批准」「退出码 1」); quieter states only on wide layouts.
-  const showPill = status === "waiting" || status === "failed" || (!compact && (status === "canceled" || (status === "running" && !!statusText)));
+  const showPill = status === "waiting" || status === "question" || status === "failed" || (!compact && (status === "canceled" || (status === "running" && !!statusText)));
+  const gap = metrics?.gap ?? (compact ? 6 : 8);
   const row = (
     <>
       <CategoryTile theme={theme} look={look} live={live} icon={icon} size={metrics?.tile ?? 20} />
-      <Text numberOfLines={1} style={text.label}>{title}</Text>
-      {fileDisplay ? (
-        <View style={{ flexDirection: "row", alignItems: "center", flexShrink: 1, minWidth: 0 }}>
-          {fileDisplay.dir ? <Text numberOfLines={1} style={text.fileDir}>{props.dirText(fileDisplay.dir)}/</Text> : null}
-          <Text numberOfLines={1} style={text.fileBase}>{fileDisplay.base}</Text>
-        </View>
-      ) : summary ? <Text numberOfLines={1} style={text.summary}>{summary}</Text> : null}
-      {meta ? <Text numberOfLines={1} style={text.meta}>{meta}</Text> : null}
-      <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 4 }} />
+      {/* 0.6.0-local.2 (codex-vivid-F3): the words share one area that takes the room left and gives way; the pills, timing,
+          state mark and chevron after it keep their width, so a narrow phone row never pushes them out of the card. */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
+        <Text numberOfLines={1} style={text.label}>{title}</Text>
+        {fileDisplay ? (
+          <View style={{ flexDirection: "row", alignItems: "center", flexShrink: GIVE_WAY, minWidth: 0 }}>
+            {fileDisplay.dir ? <Text numberOfLines={1} style={text.fileDir}>{props.dirText(fileDisplay.dir)}/</Text> : null}
+            <Text numberOfLines={1} style={text.fileBase}>{fileDisplay.base}</Text>
+          </View>
+        ) : summary ? <Text numberOfLines={1} style={text.summary}>{summary}</Text> : null}
+        {meta ? <Text numberOfLines={1} style={text.metaText}>{meta}</Text> : null}
+      </View>
       {stats && (stats.additions > 0 || stats.deletions > 0) ? <DiffPills theme={theme} additions={stats.additions} deletions={stats.deletions} /> : null}
       {showPill && status ? <StatusPill theme={theme} status={status} text={statusText} /> : null}
       {timing ? (
@@ -194,7 +209,7 @@ export function VividHeader(props: VividHeaderProps) {
     </>
   );
   const style: ViewStyle = {
-    flexDirection: "row", alignItems: "center", gap: metrics?.gap ?? (compact ? 6 : 8), minHeight: metrics?.rowMinHeight ?? (compact ? 32 : 30),
+    flexDirection: "row", alignItems: "center", gap, minHeight: metrics?.rowMinHeight ?? (compact ? 32 : 30),
     paddingRight: 6, paddingVertical: metrics?.rowPaddingVertical ?? 3, minWidth: 0,
   };
   return <RowFrame theme={theme} status={status ?? (live ? "running" : "completed")} compact={compact}>

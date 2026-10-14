@@ -69,7 +69,21 @@ const GLOBAL_NAMESPACES = new Set([
 ]);
 
 function stripComments(code: string): string {
-  return code.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^\S:;{([,=!+\-*/|&?:])\/\/[^\n]*/g, "$1");
+  return stripBlockComments(code).replace(/(^|[^\S:;{([,=!+\-*/|&?:])\/\/[^\n]*/g, "$1");
+}
+
+// 本地补丁（0.6.0-local.2，codex-vivid-F1）：每段块注释换成一个空格，按下标找；原来的懒惰正则从每个没闭合的开头都重扫到结尾
+// （平方级）。没闭合的开头之后不会再有闭合，到此为止，与原正则结果相同。
+export function stripBlockComments(code: string): string {
+  let out = "";
+  let from = 0;
+  for (let open = code.indexOf("/*"); open >= 0; open = code.indexOf("/*", from)) {
+    const close = code.indexOf("*/", open + 2);
+    if (close < 0) break;
+    out += `${code.slice(from, open)} `;
+    from = close + 2;
+  }
+  return from === 0 ? code : out + code.slice(from);
 }
 
 function firstStringLiteral(slice: string, key: string): string | undefined {

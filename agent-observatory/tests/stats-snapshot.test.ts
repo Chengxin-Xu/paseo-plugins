@@ -2,18 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { buildStatsSnapshot, type StatsSnapshotInput } from "../server/stats-snapshot";
-import type { StatsAgentRecord, StatsAttribution, StatsDirectoryAgent, StatsHour } from "../server/stats-types";
+import { statsHour, type StatsAgentRecord, type StatsAttribution, type StatsDirectoryAgent, type StatsHour } from "../server/stats-types";
 import { emptyStatsMetrics, statsSnapshotSchema, TOOL_KINDS, type StatsMetrics } from "../shared/stats";
 
 const DAY = 86_400_000, HOUR = 3_600_000, now = Date.parse("2026-09-23T12:30:00.000Z");
 const input = (patch: Partial<StatsSnapshotInput> = {}): StatsSnapshotInput => ({
-  now, range: "7d", utcOffsetMinutes: 0, hours: [], attributions: [], toolDays: [], records: [], running: new Map(), directory: [],
+  now, range: "7d", utcOffsetMinutes: 0, hours: [], attributions: [], toolHours: [], records: [], running: new Map(), directory: [],
   observedSince: null, contentSince: null, directoryTruncated: false, ...patch,
 });
 const hour = (at: string, metrics: Partial<StatsMetrics> = {}): StatsHour => ({ ...emptyStatsMetrics(), hour: at, ...metrics });
-const attribution = (agentId: string, day: string, metrics: Partial<StatsMetrics> = {}, lastActiveAt = `${day}T12:00:00.000Z`): StatsAttribution => ({
-  ...emptyStatsMetrics(), agentId, day, lastActiveAt, ...metrics,
-});
+/** One Agent-hour: `at` is a day (its UTC noon) or an ISO time (its UTC hour); the last activity defaults to the hour. */
+const attribution = (agentId: string, at: string, metrics: Partial<StatsMetrics> = {}, lastActiveAt?: string): StatsAttribution => {
+  const hour = statsHour(Date.parse(at.length === 10 ? `${at}T12:00:00.000Z` : at));
+  return { ...emptyStatsMetrics(), agentId, hour, lastActiveAt: lastActiveAt ?? hour, ...metrics };
+};
 const agent = (id: string, patch: Partial<StatsDirectoryAgent> = {}): StatsDirectoryAgent => ({
   id, createdAt: "2026-09-23T01:00:00.000Z", provider: "codex", model: "gpt-5.5", parentAgentId: null,
   projectKey: "project", projectName: "项目", status: "idle", archivedAt: null, title: `会话 ${id}`,
@@ -177,12 +179,14 @@ test("breakdowns join attribution, distinguish harness and vendor, and preserve 
   assert.equal(snapshot.models.find(row => row.key === "unknown")?.contextUsed, null);
 });
 
-test("breakdown activity days use local activity dates while UTC attribution retains documented edge approximation", () => {
+test("breakdown activity days follow the local day of each Agent-hour (UTC+8)", () => {
   const snapshot = buildStatsSnapshot(input({ now: Date.parse("2026-09-23T20:00:00.000Z"), utcOffsetMinutes: 480,
     directory: [agent("one", { createdAt: "2026-09-23T17:00:00.000Z" })],
-    attributions: [attribution("one", "2026-09-23", { turns: 3 }, "2026-09-23T18:00:00.000Z"), attribution("one", "2026-09-22", { turns: 2 }, "2026-09-22T18:00:00.000Z")],
+    // 02:00 on 09-24 and on 09-23 in UTC+8, although both are the 18:00 hour of the UTC day before.
+    attributions: [attribution("one", "2026-09-23T18:00:00.000Z", { turns: 3 }), attribution("one", "2026-09-22T18:00:00.000Z", { turns: 2 })],
   }));
   assert.equal(snapshot.to, "2026-09-24"); assert.equal(snapshot.models[0].activeDays, 2); assert.equal(snapshot.models[0].turns, 5);
+  assert.equal(snapshot.models[0].lastActiveAt, "2026-09-23T18:00:00.000Z");
 });
 
 test("breakdown overflow reserves its final row, sums metrics, and unions active days", () => {
@@ -201,15 +205,15 @@ test("breakdown overflow reserves its final row, sums metrics, and unions active
 });
 
 test("tool names aggregate across days, top 24 retains all kind totals, and ties are deterministic", () => {
-  const snapshot = statsSnapshotSchema.parse(buildStatsSnapshot(input({ toolDays: [
-    { day: "2026-09-23", tools: Array.from({ length: 60 }, (_, index) => ({ name: `tool-${String(index).padStart(2, "0")}`, kind: TOOL_KINDS[index % TOOL_KINDS.length], calls: index + 1, failures: index % 2 })) },
-    { day: "2026-09-22", tools: [{ name: " tool-00 ", kind: "web", calls: 100, failures: 2 }] },
-    { day: "2026-09-16", tools: [{ name: "old", kind: "shell", calls: 1000, failures: 0 }] },
+  const snapshot = statsSnapshotSchema.parse(buildStatsSnapshot(input({ toolHours: [
+    { hour: "2026-09-23T03:00:00.000Z", tools: Array.from({ length: 60 }, (_, index) => ({ name: `tool-${String(index).padStart(2, "0")}`, kind: TOOL_KINDS[index % TOOL_KINDS.length], calls: index + 1, failures: index % 2 })) },
+    { hour: "2026-09-22T12:00:00.000Z", tools: [{ name: " tool-00 ", kind: "web", calls: 100, failures: 2 }] },
+    { hour: "2026-09-16T23:00:00.000Z", tools: [{ name: "old", kind: "shell", calls: 1000, failures: 0 }] },
   ] })));
   assert.equal(snapshot.tools.length, 24); assert.equal(snapshot.tools[0].name, "tool-00"); assert.equal(snapshot.tools[0].calls, 101); assert.equal(snapshot.tools[0].kind, "web");
   assert.equal(snapshot.toolKinds.length, 8); assert.equal(snapshot.toolKinds.reduce((sum, tool) => sum + tool.calls, 0), 1930);
   assert.equal(snapshot.toolKinds.reduce((sum, tool) => sum + tool.failures, 0), 32); assert.ok(!snapshot.tools.some(tool => tool.name === "old"));
-  const ties = buildStatsSnapshot(input({ toolDays: [{ day: "2026-09-23", tools: [{ name: "b", kind: "read", calls: 1, failures: 0 }, { name: "a", kind: "shell", calls: 1, failures: 0 }] }] }));
+  const ties = buildStatsSnapshot(input({ toolHours: [{ hour: "2026-09-23T00:00:00.000Z", tools: [{ name: "b", kind: "read", calls: 1, failures: 0 }, { name: "a", kind: "shell", calls: 1, failures: 0 }] }] }));
   assert.deepEqual(ties.tools.map(tool => tool.name), ["a", "b"]);
 });
 
@@ -228,7 +232,7 @@ test("snapshot projection does not mutate source buckets, descriptors, records, 
 });
 
 test("exact tool-kind counters survive name-map overflow without being counted twice", () => {
-  const snapshot = buildStatsSnapshot(input({ toolDays: [{ day: "2026-09-23",
+  const snapshot = buildStatsSnapshot(input({ toolHours: [{ hour: "2026-09-23T12:00:00.000Z",
     tools: [{ name: "retained", kind: "shell", calls: 3, failures: 1 }],
     kinds: [{ name: "shell", kind: "shell", calls: 100, failures: 7 }, { name: "web", kind: "web", calls: 20, failures: 2 }],
   }] }));
@@ -248,23 +252,23 @@ function realisticFixture(): StatsSnapshotInput {
       archivedAt: index % 3 === 0 ? "2026-09-23T23:00:00.000Z" : null, status: index % 13 === 0 ? "running" : "idle", contextUsed: 125_000 + index, contextMax: 1_000_000,
     });
   });
-  const attributions = directory.map((entry, index) => attribution(entry.id, entry.createdAt.slice(0, 10), {
+  const attributions = directory.map((entry, index) => attribution(entry.id, entry.createdAt, {
     turns: 25 + index % 76, completed: 22 + index % 76, failed: 2, canceled: 1, runMs: 23_456 * (25 + index % 76), runSamples: 25 + index % 76,
     busyMs: 25_000, peakParallel: 1 + index % 12, approvals: 10 + index % 20, waitMs: 54_321, userMessages: 25 + index % 76, assistantMessages: 100 + index % 300,
     toolCalls: 1200, toolFailures: 12, edits: 100, linesAdded: 10_000, linesRemoved: 6000, filesChanged: 50, shellCalls: 300, webCalls: 100, subagentCalls: 10,
     errors: index % 5, compactions: index % 3,
-  }, entry.createdAt));
+  }));
   // Retained observations can outlive a directory entry; this exercises the reachable eleventh vendor group.
   attributions.push(attribution("deleted-agent", "2026-09-23", { turns: 100, completed: 100, runMs: 2_345_600, runSamples: 100, toolCalls: 1200 }, "2026-09-23T14:00:00.000Z"));
   const hoursByDay = new Map<string, StatsHour>();
   for (const item of attributions) {
-    const key = `${item.day}T12:00:00.000Z`, bucket = hoursByDay.get(key) ?? hour(key);
+    const key = `${item.hour.slice(0, 10)}T12:00:00.000Z`, bucket = hoursByDay.get(key) ?? hour(key);
     for (const metric of Object.keys(emptyStatsMetrics()) as (keyof StatsMetrics)[]) bucket[metric] = metric === "peakParallel" ? Math.max(bucket[metric], item[metric]) : bucket[metric] + item[metric];
     hoursByDay.set(key, bucket);
   }
   return input({ now: fixtureNow, range: "90d", directory, attributions, hours: [...hoursByDay.values()],
     records: directory.map((entry, index) => record(entry.id, 23_456 * (25 + index % 76), entry.createdAt)),
-    toolDays: Array.from({ length: 90 }, (_, day) => ({ day: new Date(first + day * DAY).toISOString().slice(0, 10), tools: Array.from({ length: 60 }, (_, index) => ({
+    toolHours: Array.from({ length: 90 }, (_, day) => ({ hour: new Date(first + day * DAY + 12 * HOUR).toISOString(), tools: Array.from({ length: 60 }, (_, index) => ({
       name: `mcp__integration__operation_${String(index).padStart(2, "0")}`, kind: TOOL_KINDS[index % TOOL_KINDS.length], calls: 100 + index % 50, failures: index % 17 === 0 ? 3 : 0,
     })) })), observedSince: new Date(first).toISOString(), contentSince: new Date(first).toISOString(),
   });
@@ -272,8 +276,8 @@ function realisticFixture(): StatsSnapshotInput {
 
 test("worst-case 2000-agent / 60-tool fixture fills reachable breakdown caps and meets raw payload budgets", context => {
   const fixture = realisticFixture();
-  assert.equal(fixture.directory.length, 2000); assert.equal(fixture.toolDays.length, 90);
-  for (const day of fixture.toolDays) assert.equal(new Set(day.tools.map(tool => tool.name)).size, 60);
+  assert.equal(fixture.directory.length, 2000); assert.equal(fixture.toolHours.length, 90);
+  for (const hour of fixture.toolHours) assert.equal(new Set(hour.tools.map(tool => tool.name)).size, 60);
   const vendors = ["anthropic", "openai", "google", "xai", "moonshot", "deepseek", "bytedance", "alibaba", "zhipu", "other", "unknown"];
   for (const [range, length] of [["7d", 7], ["30d", 30], ["90d", 90]] as const) {
     const snapshot = statsSnapshotSchema.parse(buildStatsSnapshot({ ...fixture, range })), json = JSON.stringify(snapshot);

@@ -54,5 +54,8 @@ export function enrichAgents(agents: AgentRecord[], telemetry?: TelemetrySnapsho
   if (!telemetry && !background?.agents.length) return agents;
   const records = new Map((telemetry?.agents ?? []).map(item => [item.agentId, item]));
   const working = new Map((background?.agents ?? []).map(item => [item.agentId, item]));
-  return agents.map(agent => applyBackground(applyTelemetry(agent, records.get(agent.id)), working.get(agent.id)));
+  return agents.map(agent => {
+    const record = records.get(agent.id), enriched = applyTelemetry(agent, record);
+    return applyBackground(record?.link ? { ...enriched, changeRequest: record.link } : enriched, working.get(agent.id));
+  });
 }

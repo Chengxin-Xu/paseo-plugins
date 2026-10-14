@@ -64,7 +64,7 @@ export class DashboardService {
   /** Recent revisions → per-board tokens, so a delta can be computed against any of them. */
   private history = new Map<string, Map<string, string>>();
   constructor(private readonly store: BoardStore, private readonly projects: ProjectDirectory, private readonly historyLimit = 64) {}
-  async read(paseo: Paseo, known?: string): Promise<DashboardUpdate> {
+  async read(paseo: Paseo, known?: string, refreshProjectIds: readonly string[] = []): Promise<DashboardUpdate> {
     const [listed, { entries, unavailable: skipped }] = await Promise.all([this.projects.list(paseo), this.store.readEntries()]);
     const projects = boardProjects(listed);
     const knownIds = new Set(projects.map(p => p.id));
@@ -86,12 +86,15 @@ export class DashboardService {
     const revision = hash([...tokens].map(([key, token]) => `${key}\u0000${token}`).join("\n")).slice(0, 24);
     this.history.delete(revision); this.history.set(revision, tokens);
     for (const oldest of this.history.keys()) { if (this.history.size <= this.historyLimit) break; this.history.delete(oldest); }
-    if (known === revision) return { unchanged: true, revision };
+    const refresh = new Set(refreshProjectIds);
+    if (known === revision && !refresh.size) return { unchanged: true, revision };
     const base = known ? this.history.get(known) : undefined;
-    if (!base) return { revision, projects, boards: entries.map(e => e.snapshot), unavailable };
+    if (!base) return { mode: "full", revision, projects, boards: entries.map(e => e.snapshot), unavailable };
     return {
+      mode: "delta", baseRevision: known,
+      removedProjectIds: [...new Set([...base.keys(), ...refresh])].filter(key => !key.startsWith("\u0000") && !tokens.has(key)),
       revision, ...(base.get(PROJECTS_KEY) === tokens.get(PROJECTS_KEY) ? {} : { projects }),
-      boards: entries.filter(e => base.get(e.snapshot.projectId) !== e.token).map(e => e.snapshot), unavailable,
+      boards: entries.filter(e => refresh.has(e.snapshot.projectId) || base.get(e.snapshot.projectId) !== e.token).map(e => e.snapshot), unavailable,
     };
   }
 }

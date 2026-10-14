@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { chromium, type Browser, type Page } from 'playwright-core';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 import { defaultRuntimeRoot } from '../server/runtime';
 import { maintainArtifacts } from '../server/artifacts';
 import type { BrowserSession, BrowserSettings } from '../shared/browser';
@@ -280,7 +280,7 @@ test('v2 tab limits preserve pinned pages and stale tab targets never fall throu
   }
 });
 
-test('v2 artifact retention deletes only owned regular files and never traverses profile, downloads or symlinks', async()=>{
+test('v2 artifact retention deletes only regular files directly in artifacts/ and never traverses profile, downloads or symlinks', async()=>{
   const dataRoot=await mkdtemp(path.join(tmpdir(),'paseo-browser-v2-artifacts-'));
   const artifacts=path.join(dataRoot,'workspace','artifacts');
   const profile=path.join(dataRoot,'workspace','profile');
@@ -303,13 +303,13 @@ test('v2 artifact retention deletes only owned regular files and never traverses
     await utimes(ownedRecent,new Date(now),new Date(now));
     await symlink(outside,symlinkFile);
     const result=await maintainArtifacts(artifacts,settings,true,now);
-    assert.equal(result.cleaned,1);
+    assert.equal(result.cleaned,2);
     assert.equal(result.count,1);
     assert.equal(result.bytes,Buffer.byteLength('new screenshot'));
     await assert.rejects(access(ownedOld));
+    await assert.rejects(access(foreign),'a page download Playwright MCP saved under its own name ages out too');
     assert.equal(await readFile(ownedRecent,'utf8'),'new screenshot');
     assert.equal(await readFile(profileFile,'utf8'),'synthetic profile sentinel');
-    assert.equal(await readFile(foreign,'utf8'),'user document');
     assert.equal(await readFile(outside,'utf8'),'outside sentinel');
     assert.equal(await readFile(nested,'utf8'),'nested download');
     assert((await lstat(symlinkFile)).isSymbolicLink());
@@ -318,6 +318,20 @@ test('v2 artifact retention deletes only owned regular files and never traverses
     assert.deepEqual(await maintainArtifacts(linkedRoot,settings,true,now),{bytes:0,count:0,cleaned:0});
     assert.equal(await readFile(profileFile,'utf8'),'synthetic profile sentinel');
   } finally { await rm(dataRoot,{recursive:true,force:true}); }
+});
+
+test('artifact retention covers what Playwright MCP saves under a site\'s file name: downloads and request or response parts', async()=>{
+  const artifacts=await mkdtemp(path.join(tmpdir(),'paseo-browser-artifact-names-'));
+  const now=Date.now(),hours=(count:number)=>new Date(now-count*3600_000);
+  const settings:BrowserSettings={autoRecover:true,maxTabs:8,maxArtifactMB:256,artifactMaxAgeHours:48};
+  const files:[string,Date][]=[['statement.pdf',hours(72)],['request-2026-10-01T00-00-00-000Z.txt',hours(60)],['response-body.json',hours(50)],['statement (1).pdf',hours(1)],['invoice.pdf',new Date(now-60_000)],['console-2026-10-14T00-00-00-000Z.log',new Date(now)]];
+  try {
+    for(const [name,time] of files){const file=path.join(artifacts,name);await writeFile(file,name);await utimes(file,time,time);}
+    const result=await maintainArtifacts(artifacts,settings,true,now);
+    for(const name of ['statement.pdf','request-2026-10-01T00-00-00-000Z.txt','response-body.json'])await assert.rejects(access(path.join(artifacts,name)),`${name} is older than 48 hours`);
+    for(const name of ['statement (1).pdf','invoice.pdf','console-2026-10-14T00-00-00-000Z.log'])assert.equal(await readFile(path.join(artifacts,name),'utf8'),name,`${name} is recent`);
+    assert.deepEqual(result,{bytes:['statement (1).pdf','invoice.pdf','console-2026-10-14T00-00-00-000Z.log'].reduce((total,name)=>total+name.length,0),count:3,cleaned:3});
+  } finally { await rm(artifacts,{recursive:true,force:true}); }
 });
 
 test('v2 diagnostics distinguish suspected login and network failure while article reading trims navigation and resolves links', {timeout:50_000}, async()=>{

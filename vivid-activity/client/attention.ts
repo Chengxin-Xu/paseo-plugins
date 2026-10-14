@@ -1,110 +1,37 @@
 import { usePaseo } from "@getpaseo/plugin/client";
 import { useEffect, useSyncExternalStore } from "react";
-import { pendingCallIds } from "../shared/vivid-model";
-import { FOLD_TIMING } from "./fold-runtime";
+import { createAgentFeeds, openAgentFeed, type PaseoApi } from "./agent-feed";
+import { createAttentionStores, EMPTY, watchPendingPermissions } from "./attention-store";
+import { useForeground } from "./use-foreground";
+
+// 本地补丁：「等你批准」的 React 端。按 Agent 的记录与 0.5.0 的实时订阅见 attention-store.ts 和 agent-feed.ts。
+const attention = createAttentionStores();
+const feeds = createAgentFeeds<PaseoApi>({ open: openAgentFeed });
 
 /**
- * 本地补丁：哪些工具调用正在等你批准。按 Agent 共享一个订阅（Paseo 客户端已有的 agent_update 流，
- * 不额外轮询），第一行出现时建立，最后一行卸载时释放。Claude 的权限请求带 metadata.toolUseId，
- * ACP 的带 metadata.toolCallId，二者都等于时间线里的 callId。
- * 0.4.1：没有行再用的 Agent，过 FOLD_TIMING.forgetMs 后连同记录一起删掉，长时间来回看很多 Agent 时不再越积越多。
+ * Which tool calls of the Agent wait for your approval. `active`: the row can show it (it is running); only those rows
+ * register, so an open chat with nothing running holds no subscription.
  */
-type Store = { ids: ReadonlySet<string>; any: boolean; listeners: Set<() => void>; refs: number; release: (() => void) | null; drop: unknown };
-type Pending = Parameters<typeof pendingCallIds>[0];
-const EMPTY: ReadonlySet<string> = new Set();
-
-export interface AttentionTimers {
-  setTimer(run: () => void, ms: number): unknown;
-  clearTimer(handle: unknown): void;
-}
-
-const REAL_TIMERS: AttentionTimers = {
-  setTimer: (run, ms) => setTimeout(run, ms),
-  clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
-
-/** The per-Agent stores (one per plugin evaluation); exported for tests. */
-export function createAttentionStores(timers: AttentionTimers = REAL_TIMERS, forgetMs: number = FOLD_TIMING.forgetMs) {
-  const stores = new Map<string, Store>();
-  function storeFor(agentId: string): Store {
-    let store = stores.get(agentId);
-    if (!store) {
-      store = { ids: EMPTY, any: false, listeners: new Set(), refs: 0, release: null, drop: null };
-      stores.set(agentId, store);
-    }
-    if (store.drop !== null) {
-      timers.clearTimer(store.drop);
-      store.drop = null;
-    }
-    return store;
-  }
-  function dropLater(agentId: string, store: Store): void {
-    if (store.refs > 0 || store.listeners.size > 0 || store.drop !== null) return;
-    store.drop = timers.setTimer(() => {
-      store.drop = null;
-      if (store.refs === 0 && store.listeners.size === 0 && stores.get(agentId) === store) stores.delete(agentId);
-    }, forgetMs);
-  }
-  return {
-    /** A row of the Agent mounted; the first one subscribes (`subscribe` returns how to unsubscribe). */
-    acquire(agentId: string, subscribe: (store: Store) => () => void): Store {
-      const store = storeFor(agentId);
-      store.refs += 1;
-      if (store.refs === 1) store.release = subscribe(store);
-      return store;
-    },
-    /** The row unmounted; the last one unsubscribes. */
-    release(agentId: string, store: Store): void {
-      if (store.refs === 0) return;
-      store.refs -= 1;
-      if (store.refs > 0) return;
-      store.release?.();
-      store.release = null;
-      dropLater(agentId, store);
-    },
-    listen(agentId: string, listener: () => void): () => void {
-      const store = storeFor(agentId);
-      store.listeners.add(listener);
-      return () => {
-        store.listeners.delete(listener);
-        dropLater(agentId, store);
-      };
-    },
-    snapshot(agentId: string): Store | undefined {
-      return stores.get(agentId);
-    },
-    publish(store: Store, pending: Pending): void {
-      const ids = pendingCallIds(pending);
-      const any = (pending?.length ?? 0) > 0;
-      if (any === store.any && ids.size === store.ids.size && [...ids].every((id) => store.ids.has(id))) return;
-      store.ids = ids;
-      store.any = any;
-      for (const listener of store.listeners) listener();
-    },
-    size(): number {
-      return stores.size;
-    },
-  };
-}
-
-const attention = createAttentionStores();
-
-export function usePendingPermissions(agentId: string): { ids: ReadonlySet<string>; any: boolean } {
+export function usePendingPermissions(agentId: string, active = true): { ids: ReadonlySet<string>; questions: ReadonlySet<string>; any: boolean; onlyQuestions: boolean } {
   const paseo = usePaseo();
+  const foreground = useForeground();
   useEffect(() => {
-    const store = attention.acquire(agentId, (subscribed) => {
-      const handle = paseo.agents.ref(agentId);
-      const unsubscribe = handle.subscribe((update) => {
-        if (update.kind === "upsert" && update.agent.id === agentId) attention.publish(subscribed, update.agent.pendingPermissions);
-      });
-      void handle.refresh().then(() => attention.publish(subscribed, handle.pendingPermissions), () => {});
-      return unsubscribe;
-    });
+    feeds.setForeground(foreground);
+  }, [foreground]);
+  useEffect(() => {
+    if (!active || agentId.startsWith("provider:")) return;
+    const store = attention.acquire(agentId, (subscribed) =>
+      watchPendingPermissions(paseo.agents.ref(agentId), agentId, (pending) => attention.publish(subscribed, pending), (onSnapshot) => feeds.acquire(paseo, onSnapshot)));
     return () => attention.release(agentId, store);
-  }, [agentId, paseo]);
+  }, [active, agentId, paseo]);
   const ids = useSyncExternalStore(
     (listener) => attention.listen(agentId, listener),
     () => attention.snapshot(agentId)?.ids ?? EMPTY,
+    () => EMPTY,
+  );
+  const questions = useSyncExternalStore(
+    (listener) => attention.listen(agentId, listener),
+    () => attention.snapshot(agentId)?.questions ?? EMPTY,
     () => EMPTY,
   );
   const any = useSyncExternalStore(
@@ -112,5 +39,10 @@ export function usePendingPermissions(agentId: string): { ids: ReadonlySet<strin
     () => attention.snapshot(agentId)?.any ?? false,
     () => false,
   );
-  return { ids, any };
+  const onlyQuestions = useSyncExternalStore(
+    (listener) => attention.listen(agentId, listener),
+    () => attention.snapshot(agentId)?.onlyQuestions ?? false,
+    () => false,
+  );
+  return { ids, questions, any, onlyQuestions };
 }

@@ -16,7 +16,7 @@ test('overview only reads known workspaces and associated agents, redacts URL pa
     const calls:string[]=[];
     const states:Record<string,BrowserSession>=Object.fromEntries(['one','two','stopped'].map(id=>[id,{workspaceId:id,status:id==='stopped'?'idle':'running',title:'Page '+id,url:'https://example.com/'+id+'?token=private-token#secret',mode:'agent',width:1120,height:720,tabs:[{id:'tab-'+id,title:'Page '+id,url:'https://example.com/'+id+'?token=private-token',active:true,pinned:false}],agentId:id==='stopped'?null:'agent-'+id,error:null,agentBusy:id==='two',activity:[]}])) as Record<string,BrowserSession>;
     const agents:Record<string,unknown>={'agent-one':{id:'agent-one',workspaceId:'one',title:'Coding Agent',status:'running',provider:'codex',pendingPermissions:[],archivedAt:null},'agent-two':{id:'agent-two',workspaceId:'two',title:'Browser Agent',status:'running',provider:'claude',pendingPermissions:[],archivedAt:null}};
-    const paseo={workspaces:{list:async()=>({entries:workspaces,pageInfo:{hasMore:false}})},agents:{ref:(id:string)=>({refresh:async()=>{calls.push('agent:'+id);},current:()=>agents[id]})}} as unknown as PluginHandlerContext['paseo'];
+    const paseo={workspaces:{list:async()=>({entries:workspaces,pageInfo:{hasMore:false}})},agents:{list:async(input:{filter:{labels:Record<string,string>}})=>{const id='agent-'+input.filter.labels['server-browser.workspace'];calls.push('agent:'+id);return {entries:[{agent:agents[id]}],pageInfo:{hasMore:false}};}}} as unknown as PluginHandlerContext['paseo'];
     const overview=new BrowserOverviewService({dataRoot:root,state:async id=>{calls.push('state:'+id);return states[id];}});
     const listed=await overview.list(paseo);
     const result={...overviewRpc.output.parse(listed),items:listed.items};
@@ -38,7 +38,7 @@ test('overview does not label an agent from another workspace as the browser con
   const root=await mkdtemp(path.join(tmpdir(),'paseo-browser-overview-'));
   try{
     await mkdir(path.join(root,'one'));
-    const paseo={workspaces:{list:async()=>({entries:[{id:'one',title:'One',name:'One',projectId:'project-one',projectDisplayName:'Project One',workspaceDirectory:'/one',projectRootPath:'/one'}],pageInfo:{hasMore:false}})},agents:{ref:()=>({refresh:async()=>{},current:()=>({id:'foreign-agent',workspaceId:'another-workspace',status:'running',title:'Unrelated',provider:'codex'})})}} as unknown as PluginHandlerContext['paseo'];
+    const paseo={workspaces:{list:async()=>({entries:[{id:'one',title:'One',name:'One',projectId:'project-one',projectDisplayName:'Project One',workspaceDirectory:'/one',projectRootPath:'/one'}],pageInfo:{hasMore:false}})},agents:{list:async()=>({entries:[{agent:{id:'foreign-agent',workspaceId:'another-workspace',status:'running',title:'Unrelated',provider:'codex'}}],pageInfo:{hasMore:false}})}} as unknown as PluginHandlerContext['paseo'];
     const overview=new BrowserOverviewService({dataRoot:root,state:async()=>({workspaceId:'one',status:'running',title:'Login',url:'https://sso.example.com/user/login?code=secret',mode:'manual',width:1120,height:720,tabs:[],agentId:'foreign-agent',agentBusy:false,error:null})});
     const result=await overview.list(paseo);assert.equal(result.items[0].agent,null);assert.equal(result.items[0].session.url,'https://sso.example.com/user/login');
     assert.equal(overviewPageUrl('https://user:pass@example.com/private?q=secret'),'https://example.com/private');
@@ -51,7 +51,7 @@ test('overview summaries carry only rendered state and their revision ignores re
     await mkdir(path.join(root,'one'));
     const workspaces=[{id:'one',title:'One',name:'One',projectId:'project-one',projectDisplayName:'Project One',workspaceDirectory:'/one',projectRootPath:'/one'}];
     const source=async()=>workspaces as never;
-    const paseo={agents:{ref:()=>({refresh:async()=>{},current:()=>null})}} as unknown as PluginHandlerContext['paseo'];
+    const paseo={agents:{list:async()=>({entries:[],pageInfo:{hasMore:false}})}} as unknown as PluginHandlerContext['paseo'];
     const activity=(id:string,status:'running'|'completed')=>({id,source:'agent' as const,action:'打开网页',status,tabId:'tab-1',pageTitle:'Docs',pageUrl:'https://example.com/docs?session=secret',startedAt:1,endedAt:status==='running'?null:2});
     let uptime=0;
     const state:BrowserSession={workspaceId:'one',status:'running',title:'Docs',url:'https://example.com/docs?session=secret',mode:'agent',width:1120,height:720,

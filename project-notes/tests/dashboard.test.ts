@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mergeDashboard, patchDashboard } from "../client/sync";
 import { BoardStore } from "../server/store";
 import { DashboardService, ProjectDirectory, withTimeout, type PaseoProject } from "../server/dashboard";
 import { dashboardUpdateSchema, type NoteFields } from "../shared/board";
@@ -37,6 +38,63 @@ async function fixture(projects = [project("prj_a", "Alpha"), project("prj_b", "
 const create = (store: BoardStore, projectId: string, requestId: string, title = "看板") => store.write({ projectId, requestId, operation: { type: "create", fields: { ...fields, title } } });
 
 describe("DashboardService revisions", () => {
+  it("uses a delta after consecutive local writes and authoritatively restores a same-token backup", async () => {
+    const { root, store, dashboard, api } = await fixture();
+    await create(store, "prj_a", "local-create-a");
+    await create(store, "prj_b", "local-create-b");
+    const initial = await dashboard.read(api);
+    let cached = mergeDashboard(undefined, initial, 1);
+    const file = join(root, store.boardFile("prj_a")), backup = await readFile(file, "utf8");
+    for (let i = 0; i < 3; i++) {
+      const written = await create(store, "prj_a", `local-write-${i}`);
+      cached = patchDashboard(cached, written.board, i + 2);
+      const update = await dashboard.read(api, cached.revision!, cached.pendingProjectIds);
+      expect(update).toMatchObject({ mode: "delta", baseRevision: cached.revision, boards: [{ projectId: "prj_a" }] });
+      if (update.unchanged) throw new Error("expected delta");
+      expect(update.boards).toHaveLength(1); expect(update.projects).toBeUndefined();
+      cached = mergeDashboard(cached, update, i + 3, cached.writeEpoch);
+      expect(cached.pendingProjectIds).toBeUndefined();
+    }
+    // A delayed acknowledgement follows a poll that already saw the original backup.
+    const lastWrite = await create(store, "prj_a", "local-delayed-ack");
+    await writeFile(file, backup);
+    cached = mergeDashboard(cached, await dashboard.read(api, cached.revision!), 10);
+    cached = patchDashboard(cached, lastWrite.board, 11);
+    expect(cached.revision).toBe(initial.revision);
+    const restored = await dashboard.read(api, cached.revision!, cached.pendingProjectIds);
+    expect(restored).toMatchObject({ mode: "delta", revision: initial.revision, boards: [{ projectId: "prj_a", revision: 1 }] });
+    expect(mergeDashboard(cached, restored, 12, cached.writeEpoch).boards.find(board => board.projectId === "prj_a")?.revision).toBe(1);
+  });
+
+  it("omits full historical content from dashboard snapshots and deltas", async () => {
+    const { store, dashboard, api } = await fixture();
+    const created = await store.write({ projectId: "prj_a", requestId: "history-dashboard-create", operation: { type: "create", fields: { ...fields, body: "历史大正文".repeat(400) } } });
+    const initial = await dashboard.read(api);
+    await store.write({ projectId: "prj_a", requestId: "history-dashboard-edit", operation: { type: "update", id: created.itemId, expectedRevision: 1, fields: { body: "当前正文" } } });
+    for (const update of [await dashboard.read(api), await dashboard.read(api, initial.revision)]) {
+      expect(JSON.stringify(update)).not.toContain("历史大正文");
+      if (update.unchanged) throw new Error("expected data");
+      expect(update.boards[0]!.items[0]).toMatchObject({ body: "当前正文", historyCount: 1 });
+      expect(update.boards[0]!.items[0]).not.toHaveProperty("history");
+    }
+  });
+
+  it("reports deleted files and a restored lower-revision backup as content changes", async () => {
+    const { root, store, dashboard, api } = await fixture();
+    await create(store, "prj_a", "backup-create-1", "备份正文");
+    const file = join(root, store.boardFile("prj_a"));
+    const backup = await readFile(file, "utf8");
+    await create(store, "prj_a", "backup-create-2", "较新正文");
+    await create(store, "prj_b", "backup-create-3");
+    const base = await dashboard.read(api);
+    await writeFile(file, backup);
+    await rm(join(root, store.boardFile("prj_b")));
+    const delta = await dashboard.read(api, base.revision);
+    expect(delta).toMatchObject({ mode: "delta", baseRevision: base.revision, removedProjectIds: ["prj_b"], boards: [{ projectId: "prj_a", revision: 1 }] });
+    const full = await dashboard.read(api);
+    expect(full).toMatchObject({ mode: "full", boards: [{ projectId: "prj_a", revision: 1 }] });
+    expect(dashboardUpdateSchema.parse(delta)).toEqual(delta);
+  });
   it("returns the full dashboard, then a tiny unchanged reply for the same revision", async () => {
     const { store, dashboard, api } = await fixture();
     await create(store, "prj_a", "dash-create-1");

@@ -7,6 +7,7 @@ import {
   hostToolDisposition,
   indexRowFromWire,
   MAX_CLASSIFY_CHARS,
+  textLines,
   toolLook,
   wirePageFromEntries,
   wireRowFromEntry,
@@ -75,6 +76,62 @@ describe("fold index rows", () => {
     expect(wireRowFromEntry(entry(12, fg))).toEqual({ s: 12, at, k: "t", key: "t:task_notification_1", st: "completed", look: "shell", ref: "toolu_Bash", fg: true });
     const bg = { ...fg, detail: { type: "plain_text", label: 'Background command "构建" completed (exit code 0)' } };
     expect(wireRowFromEntry(entry(13, bg))).toMatchObject({ fg: false, ref: "toolu_Bash" });
+    // 0.6.0-local.2: a repeat that brings the call's result is not folded away, on the server as on the client.
+    const detached = { ...fg, detail: { type: "plain_text", label: "The Bash call finished; its result follows.", text: "<task-notification>\n<task-type>tool_call</task-type>\n<summary>The Bash call finished; its result follows.</summary>\n<result>\nok\n</result>\n</task-notification>" } };
+    expect(wireRowFromEntry(entry(14, detached))).toMatchObject({ fg: false, ref: "toolu_Bash", st: "completed" });
+    // A failed notice whose error quotes 「finished」 counts as a failure in the fold summary (codex-vivid-F2).
+    const quoted = { ...fg, status: "failed", detail: { type: "plain_text", label: 'Agent "审查" failed: Hook "validate" finished with exit code 1' }, metadata: { synthetic: true, source: "claude_task_notification", toolUseId: "toolu_Agent", status: "failed" } };
+    expect(wireRowFromEntry(entry(15, quoted))).toMatchObject({ st: "failed", look: "agent", fg: false });
+  });
+
+  describe("a repeat with a result of its own (0.6.0-local.3, 0.6.0-local.4)", () => {
+    const notice = (id: string, result: string, callId = `task_notification_${id}`) =>
+      call("task_notification", {
+        type: "plain_text",
+        label: "The Bash call finished; its result follows.",
+        text: `<task-notification>\n<tool-use-id>${id}</tool-use-id>\n<task-type>tool_call</task-type>\n<summary>The Bash call finished; its result follows.</summary>\n<result>\n${result.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}\n</result>\n</task-notification>`,
+      }, { callId, metadata: { synthetic: true, source: "claude_task_notification", toolUseId: id, status: "completed" } });
+    const bash = (id: string, output: string) => call("Bash", { type: "shell", command: "npm run build", output }, { callId: id });
+    const page = (...items: Array<Record<string, unknown>>) => wirePageFromEntries(items.map((item, index) => entry(index + 1, item)), () => null).rows;
+    const placeholder = "[Still running. The user sent a message while this call loads, and that message follows so you can answer it now. This Bash call was not interrupted. Its result will be delivered to you on its own, in a later <task-notification> carrying this tool_use_id. Do not repeat the call, and do not wait, sleep or poll for it. You cannot stop it either, so never say you cancelled or dropped it. If they ask, it is still loading.]";
+
+    it("folds into its row on the same page only when the row's final result reads the same", () => {
+      // Both say `built in 4.2s` (colour codes and the line end aside): the notice folds into its row.
+      expect(page(bash("same", "\u001b[32mbuilt in 4.2s\u001b[0m\r\n"), notice("same", "built in 4.2s"))[1]).toMatchObject({ ref: "same", fg: true });
+      // More around it, a placeholder or another result: its own row; so too when the row is not on this page.
+      expect(page(bash("more", "built in 4.2s\n2 warnings"), notice("more", "built in 4.2s"))[1]).toMatchObject({ fg: false });
+      expect(page(bash("held", placeholder), notice("held", "built in 4.2s"))[1]).toMatchObject({ fg: false });
+      expect(page(bash("other", "built in 3.9s"), notice("other", "built in 4.2s"))[1]).toMatchObject({ fg: false });
+      expect(page(notice("elsewhere", "built in 4.2s"))[0]).toMatchObject({ fg: false });
+      // A row still running has no final result yet.
+      expect(page({ ...bash("live", "built in 4.2s"), status: "running" }, notice("live", "built in 4.2s"))[1]).toMatchObject({ fg: false });
+    });
+
+    it("keeps every notice Codex's recheck saw folded by mistake (codex-vivid-F7)", () => {
+      const cases: Array<[row: string, result: string]> = [
+        [placeholder, "running"],
+        [placeholder, "it"],
+        [placeholder, placeholder],
+        ["errors: 10", "errors: 1"],
+        ['{"text":"a  b"}', '{"text":"a b"}'],
+        ["1\n23", "1 23"],
+        [`${"x".repeat(200_000)} SOURCE`, `${"x".repeat(200_000)} DIFFERENT FINAL RESULT`],
+        ["x".repeat(200_001), "x".repeat(200_001)],
+      ];
+      cases.forEach(([output, result], index) => {
+        expect(page(bash(`m${index}`, output), notice(`m${index}`, result))[1], result.slice(0, 30)).toMatchObject({ ref: `m${index}`, fg: false });
+      });
+    });
+
+    it("reads a row's result once per page, however many notices repeat it (codex-vivid-F7)", () => {
+      // Codex: 400 notices of one 200 000-character output took 3 s, its result read again for each notice.
+      const output = "\u001b[32mok\u001b[0m  \r\n".repeat(13_000);
+      const notices = Array.from({ length: 400 }, (_, index) => notice("big", `ok ${index}`, `task_notification_big_${index}`));
+      const started = performance.now();
+      const rows = page(bash("big", output), ...notices);
+      expect(performance.now() - started).toBeLessThan(250);
+      expect(rows.filter((row) => row.ref === "big" && row.fg === false)).toHaveLength(400);
+    });
   });
 
   it("draws apply_patch as edits", () => {
@@ -148,5 +205,28 @@ describe("fold index rows", () => {
     ]);
     expect(indexRowFromWire({ s: 3, at: 0, k: "t", key: "t:n", st: "completed", look: "shell", ref: "r", fg: true }).notice).toEqual({ ref: "r", foreground: true });
     expect(indexRowFromWire({ s: 4, at: 0, k: "x", w: "hidden-tool" }).kind).toBe("skip");
+  });
+});
+
+describe("how long an Agent's text is (0.6.0, for the pinned question)", () => {
+  it("sends about how many lines each Agent text takes, and nothing more of it", () => {
+    const row = wireRowFromEntry(entry(4, { type: "assistant_message", text: `先看入口。\n${"很长的一句说明".repeat(12)}\n\n好了。` }));
+    expect(row).toEqual({ s: 4, at, k: "b", w: "assistant_message", ln: 6 });
+    expect(foldIndexRpc.output.shape.rows.element.safeParse(row).success).toBe(true);
+    expect(indexRowFromWire(row!)).toEqual({ seq: 4, at, kind: "boundary", what: "assistant_message", lines: 6 });
+    // User messages and other boundaries carry no length.
+    expect(wireRowFromEntry(entry(5, { type: "user_message", text: "很长的问题".repeat(40) }))).toEqual({ s: 5, at, k: "b", w: "user_message" });
+  });
+
+  it("counts 40 characters a line and every line break, and stops at 999 lines without reading the rest", () => {
+    expect(textLines("")).toBe(1);
+    expect(textLines("a".repeat(40))).toBe(1);
+    expect(textLines("a".repeat(41))).toBe(2);
+    expect(textLines("一\n二\n三")).toBe(3);
+    expect(textLines("x\n")).toBe(2);
+    const started = performance.now();
+    expect(textLines("line\n".repeat(2_000_000))).toBe(999);
+    expect(textLines("a".repeat(5_000_000))).toBe(999);
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

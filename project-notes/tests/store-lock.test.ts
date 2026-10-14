@@ -134,6 +134,28 @@ describe("bin/notes.mjs processes and the plugin store", () => {
   });
   afterAll(async () => { if (cli) await rm(join(cli, ".."), { recursive: true, force: true }); });
 
+  it("keeps history out of default CLI JSON and fetches it only for show --history", async () => {
+    const home = await temp("project-notes-cli-history-");
+    const env = { ...process.env, PASEO_HOME: home, PATH: `${bin}:${process.env.PATH}` };
+    const json = async (...args: string[]) => JSON.parse((await run(process.execPath, [cli, ...args, "--json"], { env })).stdout);
+    const created = await json("add", "--project", "inbox", "--title", "命令行历史", "--body", "原来的完整正文");
+    await json("update", created.itemId, "--body", "现在的正文");
+    const listed = await json("list", "--project", "inbox");
+    expect(listed.items[0]).toMatchObject({ body: "现在的正文", historyCount: 1 });
+    expect(listed.items[0]).not.toHaveProperty("history"); expect(listed.items[0]).not.toHaveProperty("historyKeys");
+    const shown = await json("show", created.itemId);
+    expect(shown).not.toHaveProperty("history"); expect(JSON.stringify(shown)).not.toContain("原来的完整正文");
+    expect((await json("show", created.itemId, "--history")).history).toEqual([expect.objectContaining({ body: "原来的完整正文", revision: 1 })]);
+    const human = (await run(process.execPath, [cli, "show", created.itemId, "--history"], { env })).stdout;
+    expect(human).toContain("第 1 版"); expect(human).toContain("原来的完整正文");
+    const histories = join(home, "plugin-data", "project-notes", "boards", "history");
+    const sidecar = (await readdir(histories)).find(name => name.endsWith(`.${created.itemId}.json`))!;
+    await rm(join(histories, sidecar));
+    expect(await json("show", created.itemId, "--history")).toMatchObject({ body: "现在的正文", history: [], historyMissing: true, historyMissingCount: 1 });
+    const missing = (await run(process.execPath, [cli, "show", created.itemId, "--history"], { env })).stdout;
+    expect(missing).toContain("放弃缺失的快照并继续"); expect(missing).toContain("当前正文仍保留");
+  });
+
   it("serializes concurrent CLI processes and in-process writes, and the dashboard sees every CLI write", async () => {
     const home = await temp("project-notes-cli-home-");
     const env = { ...process.env, PASEO_HOME: home, PATH: `${bin}:${process.env.PATH}` };

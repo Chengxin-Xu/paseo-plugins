@@ -72,3 +72,44 @@ test('the default source pages through the daemon and hides archiving workspaces
   assert.deepEqual((await listBrowserWorkspaces(api)).map(item=>item.id),['one','two']);
   assert.deepEqual(cursors,[undefined,'next']);
 });
+
+test('retirement filters even a stale listing that was already in flight',async()=>{
+  let release!:(items:PaseoWorkspace[])=>void;
+  const restored:string[]=[];
+  const cache=new WorkspaceDirectory(30_000,()=>0,()=>new Promise(resolve=>{release=resolve;}));
+  cache.onRestore(id=>{restored.push(id);});
+  const pending=cache.list(paseo);
+  cache.retire('archived');release([workspace('archived'),workspace('live')]);
+  assert.deepEqual((await pending).map(item=>item.id),['live']);
+  assert.deepEqual(restored,[],'a listing that started before the archiving cannot bring it back');
+  const next=cache.require(paseo,'archived');release([workspace('live')]);
+  await assert.rejects(next,/已不可用/);
+});
+
+test('an archived workspace that the daemon lists again (restored, or its directory reopened) gets its browser back',async()=>{
+  let listing=[workspace('kept'),workspace('live')];
+  const restored:string[]=[];let releaseRestore!:()=>void;
+  const cache=new WorkspaceDirectory(30_000,()=>0,async()=>listing);
+  cache.onRestore(id=>new Promise<void>(resolve=>{restored.push(id);releaseRestore=resolve;}));
+  assert.equal((await cache.require(paseo,'kept')).id,'kept');
+  cache.retire('kept');listing=[workspace('live')];
+  await assert.rejects(cache.require(paseo,'kept'),/已不可用/);
+  assert.deepEqual((await cache.list(paseo)).map(item=>item.id),['live']);
+  // Same id, no workspace.created event: only a later listing shows it.
+  listing=[workspace('kept'),workspace('live')];cache.invalidate();
+  const back=cache.require(paseo,'kept');
+  await new Promise(resolve=>setTimeout(resolve,10));
+  assert.deepEqual(restored,['kept'],'the manager is told before the workspace is usable again');
+  releaseRestore();
+  assert.equal((await back).id,'kept');
+  assert.deepEqual((await cache.list(paseo)).map(item=>item.id),['kept','live']);
+  // A listener that fails leaves it retired, to be tried again with the next listing.
+  const failing=new WorkspaceDirectory(30_000,()=>0,async()=>[workspace('again')]);
+  failing.onRestore(()=>{throw new Error('manager busy');});failing.retire('again');
+  await assert.rejects(failing.require(paseo,'again'),/已不可用/);
+});
+
+test('an incomplete workspace listing is never used to authorize orphan cleanup',async()=>{
+  const api={workspaces:{list:async()=>({entries:[workspace('one')],pageInfo:{hasMore:true,nextCursor:null}})}} as unknown as Paseo;
+  await assert.rejects(listBrowserWorkspaces(api),/列表暂不完整/);
+});

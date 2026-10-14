@@ -1,5 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { completionReadState, type AgentRecord } from "./model";
+import { withoutUserinfo } from "./change-request";
 
 /**
  * 定时运行: every run of every Paseo schedule on this host, joined with the Agent and workspace it produced.
@@ -40,6 +42,12 @@ export const scheduleSummarySchema = z.object({
   /** Up to the last 10 run statuses, oldest first: the health strip. */
   recent: z.array(runStatusSchema).max(10), total: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(), running: z.number().int().nonnegative(),
+  /** The raw cron (null for intervals): a fixed date in it is the wall date a one-shot's local time is compared with. */
+  expression: z.string().max(120).nullable().optional(),
+  /** Paseo completes the schedule after this many finished runs; 1 is a one-shot. */
+  maxRuns: z.number().int().positive().nullable().optional(),
+  /** A one-shot's absolute time: its next run, or when its last run was due. */
+  onceAt: z.string().nullable().optional(),
 });
 export type ScheduleSummary = z.infer<typeof scheduleSummarySchema>;
 
@@ -49,9 +57,14 @@ export type RunWindow = keyof typeof RUN_WINDOWS;
 const revision = z.string().min(1).max(80);
 export const listScheduleRuns = defineRpc({
   name: "observatory.schedules.list",
-  input: z.object({ revision: revision.optional(), window: z.enum(["recent", "all"]).optional() }),
+  /** `query` searches on the server, through each run's full recorded reply (see `normalizeRunQuery`). */
+  input: z.object({ revision: revision.optional(), window: z.enum(["recent", "all"]).optional(), query: z.string().max(400).optional() }),
   output: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("full"), unchanged: z.literal(false), revision, generatedAt: z.string(), window: z.enum(["recent", "all"]),
+      /** The normalized query the runs were filtered by ("" for none); runs, older and truncated count matches only. */
+      query: z.string().max(200).optional(),
+      /** Some replies were too long to search in one request: those runs matched on their name, error and links only. */
+      searchLimited: z.boolean().optional(),
       schedules: z.array(scheduleSummarySchema).max(400), runs: z.array(scheduleRunRowSchema).max(800),
       /** Runs left out by the window or the cap; 「加载更早」 asks for the 「全部」 window. */
       older: z.number().int().nonnegative(), olderHeartbeats: z.number().int().nonnegative(), truncated: z.boolean(),
@@ -83,6 +96,151 @@ export const getScheduleRun = defineRpc({
 });
 export type ScheduleRunDetail = z.infer<typeof getScheduleRun.output>;
 
+/**
+ * A heartbeat (a schedule that prompts an existing Agent) as the Agent it wakes shows it: on its session row
+ * (「22:35 唤醒」) and on top of its 结果. Built from the schedule files only; nothing about the Agent is read.
+ */
+export const heartbeatSummarySchema = z.object({
+  scheduleId: z.string().max(80), agentId: z.string().max(256), name: z.string().max(200),
+  status: z.enum(["active", "paused", "completed"]), cadence: z.string().max(160), timezone: z.string().max(80).nullable(),
+  expression: z.string().max(120).nullable(), maxRuns: z.number().int().positive().nullable(), once: z.boolean(),
+  nextRunAt: z.string().nullable(), onceAt: z.string().nullable(),
+  /** Runs recorded so far (a running one included); with `maxRuns` this reads 第 2/3 次. */
+  runs: z.number().int().nonnegative(),
+  lastRun: z.object({ status: runStatusSchema, startedAt: z.string(), endedAt: z.string().nullable(), error: z.string().max(300).nullable() }).nullable(),
+});
+export type HeartbeatSummary = z.infer<typeof heartbeatSummarySchema>;
+/** The heartbeats RPC lists the 500 most relevant heartbeats and names at most 5000 Agents a live one wakes. */
+export const HEARTBEAT_LIST_MAX = 500, HEARTBEAT_TARGETS_MAX = 5000;
+/**
+ * Active and paused heartbeats, and completed ones whose last run is at most 7 days old; unchanged polls are a few bytes. The fields
+ * after `heartbeats` are what 归档已读完成 needs to show that a session has no heartbeat (codex-F16); a response without them (an older
+ * server) shows nothing of the kind.
+ */
+export const getScheduleHeartbeats = defineRpc({
+  name: "observatory.schedules.heartbeats",
+  /** `fresh` reads the schedule files now instead of reusing a build up to 10 minutes old (归档已读完成's second tap). */
+  input: z.object({ revision: revision.optional(), fresh: z.boolean().optional() }),
+  output: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("full"), unchanged: z.literal(false), revision, generatedAt: z.string(), heartbeats: z.array(heartbeatSummarySchema).max(HEARTBEAT_LIST_MAX),
+      /** `heartbeats` left some out (the least relevant). */ truncated: z.boolean().optional(),
+      /** The schedules directory or a schedule file could not be read, in one Chinese sentence: whom heartbeats wake is not fully known. */
+      error: z.string().max(300).nullable().optional(),
+      /** The scan read every schedule file and `targets` names every Agent a live heartbeat wakes. */ complete: z.boolean().optional(),
+      /** Every Agent an active or paused heartbeat wakes, beyond the listed ones too: archiving it would complete those heartbeats. */
+      targets: z.array(z.string().max(256)).max(HEARTBEAT_TARGETS_MAX).optional() }),
+    z.object({ mode: z.literal("unchanged"), unchanged: z.literal(true), revision }),
+  ]),
+});
+export type HeartbeatsResponse = z.infer<typeof getScheduleHeartbeats.output>;
+export type HeartbeatsState = Extract<HeartbeatsResponse, { mode: "full" }>;
+export function mergeHeartbeats(previous: HeartbeatsState | undefined, response: HeartbeatsResponse): HeartbeatsState {
+  if (response.mode === "full") return response;
+  if (!previous) throw new Error("本地心跳缓存已失效，正在重新读取。");
+  return previous;
+}
+
+/**
+ * Whether a heartbeat read can show that a session has no heartbeat (codex-F16). Only a successful read of every schedule file can: a
+ * failed request, a read error or an incomplete scan leaves it `ready: false` with a Chinese reason for the menu. `targets` are the
+ * Agents an active or paused heartbeat wakes; archiving one would complete those heartbeats (Paseo's `completeForAgent`).
+ */
+export type HeartbeatGuard = { ready: true; targets: ReadonlySet<string> } | { ready: false; reason: string };
+export function heartbeatGuard(state: HeartbeatsState | null | undefined, failed = false): HeartbeatGuard {
+  if (failed) return { ready: false, reason: "心跳读取失败，暂时无法确认哪些会话还有心跳。" };
+  if (!state) return { ready: false, reason: "正在读取心跳，读到之前不能批量归档。" };
+  if (state.error) return { ready: false, reason: state.error };
+  if (state.complete !== true || !state.targets) return { ready: false, reason: "定时任务没有全部读到，无法确认哪些会话还有心跳。" };
+  const targets = new Set(state.targets);
+  for (const heartbeat of state.heartbeats) if (heartbeat.status !== "completed") targets.add(heartbeat.agentId);
+  return { ready: true, targets };
+}
+/** 归档已读完成 waits while the session list is cut short: an Agent below a read session may be among those not loaded. */
+export const ARCHIVE_PARTIAL_LIST = "会话较多，只加载了一部分，看不全子 Agent，暂时不能批量归档。";
+/** `truncated`: `agents` is not every unarchived Agent (the directory read was cut short, its `truncated`). */
+export interface ArchiveListState { truncated?: boolean }
+export interface ArchiveOffer {
+  candidates: AgentRecord[];
+  /** Sessions that would be offered but wait: the heartbeat read cannot be trusted yet, or the session list was cut short. */
+  withheld: number;
+  /** Why the `withheld` sessions wait, in one Chinese sentence; absent when none do. */
+  reason?: string;
+  /**
+   * Read sessions left out for an Agent below them that has to stay (unread, stopped on a limit, running, not completed or woken by a
+   * heartbeat): Paseo archives an archived Agent's children with it and completes their heartbeats.
+   */
+  sparedForChildren: number;
+}
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["running", "waiting", "initializing"]);
+/** A session 归档已读完成 may take on its own account: completed, its result read, no stop to come back for. */
+const settledAlone = (agent: AgentRecord) => !agent.archivedAt && agent.status === "completed" && completionReadState(agent) === "read" && !agent.stop;
+/**
+ * The sessions of `scope` that may go on their own account, with nothing running above them, and `keptBelow`: whether an Agent below
+ * one of them must stay. Archiving an Agent makes Paseo archive every unarchived Agent whose parent label names it, in its workspace and
+ * without an open tab, and theirs in turn (`cascadeArchiveChildren`), and complete each one's heartbeats (`completeForAgent`). Which
+ * children Paseo would only detach (another workspace, an open tab) is not visible here, so every unarchived descendant counts.
+ */
+function archiveReview(agents: readonly AgentRecord[], scope: readonly AgentRecord[]) {
+  const byId = new Map(agents.map(agent => [agent.id, agent])), children = new Map<string, AgentRecord[]>();
+  for (const agent of agents) if (agent.parentAgentId && !agent.archivedAt) { const list = children.get(agent.parentAgentId); if (list) list.push(agent); else children.set(agent.parentAgentId, [agent]); }
+  const ancestors = (agent: AgentRecord) => {
+    const ids: string[] = [];
+    for (let parent = agent.parentAgentId; parent && !ids.includes(parent); parent = byId.get(parent)?.parentAgentId ?? null) ids.push(parent);
+    return ids;
+  };
+  const live = new Set(agents.filter(agent => LIVE_STATUSES.has(agent.status)).map(agent => agent.id));
+  // Anything running anywhere below keeps its whole line of ancestors; anything running above keeps its descendants.
+  const busy = new Set([...live].flatMap(id => [id, ...ancestors(byId.get(id)!)]));
+  const settled = scope.filter(agent => settledAlone(agent) && !ancestors(agent).some(id => live.has(id)));
+  /** Breadth first through unarchived children (a cycle of parent labels ends where it began): one not settled, or woken by `targets`, stays. */
+  const keptBelow = (agent: AgentRecord, targets: ReadonlySet<string>) => {
+    if (busy.has(agent.id)) return true;
+    const seen = new Set([agent.id]), queue = [agent.id];
+    for (let index = 0; index < queue.length; index++) for (const child of children.get(queue[index]!) ?? []) {
+      if (seen.has(child.id)) continue;
+      if (!settledAlone(child) || targets.has(child.id)) return true;
+      seen.add(child.id); queue.push(child.id);
+    }
+    return false;
+  };
+  return { settled, keptBelow };
+}
+/**
+ * 归档已读完成 (opus-B18): completed sessions of `scope` whose result was read, with no stop to come back for, nothing running anywhere
+ * above or below them, no active or paused heartbeat, and no Agent below them (in `agents`) that would have to stay: archiving takes
+ * those along (see `archiveReview`); they count in `sparedForChildren`. While `guard` is not ready nothing can be shown to have no
+ * heartbeat, and while the session list is cut short (`list.truncated`) not every Agent below is known: there are no candidates, and
+ * `withheld` counts the sessions that would be offered otherwise, with the `reason` the menu shows.
+ */
+export function archiveReadCandidates(agents: readonly AgentRecord[], scope: readonly AgentRecord[], guard: HeartbeatGuard, list: ArchiveListState = {}): ArchiveOffer {
+  const { settled, keptBelow } = archiveReview(agents, scope), targets = guard.ready ? guard.targets : new Set<string>();
+  const own = settled.filter(agent => !targets.has(agent.id)), clear = own.filter(agent => !keptBelow(agent, targets));
+  const sparedForChildren = own.length - clear.length, reason = list.truncated ? ARCHIVE_PARTIAL_LIST : guard.ready ? null : guard.reason;
+  if (reason !== null) return { candidates: [], withheld: clear.length, ...(clear.length ? { reason } : {}), sparedForChildren };
+  return { candidates: clear, withheld: 0, sparedForChildren };
+}
+/**
+ * 归档已读完成's second tap: the marked sessions still eligible under `fresh`, a heartbeat read made for this tap, and the Agents below
+ * them as they are now. A read that cannot be trusted, or a cut session list, archives nothing. `spared` counts marked sessions a
+ * heartbeat now wakes, `sparedForChildren` those an Agent below now keeps (it has a heartbeat, a new turn, an unread result or a stop),
+ * `changed` those that moved on themselves (a new turn).
+ */
+export function confirmArchive(marked: ReadonlySet<string>, agents: readonly AgentRecord[], scope: readonly AgentRecord[], fresh: HeartbeatGuard, list: ArchiveListState = {}):
+  { ok: false; reason: string } | { ok: true; ids: string[]; spared: number; sparedForChildren: number; changed: number } {
+  if (list.truncated) return { ok: false, reason: ARCHIVE_PARTIAL_LIST };
+  if (!fresh.ready) return { ok: false, reason: fresh.reason };
+  const { settled, keptBelow } = archiveReview(agents, scope), ids: string[] = [];
+  let still = 0, spared = 0, sparedForChildren = 0;
+  for (const agent of settled) {
+    if (!marked.has(agent.id)) continue;
+    still++;
+    if (fresh.targets.has(agent.id)) spared++;
+    else if (keptBelow(agent, fresh.targets)) sparedForChildren++;
+    else ids.push(agent.id);
+  }
+  return { ok: true, ids, spared, sparedForChildren, changed: marked.size - still };
+}
+
 // ---------- pure helpers ----------
 
 const PULL_REQUEST = /https?:\/\/[^\s<>()[\]"'`]+?\/(?:pull|pulls|merge_requests)\/(\d+)(?=[^\w/]|$)/;
@@ -92,7 +250,7 @@ export function findChangeRequest(text: string | null | undefined): RunLink | nu
   const match = PULL_REQUEST.exec(text);
   if (!match) return null;
   const mr = /\/merge_requests\//.test(match[0]);
-  return { url: match[0].slice(0, 2000), label: `${mr ? "!" : "#"}${match[1]}`, kind: mr ? "mr" : "pr", state: null };
+  return { url: withoutUserinfo(match[0]).slice(0, 2000), label: `${mr ? "!" : "#"}${match[1]}`, kind: mr ? "mr" : "pr", state: null };
 }
 
 /** A preview only needs the start of a reply; a run's output can be megabytes of agent-written text. */
@@ -113,31 +271,136 @@ export function previewOf(text: string | null | undefined, max = 280): string | 
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const pad = (value: number) => String(value).padStart(2, "0");
-/** Common cron shapes in Chinese (每 6 小时 / 每天 09:30 / 工作日 09:00 / 每周五 18:00); anything else stays as written. */
-export function cadenceLabel(cadence: { type: "cron"; expression: string; timezone?: string | null } | { type: "every"; everyMs: number }): string {
+
+/**
+ * One cron field as Paseo 0.11 reads it (its `parseCronExpression`): `*`, numbers, `a-b` ranges, `/n` steps and comma lists; no
+ * names, no `?` `L` `W` `#`; weekdays 0–6. `step` is set for a lone `*\/n`, `range` for a lone `a-b` without a step.
+ */
+interface CronField { values: readonly number[]; all: boolean; step: number | null; range: readonly [number, number] | null }
+export interface CronSpec { minute: CronField; hour: CronField; day: CronField; month: CronField; weekday: CronField }
+const CRON_BOUNDS: readonly (readonly [number, number])[] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+function cronField(source: string, [min, max]: readonly [number, number]): CronField | null {
+  const parts = source.split(","), values = new Set<number>();
+  let step: number | null = null, range: [number, number] | null = null;
+  for (const raw of parts) {
+    const part = raw.trim(), pieces = part.split("/");
+    if (!part || pieces.length > 2) return null;
+    const [base, stepText] = pieces as [string, string | undefined];
+    const by = stepText === undefined ? 1 : Number.parseInt(stepText.trim(), 10);
+    // Like Paseo: a step is a plain positive integer ("05" and "2x" are errors).
+    if (!Number.isInteger(by) || by <= 0 || (stepText !== undefined && String(by) !== stepText.trim())) return null;
+    let from = min, to = max, stride = by;
+    if (base !== "*") {
+      const match = /^(\d+)(?:-(\d+))?$/.exec(base);
+      if (!match) return null;
+      from = Number(match[1]); to = match[2] === undefined ? from : Number(match[2]);
+      if (from > to || from < min || to > max) return null;
+      // A single value ignores its step, as in Paseo ("5/10" is minute 5 only).
+      if (match[2] === undefined) stride = 1; else if (parts.length === 1 && by === 1) range = [from, to];
+    } else if (parts.length === 1 && by > 1) step = by;
+    for (let value = from; value <= to; value += stride) values.add(value);
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  return { values: sorted, all: sorted.length === max - min + 1, step, range };
+}
+/** A five-field cron in Paseo's dialect, or null when Paseo would reject it. */
+export function parseCron(expression: string): CronSpec | null {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const parsed = fields.map((field, index) => cronField(field, CRON_BOUNDS[index]!));
+  if (parsed.some(field => !field)) return null;
+  const [minute, hour, day, month, weekday] = parsed as CronField[];
+  return { minute: minute!, hour: hour!, day: day!, month: month!, weekday: weekday! };
+}
+
+const clockText = (hour: number, minute: number) => `${pad(hour)}:${pad(minute)}`;
+/** Every n minutes from :00 — `*`, `*\/n`, or an evenly spaced list such as 0,30 — else null. */
+function minuteInterval(field: CronField): number | null {
+  if (field.all) return 1;
+  if (field.step) return field.step;
+  const [first, second] = field.values;
+  if (first !== 0 || second === undefined) return null;
+  const gap = second;
+  return 60 % gap === 0 && field.values.length === 60 / gap && field.values.every((value, index) => value === index * gap) ? gap : null;
+}
+/** Times of day (at most 6, 09:00、18:00) or a repeating part (每 15 分钟, 9–18 点每 15 分钟, 每 6 小时, 每小时（整点后 5 分）). */
+function timePart(minute: CronField, hour: CronField): { at: string[] } | { every: string } | null {
+  const interval = minuteInterval(minute);
+  if (interval) {
+    const every = interval === 1 ? "每分钟" : `每 ${interval} 分钟`;
+    if (hour.all) return { every };
+    const span = hour.range ? `${hour.range[0]}–${hour.range[1]} 点` : hour.values.length <= 4 ? `${hour.values.join("、")} 点` : null;
+    return span ? { every: `${span}${every}` } : null;
+  }
+  if (minute.values.length === 1) {
+    const at = minute.values[0]!, offset = at ? `（整点后 ${at} 分）` : "";
+    if (hour.all) return { every: `每小时${offset}` };
+    if (hour.step) return { every: `每 ${hour.step} 小时${offset}` };
+    if (hour.values.length <= 6) return { at: hour.values.map(value => clockText(value, at)) };
+    return hour.range ? { every: `${hour.range[0]}–${hour.range[1]} 点每小时${offset}` } : null;
+  }
+  return !hour.all && minute.values.length * hour.values.length <= 6 ? { at: hour.values.flatMap(value => minute.values.map(at => clockText(value, at))) } : null;
+}
+/** 工作日 / 周末 / 每周五 / 周一至周三 / 每周一、三、五 (Monday first). */
+function weekdayText(field: CronField): string {
+  const days = [...field.values].sort((a, b) => (a + 6) % 7 - (b + 6) % 7), key = days.join(",");
+  if (key === "1,2,3,4,5") return "工作日";
+  if (key === "6,0") return "周末";
+  if (days.length === 1) return `每${WEEKDAYS[days[0]!]}`;
+  if (field.range && field.range[1] - field.range[0] >= 2) return `${WEEKDAYS[field.range[0]]}至${WEEKDAYS[field.range[1]]}`;
+  return `每${WEEKDAYS[days[0]!]}、${days.slice(1).map(day => WEEKDAYS[day]!.slice(1)).join("、")}`;
+}
+/** 1 日 / 1、15 日 / 1–7 日 (or months), at most 6 listed values. */
+function listText(field: CronField, unit: string): string | null {
+  if (field.range) return `${field.range[0]}–${field.range[1]} ${unit}`;
+  return field.values.length <= 6 ? `${field.values.join("、")} ${unit}` : null;
+}
+function dayPart(day: CronField, month: CronField, weekday: CronField): { text: string; date: boolean } | null {
+  // A day of month and a weekday together: Paseo 0.11 runs only when both match, standard cron when either does. Neither
+  // reading is claimed; the expression is shown as written (the next run time always comes from Paseo itself).
+  if (!day.all && !weekday.all) return null;
+  const weekdays = weekday.all ? null : weekdayText(weekday), months = month.all ? null : listText(month, "月");
+  if (!month.all && !months) return null;
+  if (day.all) return { text: months ? `${months}${weekdays ?? "每天"}` : weekdays ?? "每天", date: false };
+  if (!months) { const days = listText(day, "日"); return days ? { text: `每月 ${days}`, date: false } : null; }
+  if (month.values.length === 1 && day.values.length === 1) return { text: `${month.values[0]}月${day.values[0]}日`, date: true };
+  const days = listText(day, "日");
+  return days ? { text: `每年 ${months} ${days}`, date: false } : null;
+}
+function describeCron(expression: string, maxRuns: number | null): string | null {
+  const spec = parseCron(expression);
+  const time = spec && timePart(spec.minute, spec.hour), day = spec && dayPart(spec.day, spec.month, spec.weekday);
+  if (!time || !day) return null;
+  const once = maxRuns === 1, dayText = day.date ? `每年 ${day.text}` : day.text;
+  if ("every" in time) return once ? "一次性" : dayText === "每天" ? time.every : `${dayText} ${time.every}`;
+  const times = time.at.join("、");
+  if (!once) return `${dayText} ${times}`;
+  return `一次性 · ${day.text === "每天" ? "" : `${day.text} `}${times}`;
+}
+
+/**
+ * A cadence in Chinese, without its zone: 每 30 分钟 / 每天 09:00、18:00 / 工作日 9–18 点每 15 分钟 / 每月 1 日 09:00 /
+ * 每周一、三、五 09:00 / 每年 10月11日 22:35, and 一次性 · 10月11日 22:35 when Paseo stops after one run (`maxRuns` 1). What it
+ * cannot say exactly stays as written. `cadenceText` adds the zone, 共 N 次 and a one-shot's local time.
+ */
+export function cadenceLabel(cadence: { type: "cron"; expression: string; timezone?: string | null } | { type: "every"; everyMs: number }, maxRuns: number | null = null): string {
   if (cadence.type === "every") {
+    if (maxRuns === 1) return "一次性";
     const minutes = Math.round(cadence.everyMs / 60_000);
     return minutes % 1440 === 0 ? `每 ${minutes / 1440} 天` : minutes % 60 === 0 ? `每 ${minutes / 60} 小时` : `每 ${minutes} 分钟`;
   }
-  const fields = cadence.expression.trim().split(/\s+/);
-  let text = cadence.expression.trim();
-  if (fields.length === 5) {
-    const [minute, hour, day, month, weekday] = fields as [string, string, string, string, string];
-    const at = /^\d+$/.test(minute) && /^\d+$/.test(hour) ? `${pad(Number(hour))}:${pad(Number(minute))}` : null;
-    const every = (field: string) => /^\*\/(\d+)$/.exec(field)?.[1];
-    if (day === "*" && month === "*" && weekday === "*") {
-      if (every(minute) && hour === "*") text = `每 ${every(minute)} 分钟`;
-      else if (/^\d+$/.test(minute) && every(hour)) text = `每 ${every(hour)} 小时`;
-      else if (/^\d+$/.test(minute) && hour === "*") text = "每小时";
-      else if (at) text = `每天 ${at}`;
-    } else if (day === "*" && month === "*" && at) {
-      if (weekday === "1-5") text = `工作日 ${at}`;
-      else if (/^[0-7]$/.test(weekday)) text = `每${WEEKDAYS[Number(weekday) % 7]} ${at}`;
-    }
-  }
-  return text;
+  const expression = cadence.expression.trim();
+  const text = describeCron(expression, maxRuns) ?? (maxRuns === 1 ? `一次性 · ${expression}` : expression);
+  return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+}
+/** The wall date of a fixed-date cron (`35 22 11 10 *`), else null. */
+function fixedDate(expression: string | null | undefined): { month: number; day: number } | null {
+  const spec = expression ? parseCron(expression) : null;
+  if (!spec || !spec.weekday.all || ![spec.minute, spec.hour, spec.day, spec.month].every(field => field.values.length === 1)) return null;
+  return { month: spec.month.values[0]!, day: spec.day.values[0]! };
 }
 
+// A display-name table only: no zone is ever assumed. A cron without one runs in UTC (Paseo's rule), the device's comes from Intl.
 const ZONE_NAMES: Record<string, string> = { UTC: "UTC", "Etc/UTC": "UTC", GMT: "UTC", "Asia/Shanghai": "北京时间", "Asia/Hong_Kong": "香港时间", "Asia/Taipei": "台北时间", "Asia/Tokyo": "东京时间",
   "America/Los_Angeles": "太平洋时间", "America/Denver": "山地时间", "America/Chicago": "中部时间", "America/New_York": "美东时间", "Europe/London": "伦敦时间", "Europe/Berlin": "柏林时间" };
 const sameZone = (a: string, b: string) => (ZONE_NAMES[a] === "UTC" && ZONE_NAMES[b] === "UTC") || a === b;
@@ -147,10 +410,88 @@ export function deviceTimeZone(): string | null {
 }
 /** 「北京时间」「UTC」「Los Angeles」. */
 export function zoneLabel(zone: string): string { return ZONE_NAMES[zone] ?? zone.split("/").at(-1)!.replaceAll("_", " "); }
-/** A cron cadence shows its zone when it differs from the device's (Paseo runs zone-less crons in UTC). */
-export function cadenceText(schedule: { cadence: string; timezone: string | null }, device: string | null): string {
-  if (!schedule.cadence || !schedule.timezone || (device && sameZone(schedule.timezone, device))) return schedule.cadence;
-  return `${schedule.cadence}（${zoneLabel(schedule.timezone)}）`;
+
+/** 22:35 in the device's zone. */
+export function clockOf(ms: number): string { const date = new Date(ms); return clockText(date.getHours(), date.getMinutes()); }
+/** 今天 / 明天 / 昨天, else 10月13日: the device-local day of `ms` seen from `now`. */
+export function dayWord(ms: number, now: number): string {
+  const days = Math.round((startOfDay(ms) - startOfDay(now)) / DAY);
+  return days === 0 ? "今天" : days === 1 ? "明天" : days === -1 ? "昨天" : monthDay(ms);
+}
+
+export interface CadenceInfo { cadence: string; timezone: string | null; expression?: string | null; maxRuns?: number | null; onceAt?: string | null }
+/**
+ * A cadence as cards show it: the zone when it differs from the device's (Paseo runs zone-less crons in UTC), 共 N 次 when Paseo stops
+ * after N runs, and for a one-shot the device's own time of its run, from the absolute time Paseo computed: 一次性 · 10月11日 22:35（东京时间）·
+ * 本地 09:35, with the local date when it is not the cron's. A one-shot without a fixed date reads 一次性 · 明天 09:35 in device time.
+ */
+export function cadenceText(schedule: CadenceInfo, device: string | null, now = Date.now()): string {
+  if (!schedule.cadence) return schedule.cadence;
+  const zone = schedule.timezone && !(device && sameZone(schedule.timezone, device)) ? schedule.timezone : null;
+  // A full-width bracket already spaces the dot: 「（东京时间）· 本地 09:35」.
+  const zoned = zone ? `${schedule.cadence}（${zoneLabel(zone)}）` : schedule.cadence, dot = zone ? "· " : " · ";
+  if (schedule.maxRuns !== 1) return schedule.maxRuns ? `${zoned}${dot}共 ${schedule.maxRuns} 次` : zoned;
+  const at = parseTime(schedule.onceAt);
+  if (!at) return zoned;
+  const wall = fixedDate(schedule.expression);
+  if (!wall) return `一次性 · ${zone ? "本地 " : ""}${dayWord(at, now)} ${clockOf(at)}`;
+  if (!zone) return zoned;
+  const local = new Date(at), sameDate = local.getMonth() + 1 === wall.month && local.getDate() === wall.day;
+  return `${zoned}${dot}本地 ${sameDate ? "" : `${monthDay(at)} `}${clockOf(at)}`;
+}
+/** 第 2/3 次 for a schedule Paseo stops after `maxRuns` (还没运行 before the first), else 共 7 次. */
+export function runQuota(total: number, maxRuns: number | null | undefined): string {
+  return maxRuns ? total ? `第 ${total}/${maxRuns} 次` : "还没运行" : `共 ${total} 次`;
+}
+
+const HEARTBEAT_ORDER = { active: 0, paused: 1, completed: 2 } as const;
+const lastRunAt = (heartbeat: HeartbeatSummary) => parseTime(heartbeat.lastRun?.endedAt) || parseTime(heartbeat.lastRun?.startedAt);
+/** Heartbeats by the Agent they wake: active ones by next run, then paused ones, then finished ones (latest first). */
+export function heartbeatsByAgent(heartbeats: readonly HeartbeatSummary[]): Map<string, HeartbeatSummary[]> {
+  const sorted = [...heartbeats].sort((a, b) => HEARTBEAT_ORDER[a.status] - HEARTBEAT_ORDER[b.status]
+    || (a.status === "completed" ? lastRunAt(b) - lastRunAt(a) : (parseTime(a.nextRunAt) || Infinity) - (parseTime(b.nextRunAt) || Infinity)) || a.scheduleId.localeCompare(b.scheduleId));
+  const byAgent = new Map<string, HeartbeatSummary[]>();
+  for (const heartbeat of sorted) { const list = byAgent.get(heartbeat.agentId); if (list) list.push(heartbeat); else byAgent.set(heartbeat.agentId, [heartbeat]); }
+  return byAgent;
+}
+export interface HeartbeatWake { state: "running" | "scheduled" | "due" | "paused"; label: string; description: string; at: number | null; soon: boolean }
+/**
+ * What an Agent's session row says about its heartbeats: 心跳唤醒中 while one runs; else the next wake in device time — 22:35 唤醒
+ * today, 明天 07:35 唤醒, 10月13日 07:35 唤醒 (即将唤醒 once it is due); 心跳已暂停 when every live one is paused; null when all finished.
+ */
+export function heartbeatWake(heartbeats: readonly HeartbeatSummary[] | null | undefined, now: number): HeartbeatWake | null {
+  if (!heartbeats?.length) return null;
+  if (heartbeats.some(item => item.lastRun?.status === "running")) return { state: "running", label: "心跳唤醒中", description: "心跳正在唤醒这个 Agent", at: null, soon: true };
+  let next: { at: number; once: boolean } | null = null;
+  for (const item of heartbeats) { const at = item.status === "active" ? parseTime(item.nextRunAt) : 0; if (at && (!next || at < next.at)) next = { at, once: item.once }; }
+  if (next) {
+    const day = dayWord(next.at, now), description = `心跳会在 ${monthDay(next.at)} ${clockOf(next.at)} 唤醒这个 Agent${next.once ? "（一次性）" : ""}`;
+    if (next.at <= now) return { state: "due", label: "即将唤醒", description, at: next.at, soon: true };
+    return { state: "scheduled", label: `${day === "今天" ? "" : `${day} `}${clockOf(next.at)} 唤醒`, description, at: next.at, soon: next.at - now <= 15 * 60_000 };
+  }
+  return heartbeats.some(item => item.status === "paused") ? { state: "paused", label: "心跳已暂停", description: "这个 Agent 的心跳已暂停", at: null, soon: false } : null;
+}
+
+/** Search text: NFKC (full-width letters and digits read as plain ones) in lower case. Chinese matches as substrings. */
+export function searchFold(text: string): string {
+  let folded = text;
+  try { folded = text.normalize("NFKC"); } catch { /* a runtime without normalization compares the text as typed */ }
+  return folded.toLowerCase();
+}
+/** At most 8 distinct folded words of a query; a run must contain every one. */
+export function searchWords(query: string): string[] {
+  return [...new Set(searchFold(query.slice(0, 400)).split(/\s+/).filter(Boolean))].slice(0, 8);
+}
+/**
+ * The query as the server applies and echoes it, so the page can tell whose results it holds: folded words joined by single spaces,
+ * at most 200 characters (a word cut short still matches as a prefix).
+ */
+export function normalizeRunQuery(query: string): string {
+  return searchWords(query).join(" ").slice(0, 200).trim();
+}
+/** A run's searchable fields besides its reply, folded: schedule, Agent, workspace, branch, preview, error, link and project. */
+export function runSearchText(run: ScheduleRunRow): string {
+  return searchFold([run.scheduleName, run.agent?.title, run.workspace?.name, run.workspace?.branch, run.preview, run.error, run.link?.label, run.link?.url, run.projectName].filter(Boolean).join("\n"));
 }
 
 export function parseTime(value: string | null | undefined): number {
@@ -198,16 +539,18 @@ export function groupRunsByDay(runs: readonly ScheduleRunRow[], now: number): Ru
 
 export interface RunFilter { status: RunStatus | "all"; scheduleId: string | "all"; heartbeats: boolean; query: string }
 export const EMPTY_RUN_FILTER: RunFilter = { status: "all", scheduleId: "all", heartbeats: false, query: "" };
-/** Every word must appear in the schedule name, Agent title, workspace, branch, preview, error or link. */
+/**
+ * Status, schedule and heartbeat choices; `query` matches what a row carries (schedule name, Agent title, workspace, branch,
+ * preview, error, link) — the server's search also reads each full reply, so the page passes "" once the server applied it.
+ */
 export function filterRuns(runs: readonly ScheduleRunRow[], filter: RunFilter): ScheduleRunRow[] {
-  const words = filter.query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const words = searchWords(filter.query);
   return runs.filter(run => {
     if (!filter.heartbeats && run.kind === "heartbeat" && filter.scheduleId !== run.scheduleId) return false;
     if (filter.scheduleId !== "all" && run.scheduleId !== filter.scheduleId) return false;
     if (filter.status !== "all" && run.status !== filter.status) return false;
     if (!words.length) return true;
-    const haystack = [run.scheduleName, run.agent?.title, run.workspace?.name, run.workspace?.branch, run.preview, run.error, run.link?.label, run.link?.url, run.projectName]
-      .filter(Boolean).join("\n").toLocaleLowerCase();
+    const haystack = runSearchText(run);
     return words.every(word => haystack.includes(word));
   });
 }

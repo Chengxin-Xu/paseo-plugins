@@ -5,12 +5,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { INBOX_PROJECT_ID, type BoardItem } from "../shared/board";
 import { launchOptionsRpc, launchRpc, launchStatusRpc, type LaunchInput, type LaunchOptions, type LaunchReceipt } from "../shared/launch";
-import { Banner, Button, Divider, MetaLine, ProjectMark, SearchField, Segmented, Skeleton, Spacer, fontSize, hairline, radius, space, toneColor, type Tone } from "./kit";
+import { Banner, Button, Divider, aria, MetaLine, ProjectMark, SearchField, Segmented, Skeleton, Spacer, fontSize, hairline, radius, space, toneColor, type Tone } from "./kit";
 import { FieldLabel, FormField, PickerButton } from "./ui";
 import { useForeground } from "./visibility";
 
 type Form = { projectId: string; title: string; prompt: string; isolation: "local" | "worktree"; baseBranch: string; profileId: string | null; provider: string; model: string; modeId: string; thinkingOptionId: string };
-type LaunchSession = { launchId: string; form: Form; input: LaunchInput | null; receipt: LaunchReceipt | null; error: string | null; initialized: boolean; autoOpened: boolean; options: LaunchOptions | null; optionsProjectId: string | null; catalogProjectId: string | null; sourceRevision: number };
+type LaunchSession = { launchId: string; form: Form; input: LaunchInput | null; receipt: LaunchReceipt | null; error: string | null; initialized: boolean; autoOpened: boolean; options: LaunchOptions | null; optionsProjectId: string | null; catalogProjectId: string | null; sourceRevision: number; sourceTitle: string; sourceBody: string; emptyStatusCount: number };
 const sessions = new Map<string, LaunchSession>();
 let launchSequence = 0;
 const stageRank: Record<LaunchReceipt["stage"] | "rejected", number> = { prepared: 0, creating_workspace: 1, workspace_ready: 2, creating_agent: 3, agent_ready: 4, sending: 5, rejected: 6, uncertain: 6, started: 7 };
@@ -22,6 +22,7 @@ const stageIcons = { started: "CircleCheck", uncertain: "TriangleAlert", rejecte
 const isolationTones = { worktree: "teal", local: "indigo" } as const;
 function newLaunchId() { return `launch-${Date.now().toString(36)}-${(++launchSequence).toString(36)}-${Math.random().toString(36).slice(2, 11)}`; }
 function message(error: unknown) { return error instanceof Error ? error.message : "请求未完成，请查询启动状态。"; }
+const canResetOptions = (receipt: LaunchReceipt | null) => Boolean(receipt?.stage === "rejected" && !receipt.workspaceId && !receipt.agentId);
 
 function sessionFor(hostId: string, item: BoardItem): LaunchSession {
   const key = `${hostId}:${item.projectId}:${item.id}`;
@@ -30,7 +31,7 @@ function sessionFor(hostId: string, item: BoardItem): LaunchSession {
   const session: LaunchSession = {
     launchId: newLaunchId(),
     form: { projectId: item.projectId === INBOX_PROJECT_ID ? "" : item.projectId, title: item.title, prompt: `${item.title}\n\n${item.body}`.trim(), isolation: "local", baseBranch: "", profileId: null, provider: "", model: "", modeId: "", thinkingOptionId: "" },
-    input: null, receipt: null, error: null, initialized: false, autoOpened: false, options: null, optionsProjectId: null, catalogProjectId: null, sourceRevision: item.revision,
+    input: null, receipt: null, error: null, initialized: false, autoOpened: false, options: null, optionsProjectId: null, catalogProjectId: null, sourceRevision: item.revision, sourceTitle: item.title, sourceBody: item.body, emptyStatusCount: 0,
   };
   sessions.set(key, session);
   return session;
@@ -66,7 +67,7 @@ function Select({ theme, label, value, options, onChange, disabled, hint }: {
     {hint ? <Hint theme={theme}>{hint}</Hint> : null}
     {expanded && !disabled ? <View style={{ borderWidth: hairline, borderColor: colors.border, borderRadius: radius.md, padding: space.xs, gap: space.xs }}>
       {options.length > 7 ? <SearchField theme={theme} value={search} onChangeText={setSearch} placeholder="搜索选项" accessibilityLabel={`搜索${label}`} /> : null}
-      <View>{rows.slice(0, 60).map(option => <Pressable key={option.id} accessibilityRole="button" accessibilityLabel={option.label} accessibilityState={{ selected: option.id === value }} onPress={() => { onChange(option.id); setExpanded(false); setSearch(""); }}
+      <View>{rows.slice(0, 60).map(option => <Pressable key={option.id} accessibilityRole="button" accessibilityLabel={option.label} accessibilityState={{ selected: option.id === value }} {...aria({ selected: option.id === value })} onPress={() => { onChange(option.id); setExpanded(false); setSearch(""); }}
         style={state => ({ minHeight: 40, paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.sm, flexDirection: "row", alignItems: "center", gap: space.sm, backgroundColor: option.id === value ? colors.surface2 : (state as Hover).hovered || (state as Hover).pressed ? colors.surface1 : "transparent" })}>
         {option.leading}
         <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
@@ -112,11 +113,14 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
     const value = await getStatus({ launchId });
     // A previous receipt query may settle after an explicit new intent began.
     if (session.launchId !== launchId) return value;
+    session.emptyStatusCount = value ? 0 : session.emptyStatusCount + 1;
     session.receipt = mergeReceipt(session.receipt, value);
     return session.receipt;
-  }, enabled: submitted, retry: false, refetchInterval: query => {
+  }, enabled: submitted, retry: false, staleTime: 1000, refetchOnWindowFocus: false, refetchInterval: query => {
     const stage = query.state.data?.stage ?? session.receipt?.stage;
-    return !foreground || stage === "started" || stage === "uncertain" || stage === "rejected" ? false : 2000;
+    if (!foreground || stage === "started" || stage === "uncertain" || stage === "rejected") return false;
+    // No durable receipt can also mean a delayed request: retain its exact input and bound polling.
+    return stage ? 2000 : session.emptyStatusCount >= 4 ? false : Math.min(2000 * 2 ** session.emptyStatusCount, 15000);
   }, refetchIntervalInBackground: false });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -128,13 +132,13 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
     const initial = { ...session.form, ...providerDefaults(provider), profileId: null, projectId: project?.id ?? "", isolation: project?.kind === "git" ? "worktree" as const : "local" as const };
     session.form = initial; session.initialized = true; session.catalogProjectId = optionsProjectId; setForm(initial);
   }, [options.data, optionsProjectId, session]);
-  useEffect(() => {
-    if (open && !session.input && session.sourceRevision !== item.revision) {
-      session.sourceRevision = item.revision;
-      session.form = { ...session.form, title: item.title, prompt: `${item.title}\n\n${item.body}`.trim() };
-      setForm(session.form);
-    }
-  }, [open, item.revision, item.title, item.body, session]);
+  const sourceChanged = session.sourceTitle !== item.title || session.sourceBody !== item.body;
+  const loadSource = () => {
+    if (session.input || submitting.current) return;
+    session.sourceRevision = item.revision; session.sourceTitle = item.title; session.sourceBody = item.body;
+    session.form = { ...session.form, title: item.title, prompt: `${item.title}\n\n${item.body}`.trim() };
+    setForm(session.form);
+  };
   useEffect(() => { if (status.data && status.data.launchId === session.launchId) { session.receipt = mergeReceipt(session.receipt, status.data); session.error = session.receipt?.error ?? null; setReceipt(session.receipt); setError(session.error); } }, [status.data, session]);
   const openResult = (current: LaunchReceipt, auto = false) => {
     try {
@@ -172,10 +176,11 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
     update({ provider: profile.provider, model: profile.model ?? defaults.model, modeId: profile.modeId ?? "", thinkingOptionId: profile.thinkingOptionId ?? "", profileId: profile.id });
   };
   const submit = async () => {
-    if (submitting.current || session.input || !canLaunch) return;
-    const input: LaunchInput = { launchId, sourceProjectId: item.projectId, itemId: item.id, projectId: form.projectId, title: form.title.trim(), prompt: form.prompt.trim(), isolation: form.isolation, ...(form.isolation === "worktree" && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}), profileId: form.profileId, provider: form.provider, model: form.model, modeId: form.modeId || null, thinkingOptionId: form.thinkingOptionId || null };
-    // Seal this intent before dispatch; reopening never generates a duplicate request.
-    session.input = input; submitting.current = true; setSubmitted(true); setLaunching(true); setError(null);
+    if (submitting.current || (!session.input && !canLaunch)) return;
+    const input: LaunchInput = session.input ?? { launchId, sourceProjectId: item.projectId, itemId: item.id, projectId: form.projectId, title: form.title.trim(), prompt: form.prompt.trim(), isolation: form.isolation, ...(form.isolation === "worktree" && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}), profileId: form.profileId, provider: form.provider, model: form.model, modeId: form.modeId || null, thinkingOptionId: form.thinkingOptionId || null };
+    // A retry replays the sealed input, even if the first response was lost after acceptance.
+    session.input = input; session.emptyStatusCount = 0; session.error = null;
+    submitting.current = true; setSubmitted(true); setLaunching(true); setError(null);
     try {
       const result = await launch(input);
       session.receipt = mergeReceipt(session.receipt, result); session.error = result.error;
@@ -188,17 +193,19 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
   };
   const copy = async (value: string) => { try { await copyText(value); toast.show("已复制", { variant: "success" }); } catch (failure) { setError(`复制失败：${message(failure)}`); } };
   const phase = receipt?.stage;
+  const retryable = submitted && !launching && !submitting.current && (!receipt || Boolean(error)) && phase !== "started" && phase !== "uncertain" && phase !== "rejected";
+  const missingReceipt = submitted && !receipt && !launching && status.isSuccess;
   const terminal = phase === "started" || phase === "uncertain" || phase === "rejected";
+  const canChangeOptions = canResetOptions(receipt);
   // A receipt's error shows inside the tinted status panel; the banner is for local failures (copy, open, network).
   const receiptError = receipt?.error ?? null, localError = error && error !== receiptError ? error : null;
-  const stageTone = stageTones[phase === "started" || phase === "uncertain" || phase === "rejected" ? phase : "running"];
+  const stageTone = missingReceipt ? "warning" : stageTones[phase === "started" || phase === "uncertain" || phase === "rejected" ? phase : "running"];
   // Stages fill the bar step by step; any outcome fills it in the outcome's color.
   const progress = terminal ? 1 : phase ? (stageRank[phase] + 1) / (stageRank.started + 1) : 0.06;
   const resetIntent = () => {
     const current = session.receipt;
-    if (launching || submitting.current || !current || (current.stage !== "started" && current.stage !== "rejected")) return;
-    if (current.stage === "rejected" && (current.workspaceId || current.agentId)) return;
-    session.launchId = newLaunchId(); session.input = null; session.receipt = null; session.error = null; session.autoOpened = false;
+    if (launching || submitting.current || !current || (current.stage !== "started" && !canResetOptions(current))) return;
+    session.launchId = newLaunchId(); session.input = null; session.receipt = null; session.error = null; session.autoOpened = false; session.emptyStatusCount = 0;
     setLaunchId(session.launchId); setReceipt(null); setSubmitted(false); setLaunching(false); setError(null); setNotice("选项可以修改。确认后再点击「创建工作区并开始」。");
   };
 
@@ -215,13 +222,14 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
   const half = { flexGrow: 1, flexBasis: 200, minWidth: 0 };
   return <Modal title="开始处理" open={open} onOpenChange={onOpenChange}>
     <Modal.Content contentContainerStyle={{ padding: space.xl, gap: space.lg }}>
-      <Hint theme={theme}>{`确认后在 ${host.label} 新建工作区并发送任务，原手记不变。`}</Hint>
+      <Hint theme={theme}>{`确认后在 ${host.label} 新建工作区，发送下方任务，并附手记的项目、状态、重点、标识和标题。原手记不变。`}</Hint>
       {options.isPending && !submitted ? <Skeleton theme={theme} rows={3} /> : null}
       {options.isError && !submitted ? <Banner theme={theme} tone="danger" message={message(options.error)} action={{ label: "重新读取", onPress: () => void options.refetch() }} /> : null}
       {submitted ? <View style={{ gap: space.xs }}>
         <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{form.title}</Text>
         <MetaLine theme={theme} numberOfLines={2} parts={[selectedProject?.name ?? form.projectId, worktree ? "独立 Worktree" : "项目目录", agentSummary]} />
       </View> : null}
+      {sourceChanged && !submitted ? <Banner theme={theme} tone="warning" message="手记已更新，当前标题和任务草稿已保留。载入最新会替换这两项。" action={{ label: "载入最新手记", onPress: loadSource }} /> : null}
       {options.data && !submitted ? <>
         <Select theme={theme} label="目标项目" value={form.projectId} options={projects.map(project => ({ id: project.id, label: project.name, detail: project.path, leading: <ProjectMark theme={theme} name={project.name} /> }))} onChange={projectId => { const project = projects.find(value => value.id === projectId); update({ projectId, isolation: project?.kind === "git" ? "worktree" : "local", baseBranch: "" }); }} hint={!form.projectId ? "随手记没有代码目录，请选择要开始工作的项目。" : undefined} />
         <FormField theme={theme} label="工作区标题" value={form.title} onChangeText={title => update({ title })} maxLength={160} />
@@ -238,7 +246,7 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
         </View>
         {worktree ? <FormField theme={theme} label="基础分支（可选）" value={form.baseBranch} onChangeText={baseBranch => update({ baseBranch })} maxLength={200} placeholder="留空使用项目当前 HEAD" /> : null}
         <Divider theme={theme} />
-        <Pressable accessibilityRole="button" accessibilityLabel="Agent 设置" accessibilityState={{ expanded: agentOpen }} onPress={() => setAgentExpanded(!agentOpen)} hitSlop={{ top: 6, bottom: 6 }}
+        <Pressable accessibilityRole="button" accessibilityLabel="Agent 设置" accessibilityState={{ expanded: agentOpen }} {...aria({ expanded: agentOpen })} onPress={() => setAgentExpanded(!agentOpen)} hitSlop={{ top: 6, bottom: 6 }}
           style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32 }}>
           <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
             <FieldLabel theme={theme}>Agent</FieldLabel>
@@ -263,7 +271,7 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
         <View style={{ gap: space.sm }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
             {phase === "started" || phase === "uncertain" || phase === "rejected" ? <Icon name={stageIcons[phase]} size={16} color={toneColor(theme, stageTone, "mark")} /> : <ActivityIndicator size="small" color={toneColor(theme, stageTone, "mark")} />}
-            <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{receipt ? stageLabels[receipt.stage] : "等待启动结果确认"}</Text>
+            <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{receipt ? stageLabels[receipt.stage] : missingReceipt ? "尚未查到启动记录" : "等待启动结果确认"}</Text>
           </View>
           <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={{ height: 4, borderRadius: 2, overflow: "hidden", backgroundColor: toneColor(theme, stageTone, "soft") }}>
             <View style={{ width: `${Math.round(progress * 100)}%`, height: 4, borderRadius: 2, backgroundColor: toneColor(theme, stageTone, "mark") }} />
@@ -271,13 +279,15 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
         </View>
         {/* The server's message already says what to do next, so it replaces the stage hint. */}
         {receiptError ? <Text selectable style={{ color: theme.colors.foreground, fontSize: fontSize.small, lineHeight: 19 }}>{receiptError}</Text>
-          : <Hint theme={theme}>{(phase && stageHints[phase]) ?? "只查询这次启动的状态，不会重新提交；关闭后从同一条手记可继续查看。"}</Hint>}
+          : <Hint theme={theme}>{missingReceipt ? "请求可能尚未到达，也可能仍在途中。可重试这次请求，使用原标识和原选项，不会重复创建。" : (phase && stageHints[phase]) ?? "正在查询这次启动的状态；关闭后从同一条手记可继续查看。"}</Hint>}
+        {phase === "uncertain" && !receipt?.workspaceId && !receipt?.agentId ? <Hint theme={theme}>尚未找回工作区或会话标识。请查询状态并核对侧栏；为避免重复创建，本次启动不能修改选项重试。</Hint> : null}
         <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{identifiers.join("\n")}</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
           {openable ? <Button theme={theme} label={receipt?.agentId && navigation?.openAgent ? "打开会话" : "打开工作区"} icon="ArrowUpRight" size="sm" variant={terminal ? "primary" : "secondary"} onPress={() => receipt && openResult(receipt)} /> : null}
+          {retryable ? <Button theme={theme} label="重试这次请求" icon="RefreshCw" size="sm" variant="primary" onPress={() => void submit()} /> : null}
           <Button theme={theme} label={status.isFetching ? "查询中…" : "查询状态"} icon="RefreshCw" size="sm" disabled={status.isFetching} onPress={() => void status.refetch()} />
           <Button theme={theme} label="复制标识" icon="Copy" size="sm" variant="ghost" onPress={() => void copy(identifiers.map(line => line.replace(" ", ": ")).join("\n"))} />
-          {phase === "rejected" && !receipt?.workspaceId && !receipt?.agentId ? <Button theme={theme} label="修改选项重试" icon="Pencil" size="sm" disabled={launching} onPress={resetIntent} />
+          {canChangeOptions ? <Button theme={theme} label="修改选项重试" icon="Pencil" size="sm" disabled={launching} onPress={resetIntent} />
             : phase === "started" ? <Button theme={theme} label="再开一个新任务" icon="Plus" size="sm" disabled={launching} onPress={resetIntent} /> : null}
         </View>
         <Hint theme={theme}>重载插件会清空这里的状态，重载前请先复制标识。</Hint>

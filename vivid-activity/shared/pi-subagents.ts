@@ -1,4 +1,5 @@
 import { compactText, extractPiToolText, normalizePiToolName } from "./presentation";
+import { statusLabel } from "./vivid-model";
 
 export function piSubagentOperation(name: string): "dispatch" | "result" | "steer" | undefined {
   switch (normalizePiToolName(name)) {
@@ -47,7 +48,8 @@ export function parsePiSubagentCall(input: unknown, output: unknown) {
   let body = dispatch || steering || rejected || missing ? ""
     : result ? responseBody : text;
   const errorMatch = result && status === "error" ? body.match(/^Error:\s*([\s\S]*)$/) : undefined;
-  const error = rejected?.[2] ?? (missing ? "Agent not found. It may have been cleaned up." : undefined)
+  // 本地补丁（0.5.0）：插件自己写的说明用中文；Pi 返回的错误原文（rejected、errorMatch）属于数据，保留。
+  const error = rejected?.[2] ?? (missing ? "找不到这个子 Agent，可能已被清理。" : undefined)
     ?? errorMatch?.[1];
   if (errorMatch && error) body = "";
   const toolUsesMatch = header.match(/(?:^|\| )Tool uses:\s*(\d+)/m);
@@ -58,8 +60,8 @@ export function parsePiSubagentCall(input: unknown, output: unknown) {
   const duration = header.match(/\| Duration:\s*([^|\r\n]+)/)?.[1]?.trim();
   const outputFile = line("Output file");
   const notice = steering || (operation === "steer" && responseBody.startsWith("Steering message sent to agent "))
-    ? "Steering message sent. It will be processed after the current tool execution."
-    : body === "Agent is still running. Use wait: true or check back later." ? "Agent is still running." : undefined;
+    ? "引导消息已发出，子 Agent 做完当前这步工具调用后处理。"
+    : body === "Agent is still running. Use wait: true or check back later." ? "子 Agent 还在运行。" : undefined;
   if (notice) body = "";
   return { agentId, agentType, description, status, prompt: field("prompt"),
     message: field("message"), operation,
@@ -77,7 +79,8 @@ export function piSubagentPresentation(name: string, input: unknown, output: unk
   const icon = operation === "dispatch" ? "Bot" : operation === "steer" ? "MessageCircle" : "Hourglass";
   const subject = parsed.description ?? description ?? (operation === "dispatch" ? agentType ?? parsed.agentType : parsed.agentId ?? parsed.agentType);
   const type = parsed.operation ? parsed.agentType ?? agentType : undefined;
+  // 本地补丁（0.5.0）：标题在显示时经 zh() 译成中文（shared/vivid-model.ts）；摘要里的状态值这里就换成中文。
   const summary = [type && type !== subject ? compactText(type) : undefined,
-    subject ? compactText(subject, 120) : undefined, parsed.status].filter(Boolean).join(" · ") || undefined;
+    subject ? compactText(subject, 120) : undefined, parsed.status ? statusLabel(parsed.status) : undefined].filter(Boolean).join(" · ") || undefined;
   return { category: "agent" as const, icon, label, summary };
 }

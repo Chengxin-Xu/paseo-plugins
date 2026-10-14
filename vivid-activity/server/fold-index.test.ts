@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { forgetTurnStarts, handleFoldIndex, knownTurnStart, noteTurnStarted } from "./fold-index";
+import contribute from "../index.server";
+import { forgetAgentTurns, forgetTurnStarts, handleFoldIndex, knownTurnStart, noteTurnStarted, turnMemoSize } from "./fold-index";
 
 function context(refetch: (options: unknown) => Promise<unknown>, calls: unknown[] = []): PluginHandlerContext {
   return {
@@ -110,5 +111,46 @@ describe("fold-index RPC", () => {
     noteTurnStarted("a1", "autonomous-turn-32", Date.parse(at("05:00:00")));
     expect(knownTurnStart("a1", "autonomous-turn-32")).toBe(Date.parse(at("05:00:00")));
     forgetTurnStarts();
+  });
+});
+
+describe("turn starts of closed Agents (0.5.0)", () => {
+  it("forgets only the closed Agent's turns", () => {
+    forgetTurnStarts();
+    noteTurnStarted("agent-a", "foreground-turn-1", 1_000);
+    noteTurnStarted("agent-a", "autonomous-turn-2", 2_000);
+    noteTurnStarted("agent-ab", "foreground-turn-1", 3_000);
+    noteTurnStarted("agent-b", "foreground-turn-1", 4_000);
+    forgetAgentTurns("agent-a");
+    expect(knownTurnStart("agent-a", "foreground-turn-1")).toBeNull();
+    expect(knownTurnStart("agent-a", "autonomous-turn-2")).toBeNull();
+    // An id that merely starts with the closed one is another Agent.
+    expect(knownTurnStart("agent-ab", "foreground-turn-1")).toBe(3_000);
+    expect(knownTurnStart("agent-b", "foreground-turn-1")).toBe(4_000);
+    expect(turnMemoSize()).toBe(2);
+    forgetAgentTurns("");
+    expect(turnMemoSize()).toBe(2);
+    forgetTurnStarts();
+  });
+
+  it("listens to agent.closed and stops listening when the plugin unloads", () => {
+    forgetTurnStarts();
+    const handlers = new Map<string, (event: unknown) => void>();
+    const removed: string[] = [];
+    const server = {
+      registerSettings: () => ({}),
+      handle: () => undefined,
+      on: (name: string, handler: (event: unknown) => void) => {
+        handlers.set(name, handler);
+        return () => void removed.push(name);
+      },
+    };
+    const stop = contribute(server as never);
+    handlers.get("agent.turn_started")!({ agent: { id: "agent-z" }, turnId: "foreground-turn-1" });
+    expect(knownTurnStart("agent-z", "foreground-turn-1")).not.toBeNull();
+    handlers.get("agent.closed")!({ agent: { id: "agent-z" } });
+    expect(knownTurnStart("agent-z", "foreground-turn-1")).toBeNull();
+    stop();
+    expect(removed.sort()).toEqual(["agent.closed", "agent.turn_started"]);
   });
 });

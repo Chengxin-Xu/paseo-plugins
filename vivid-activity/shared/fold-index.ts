@@ -2,8 +2,10 @@ import { defineRpc } from "@getpaseo/plugin";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
 import { reasoningKey, toolKey, type IndexRow, type StepStatus } from "./fold";
-import { isForegroundNotice, readTaskNotice } from "./notice";
+import { comparableResult, isForegroundNotice, noticeLook, readTaskNotice, rowResultText, TASK_NOTICE_TOOL, type ComparableResult } from "./notice";
+import { piNoticeStatus, readPiNotice } from "./pi-notice";
 import { extractApplyPatchEdits, isApplyPatchTool, normalizeToolCallDetail, resolveToolCallPresentation } from "./presentation";
+import { pluginCardOf } from "./plugin-cards";
 import { lookFor, type LookKey } from "./vivid-model";
 
 /**
@@ -15,6 +17,22 @@ const cursorSchema = z.object({ epoch: z.string().min(1).max(200), seq: z.number
 export const LOOK_KEYS = [
   "think", "read", "list", "edit", "write", "shell", "search", "web", "agent", "plan", "mcp", "paseo", "ask", "skill", "other",
 ] as const satisfies readonly LookKey[];
+
+const TEXT_LINES_CAP = 999;
+/** About how many lines a text takes in the chat (40 characters a line, every line break a line); at most TEXT_LINES_CAP. */
+export function textLines(text: string): number {
+  let lines = 0;
+  let start = 0;
+  // Only counts: a huge text stops at the cap without splitting the whole string.
+  while (start <= text.length && lines < TEXT_LINES_CAP) {
+    const end = text.indexOf("\n", start);
+    const length = (end < 0 ? text.length : end) - start;
+    lines += Math.max(1, Math.ceil(length / 40));
+    if (end < 0) break;
+    start = end + 1;
+  }
+  return Math.min(TEXT_LINES_CAP, Math.max(1, lines));
+}
 
 /** Wire form of an IndexRow (short keys: a few hundred rows per page). */
 export const wireRowSchema = z.object({
@@ -31,6 +49,8 @@ export const wireRowSchema = z.object({
   w: z.string().max(40).optional(),
   /** Index of the entry's turn in the page's `turns` table (0.3.0-local.3). */
   u: z.number().int().nonnegative().optional(),
+  /** 0.6.0: about how many lines an Agent's text takes (shared/prompt-pin.ts measures how far the question is). */
+  ln: z.number().int().min(1).max(TEXT_LINES_CAP).optional(),
 });
 export type WireRow = z.output<typeof wireRowSchema>;
 
@@ -80,13 +100,18 @@ type ToolItem = {
 };
 
 /**
- * Tool calls this plugin leaves to Paseo, mirroring `client/transform.ts`: plans (approval cards) and the `speak`
- * shape Paseo renders as a spoken message.
+ * Tool calls this plugin leaves to others, mirroring `client/transform.ts`: plans (Paseo's approval cards), the `speak`
+ * shape Paseo renders as a spoken message, and (0.5.0) the calls Bots turns into cards (shared/plugin-cards.ts).
  */
-export function claimsToolCall(item: { name: string; detail?: { type?: unknown; input?: unknown } | null }): boolean {
-  if (item.detail?.type === "plan") return false;
-  if (item.name === "speak" && item.detail?.type === "unknown" && typeof item.detail.input === "string" && item.detail.input.trim()) return false;
-  return true;
+export function claimsToolCall(item: { name: string; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): boolean {
+  return disclaimed(item) === null;
+}
+
+/** Why the plugin leaves a tool call alone (the boundary kind the fold index records), or null when it draws it. */
+function disclaimed(item: { name: string; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): string | null {
+  if (item.detail?.type === "plan") return "plan";
+  if (item.name === "speak" && item.detail?.type === "unknown" && typeof item.detail.input === "string" && item.detail.input.trim()) return "speak";
+  return pluginCardOf(item);
 }
 
 const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
@@ -155,7 +180,10 @@ export function exceedsTextBudget(value: unknown, budget: number): boolean {
 
 /** The row look the client draws for a tool call (apply_patch rows draw as edits). */
 export function toolLook(item: Pick<ToolItem, "name" | "detail" | "metadata">): LookKey {
-  if (readTaskNotice(item)) return "shell";
+  const notice = readTaskNotice(item);
+  if (notice) return noticeLook(notice.kind);
+  const pi = readPiNotice(item);
+  if (pi) return pi.look;
   if (isApplyPatchTool(item.name)) {
     const edits = extractApplyPatchEdits(item.detail, item.detail?.type === "unknown" ? item.detail.output : undefined, item.metadata);
     if (edits.length > 0) return edits.every((edit) => edit.operation === "add") ? "write" : "edit";
@@ -168,8 +196,11 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-/** One projected timeline entry → its wire row. */
-export function wireRowFromEntry(entry: unknown): WireRow | null {
+/**
+ * One projected timeline entry → its wire row. `rowResult` gives the final result of a tool row of the same page by call
+ * id, as compared (`wirePageFromEntries`), so a notice that repeats the result its row already shows folds into that row.
+ */
+export function wireRowFromEntry(entry: unknown, rowResult?: (callId: string) => ComparableResult | null | undefined): WireRow | null {
   const source = record(entry);
   const item = record(source.item);
   const type = typeof item.type === "string" ? item.type : null;
@@ -182,6 +213,7 @@ export function wireRowFromEntry(entry: unknown): WireRow | null {
   if (type === "reasoning") {
     return typeof item.text === "string" ? { ...base, k: "r", key: reasoningKey(item.text) } : { ...base, k: "b", w: "reasoning" };
   }
+  if (type === "assistant_message" && typeof item.text === "string") return { ...base, k: "b", w: type, ln: textLines(item.text) };
   if (type !== "tool_call") return { ...base, k: "b", w: type.slice(0, 40) };
   const tool = item as unknown as ToolItem;
   if (typeof tool.callId !== "string" || typeof tool.name !== "string") return { ...base, k: "b", w: "tool" };
@@ -189,17 +221,26 @@ export function wireRowFromEntry(entry: unknown): WireRow | null {
   const host = hostToolDisposition(provider, tool);
   if (host === "skip") return { ...base, k: "x", w: "hidden-tool" };
   if (host === "task") return { ...base, k: "b", w: "task" };
-  if (!claimsToolCall(tool)) return { ...base, k: "b", w: tool.detail?.type === "plan" ? "plan" : "speak" };
-  const status: StepStatus = ["running", "completed", "failed", "canceled"].includes(tool.status) ? tool.status : "completed";
-  let look: LookKey = "other";
-  if (!exceedsTextBudget([tool.detail, tool.metadata], MAX_CLASSIFY_CHARS)) {
+  const other = disclaimed(tool);
+  if (other !== null) return { ...base, k: "b", w: other };
+  const notice = readTaskNotice(tool);
+  const small = !exceedsTextBudget([tool.detail, tool.metadata], MAX_CLASSIFY_CHARS);
+  // 0.6.0 (opus-B30): a Pi extension's notice counts as it ended (failed, stopped); events and reminders as finished.
+  const pi = !notice && small ? readPiNotice(tool) : null;
+  // 0.6.0: a notice's status is what Claude Code sent (the host records a stopped sub-agent as completed).
+  const status: StepStatus = notice
+    ? notice.status
+    : pi
+      ? piNoticeStatus(pi.state)
+      : ["running", "completed", "failed", "canceled"].includes(tool.status) ? tool.status : "completed";
+  let look: LookKey = pi ? pi.look : "other";
+  if (small && !pi) {
     try {
       look = toolLook(tool);
     } catch {
       look = "other";
     }
   }
-  const notice = readTaskNotice(tool);
   return {
     ...base,
     k: "t",
@@ -207,8 +248,33 @@ export function wireRowFromEntry(entry: unknown): WireRow | null {
     st: status,
     look,
     ...(notice?.ref ? { ref: notice.ref } : {}),
-    ...(notice ? { fg: isForegroundNotice(notice) } : {}),
+    ...(notice ? { fg: isForegroundNotice(notice, notice.ref ? rowResult?.(notice.ref) : undefined) } : {}),
   };
+}
+
+/**
+ * 0.6.0-local.3: the final results of this page's tool rows that a notice with a result of its own repeats, by call id.
+ * A row on an earlier page is not known here; its notice then stands on its own (nothing is lost). 0.6.0-local.4
+ * (codex-vivid-F7): each row's result is read for comparing once per page, however many notices repeat it (400 notices
+ * of one 200 000-character output read it 400 times, 3 s).
+ */
+function resultsForRepeats(entries: readonly unknown[]): Map<string, ComparableResult | null> {
+  const wanted = new Set<string>();
+  for (const entry of entries) {
+    const item = record(record(entry).item);
+    if (item.type !== "tool_call" || item.name !== TASK_NOTICE_TOOL) continue;
+    const notice = readTaskNotice(item as unknown as ToolItem);
+    if (notice?.kind === "repeat" && notice.ref && notice.result !== null) wanted.add(notice.ref);
+  }
+  const results = new Map<string, ComparableResult | null>();
+  if (wanted.size === 0) return results;
+  for (const entry of entries) {
+    const item = record(record(entry).item);
+    if (item.type === "tool_call" && typeof item.callId === "string" && wanted.has(item.callId) && item.status !== "running" && item.name !== TASK_NOTICE_TOOL) {
+      results.set(item.callId, comparableResult(rowResultText(item)));
+    }
+  }
+  return results;
 }
 
 /**
@@ -219,8 +285,9 @@ export function wirePageFromEntries(entries: readonly unknown[], turnStart: (tur
   const rows: WireRow[] = [];
   const turns: WireTurn[] = [];
   const index = new Map<string, number>();
+  const results = resultsForRepeats(entries);
   for (const entry of entries) {
-    const row = wireRowFromEntry(entry);
+    const row = wireRowFromEntry(entry, (callId) => results.get(callId));
     if (!row) continue;
     const turnId = record(entry).turnId;
     if (typeof turnId === "string" && turnId && turnId.length <= 200) {
@@ -251,6 +318,7 @@ export function indexRowFromWire(row: WireRow, turns?: readonly WireTurn[]): Ind
     ...(row.look ? { look: row.look } : {}),
     ...(row.fg !== undefined ? { notice: { ref: row.ref ?? null, foreground: row.fg } } : {}),
     ...(row.w ? { what: row.w } : {}),
+    ...(row.ln !== undefined ? { lines: row.ln } : {}),
     ...(turn ? { turn } : {}),
   };
 }

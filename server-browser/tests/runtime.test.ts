@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 import { browserProxy, browserSandboxMode, chromiumArguments, chromiumEnvironment, defaultRuntimeRoot, inheritedEnvironment, MCP_ENVIRONMENT } from '../server/runtime';
 
 test('runtime and data directories default under the home directory and follow their environment variables', () => {
@@ -50,6 +50,8 @@ test('a host without the prepared runtime gets setup guidance instead of a modul
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'paseo-browser-missing-runtime-'));
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), 'paseo-browser-empty-runtime-'));
   const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  const previousExecutable = process.env.PASEO_SERVER_BROWSER_EXECUTABLE;
+  delete process.env.PASEO_SERVER_BROWSER_EXECUTABLE;
   process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(runtimeRoot, 'no-browser-cache');
   const manager = new BrowserManager({ dataRoot, runtimeRoot });
   try {
@@ -65,6 +67,7 @@ test('a host without the prepared runtime gets setup guidance instead of a modul
     finally { await configured.close(); }
   } finally {
     if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH; else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    if (previousExecutable === undefined) delete process.env.PASEO_SERVER_BROWSER_EXECUTABLE; else process.env.PASEO_SERVER_BROWSER_EXECUTABLE = previousExecutable;
     await manager.close();
     await rm(dataRoot, { recursive: true, force: true });
     await rm(runtimeRoot, { recursive: true, force: true });

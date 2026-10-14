@@ -1,45 +1,36 @@
-Project Notes keeps tasks, prompts and ideas for each Paseo project in one board on the daemon host. Tasks move through to do, doing and done, prompts copy with one tap, and ideas are free-form notes. Notes that belong to no project go to an inbox. From any note you can start work: the plugin creates a workspace and an agent in the project you pick and sends the note as the first message.
+Project Notes keeps tasks, prompts and ideas for each Paseo project on the daemon host. Tasks move through to do, doing and done; prompts support reusable variables; unassigned notes go to an inbox. Start work from a note by choosing a project and an agent, then editing its initial task.
 
-The interface is in Simplified Chinese. Open it from the sidebar item 拾页 · 项目手记, the 项目手记 workspace panel, the Command Center or the `/notes` slash command, which only opens the panel.
+The interface is in Simplified Chinese. Open 拾页 · 项目手记 from the sidebar, the workspace panel, or the Command Center. `/notes` opens the panel, `/notes <text>` saves an inbox idea, and `/prompt` opens the prompt library.
 
 ## Setup
 
-Requires Paseo 0.11.1 or later on the daemon and on each app that shows it. There are no accounts, tokens or settings.
+Requires Paseo 0.11.1 or later on both daemon and app. No accounts, tokens or settings are needed. Git preparation downloads the locked esbuild and zod dependencies from npm and builds the CLI, so the host needs npm and registry access. Starting work requires a configured provider; available models and profiles come from Paseo.
 
-Installing from Git runs two commands in the plugin directory. `npm ci --omit=dev --ignore-scripts` downloads esbuild (with its prebuilt binary for the host platform) and zod from the npm registry at the versions in the committed lockfile. `npm run build` then bundles the command-line tool from `server/cli.ts` into `bin/notes.mjs`. The daemon host needs npm and registry access. The plugin itself only uses libraries that Paseo provides.
+## Using notes and prompts
 
-Starting work needs a provider that is ready on that host with at least one model. The plugin offers the providers, models and agent profiles Paseo reports, including custom ones, with no built-in defaults.
+- Pin, flag, search and filter notes by project. Wide screens show task columns; phones use collapsible groups. Concurrent edits reject outdated changes and keep the draft.
+- Deletion moves notes to the trash. Permanent deletion requires confirmation and removes history too. Emptying trash affects every trashed note in the selected project scope, including notes hidden by search.
+- Visible boards synchronize every 5 seconds, or 15 after a quiet minute; background polling stops. Local edits keep incremental synchronization.
+- Prompt templates replace literal `{{variables}}`. On web and Mac desktop, the composer pill fills, appends or replaces a draft and can undo its insertion before further editing. Copy remains available on native apps or when insertion is unavailable.
+- A four-section template helps specify goals, scope, constraints and acceptance. Suggestions read bounded project manifests without executing commands.
+- Sending checks the agent, including unloaded sessions, and confirms interruptions or pending approvals. Instead of interrupting, you can choose 等这一轮结束再发 (send after this turn): the plugin server queues the prompt and sends it once the turn ends and no approval is pending, even with the app closed. Every prompt sent from the picker is written to the plugin's send ledger first; afterwards a 160-character preview stays for a week. A queued prompt pauses for your OK if someone else wrote to the agent meanwhile. The same prompt is never sent directly while a copy waits in the queue, from any picker or device. Retries keep the message ID and send options. An unknown result requires checking the conversation. Remove composer attachments before using plugin slash commands on Paseo 0.11.1.
 
-## Using it
+## Starting work
 
-- Tasks show as three columns on wide screens and collapsible groups on phones; tapping a status circle advances the task.
-- Notes can be pinned, flagged as important, searched, filtered by project and grouped by project.
-- Deleting moves a note to the trash, where it can be restored. The trash is never emptied; there is no permanent delete.
-- Every app on the same daemon sees the same notes; an edit based on an outdated copy is refused and the draft kept.
-- While visible, the board checks for changes every 5 seconds (15 after a quiet minute). It stops in the background or when hidden.
+Choose a project directory or new Git worktree, workspace title, provider, model and agent settings. Nothing is created before confirmation. The edited initial task is sent to the chosen provider. Its source attachment contains only the note ID, title, project, status and importance; it does not repeat the saved body. The separate composer attachment picker still attaches note content when explicitly selected.
 
-## Starting work from a note
+The workspace retains your title, and a worktree uses `notes/<id>`. This launch path does not request automatic naming or an extra naming-model call. Repeated requests reuse creation keys. After interruption, recovery searches agent labels and the project's worktree slugs without recreating resources. Finding a workspace disables changing options and starting again. Only a confirmed rejection before creation allows new options. Unresolved results require checking Paseo; local workspaces cannot be reliably matched without a saved ID.
 
-The start dialog asks for the target project, a new Git worktree or the project directory, and the provider, model, permission mode and thinking level (or an agent profile). Nothing is created until you confirm. The plugin then creates the workspace (a worktree gets a new `notes/<id>` branch) and an agent labeled with the launch and note IDs, and sends the note text, as edited, to that agent and so to its provider. Repeated taps and retries reuse the launch and never create a second workspace or agent. If a plugin reload interrupts a launch, the dialog says the result needs checking and looks up the agent by its label, creating nothing.
+## Data and command line
 
-## Command-line tool for agents
+Notes are unencrypted JSON under `$PASEO_HOME/plugin-data/project-notes/boards/`, with separate snapshots in `boards/history/` and launch stages in `launches/`. The default home is `~/.paseo`. Launch records contain resource IDs, a hash of the launch input and provider or daemon errors (500 characters), not task text. Atomic writes and shared locks protect plugin and CLI updates. Uninstalling leaves data in place.
 
-`node bin/notes.mjs --help` in the plugin directory lists commands to list, add, show, update, complete, delete and restore notes, with `--json` output. Without `--project`, a note goes to the Paseo project containing `PASEO_AGENT_CWD` or the current directory. To list projects it runs `paseo project ls --json`, falling back to `projects/projects.json` (up to 8 MiB) in the Paseo home directory. It writes only board and lock files, and an open board shows the changes at its next check.
+Title, body and type edits retain ten recent snapshots; status changes do not. Existing inline history migrates without dropping versions, and migrated snapshots remain protected. Reading accepts document versions 1 and 2; writing uses version 2. **After upgrading, you cannot directly roll back to 0.9.0.** Committed snapshot keys also persist beside the history, allowing recovery when the board loses its keys.
 
-`--body-file` reads any regular file the shell can read, up to 96,000 bytes, and `-` reads standard input up to the same size; directories, pipes and devices are refused. Human-readable output escapes control characters and prints times in UTC; `--json` output is unchanged.
+Back up and restore the whole data directory together. Missing snapshots are reported. In note details, “放弃缺失的快照并继续” asks for confirmation before removing their references while preserving current content and available history, allowing content edits again.
 
-## What it reads and writes
+`node bin/notes.mjs --help` lists CLI commands. Output normally contains current content; `show --history` reads snapshots. Even `list` and `show` may migrate old data and write boards, history and locks. Body-file input accepts regular files up to 96,000 bytes, or bounded stdin. Other accounts on the host can see command lines, so pass private text with `--body-file -`, never `--body` or the title. Human-readable output escapes control characters and uses UTC.
 
-- Notes are unencrypted JSON files in `$PASEO_HOME/plugin-data/project-notes/boards/`, one per project, named by the SHA-256 of the project ID. `PASEO_HOME` defaults to `~/.paseo`. Directories get mode 0700 and files 0600. Writes go through a temporary file and an atomic rename, and a `.lock` file keeps the plugin and the command-line tool from writing at the same time. A writer takes over a lock only after its holder exits (or after a minute if the holder cannot be checked), and one that lost its lock saves nothing.
-- Each launch keeps its stage and the created workspace and agent IDs in `$PASEO_HOME/plugin-data/project-notes/launches/`, without the prompt text.
-- The plugin reads the Paseo project list, the providers and models available for the target project, and the agent profiles in the daemon configuration. Only profile names and their provider, model, mode and thinking choices reach the app, never environment variables or credentials.
-- It makes no network requests of its own and starts no processes. Uninstalling it leaves the notes in place.
+## Limits and privacy
 
-## Known limits
-
-- Notes stay on the daemon that stores them. Apps connected to another host see that host's notes.
-- Anyone who can use the daemon can read and change every note, so do not store passwords or API keys in notes.
-- Each project holds up to 4,000 notes (trash included) and each board file up to 32 MiB. The overview loads at most 32 MiB of boards; any board beyond that shows as unavailable while the rest load.
-- Provider and launch errors reach the app cut to 500 characters.
-- Starting work needs a project with a folder on that host, so inbox notes ask for a target project. Worktrees need a Git project.
-- A plugin reload clears the start dialog's progress in the app; the created workspace and agent stay in Paseo.
+Each project allows 4,000 notes including trash and a 32 MiB board; an overview loads at most 32 MiB of boards. Oversized boards appear unavailable. Notes stay on their daemon and are accessible to everyone using it; avoid passwords and keys. The plugin makes no network requests itself. Starting work sends the confirmed task and source metadata through Paseo to the selected provider. Provider and launch errors are capped at 500 characters.

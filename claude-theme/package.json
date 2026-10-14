@@ -2,8 +2,8 @@
   "name": "paseo-terracotta-themes",
   "private": true,
   "type": "module",
-  "version": "0.4.0",
-  "description": "Six color themes for Paseo, three dark and three light, derived from one perceptual tonal ladder",
+  "version": "0.5.1",
+  "description": "Twelve color themes for Paseo, six dark and six light, derived from one perceptual tonal ladder",
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",

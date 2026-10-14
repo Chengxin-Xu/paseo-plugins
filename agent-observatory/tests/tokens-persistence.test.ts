@@ -88,3 +88,37 @@ test("an import cut by its budgets says so in the coverage the Token page shows"
     assert.equal(tokenTruncationNotice({ files: false, bytes: false, index: false, scan: false }), null);
   } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test("subagent thread links survive a restart; logs read before 2.13 learn their parent once from their first line", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tokens-threads-")), logs = join(root, "sessions"), directory = join(root, "data");
+  await mkdir(logs);
+  const usage = (n: number) => ({ input_tokens: 100 * n, cached_input_tokens: 40, output_tokens: 20 * n, total_tokens: 120 * n });
+  const meta = (id: string, source: unknown) => line({ type: "session_meta", timestamp: iso(NOW - 60_000), payload: { id, cwd: "/repo/demo", source } });
+  const record = (thread: string, response: string, at: number) => line({ type: "token_usage_record", timestamp: iso(at), payload: { thread_id: thread, response_id: response, usage: usage(1), thread_token_usage: usage(2) } });
+  await writeFile(join(logs, "rollout-2026-09-23T00-00-00-parent.jsonl"), meta("parent-thread", "cli") + record("parent-thread", "p1", NOW - 5000));
+  await writeFile(join(logs, "rollout-2026-09-23T00-00-00-child.jsonl"), meta("child-thread", { subagent: { thread_spawn: { parent_thread_id: "parent-thread", depth: 1 } } }) + record("child-thread", "c1", NOW - 3000));
+  const options = { directory, roots: [{ source: "codex" as const, path: logs }], now: () => NOW, poll: false };
+  const sessions = async (store: TokenStore) => { const result = await store.read(input); if (result.mode !== "full") throw new Error("full expected"); return result.sessions.map(session => [session.sessionId, session.calls, session.subagentCalls]); };
+  let store = new TokenStore(options);
+  try {
+    await store.ready;
+    assert.deepEqual([...store.data.threads], [["child-thread", "parent-thread"]]);
+    assert.deepEqual(await sessions(store), [["parent-thread", 2, 1]]);
+    await store.close();
+    store = new TokenStore(options); await store.ready;
+    assert.deepEqual([...store.data.threads], [["child-thread", "parent-thread"]], "the link is saved with the ledger");
+    await store.close();
+    // A ledger saved before 2.13: no links, and file states that never looked for a parent.
+    const file = join(directory, "tokens.json"), saved = JSON.parse(await readFile(file, "utf8"));
+    delete saved.threads;
+    for (const entry of saved.files) { delete entry.state.parentThread; delete entry.state.threadId; entry.state.links = []; }
+    await writeFile(file, JSON.stringify(saved));
+    store = new TokenStore(options); await store.ready;
+    assert.equal(store.ingester.diagnostics.calls, 0, "nothing is imported again");
+    assert.deepEqual([...store.data.threads], [["child-thread", "parent-thread"]]);
+    assert.deepEqual(await sessions(store), [["parent-thread", 2, 1]], "calls counted before the upgrade move to the parent too");
+    const child = [...store.ingester.files.values()].find(entry => entry.path.endsWith("child.jsonl"))!;
+    assert.equal(child.state.parentThread, "parent-thread"); assert.deepEqual(child.state.links, ["parent-thread"]);
+    assert.equal(await store.ingester.probeThreads(), 0, "each log is probed once");
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
+});

@@ -2,14 +2,17 @@ import { useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { ownTurnRunning, type AgentRecord } from "../shared/model";
+import { ownTurnRunning, summarizeRequest, waitingKind, type AgentRecord, type PendingRequest } from "../shared/model";
 import type { AgentResult } from "../shared/results";
 import { object, string } from "../shared/timeline";
-import { Badge, Banner, Button, EmptyState, MetaLine, Row, Skeleton, Spacer, fontSize, hairline, hue, relativeTime, space, toneColor } from "./kit";
+import { Badge, Banner, Button, EmptyState, MetaLine, Row, Skeleton, Spacer, fontSize, hairline, hue, radius, relativeTime, space, toneColor } from "./kit";
 import { PaneLabel, monoFont } from "./ui";
 import { CodeBlock } from "./timeline-view";
 import { openExternalUrl } from "./open-url";
 import { proseBlocks, proseTokens } from "../shared/prose";
+import { permissionView } from "../shared/permissions";
+import { PermissionPanel } from "./permission-panel";
+import { QuickReplies } from "./quick-replies";
 export interface ResultMessage { text: string; ref: string; at: string | null; completeOrigin?: boolean }
 export type ResultData = AgentResult;
 
@@ -60,15 +63,21 @@ export function PinnedInput({ theme, message, confirmed, loading, inset }: { the
 }
 
 const outcomeBadge = { passed: { label: "通过", tone: "success", icon: "CircleCheck" }, failed: { label: "失败", tone: "danger", icon: "CircleX" }, unknown: { label: "未确认", tone: "neutral", icon: "CircleHelp" } } as const;
-export function ResultView({ theme, agent, data, loading, error, header, lead, inset, pending = 0, permissions = [], onResolvePermissions, onOpenEvidence, onRefresh }: {
-  theme: PluginTheme; agent: AgentRecord; data?: ResultData; loading: boolean; error?: string | null; header?: ReactNode; inset: number; pending?: number; permissions?: readonly Record<string, unknown>[];
+export function ResultView({ theme, agent, data, loading, error, header, lead, inset, compact = inset < space.xl, pending = 0, permissions = [], onResolvePermissions, onPermissionsChanged, onReplied, onOpenEvidence, onRefresh }: {
+  theme: PluginTheme; agent: AgentRecord; data?: ResultData; loading: boolean; error?: string | null; header?: ReactNode; inset: number; compact?: boolean; pending?: number; permissions?: readonly Record<string, unknown>[];
   /** Shown before the reply, e.g. the 定时任务 card of an Agent a schedule created. */ lead?: ReactNode;
-  onResolvePermissions?: () => void; onOpenEvidence: (ref: string) => void; onRefresh: () => void;
+  onResolvePermissions?: () => void;
+  /** A request was answered here (or found answered elsewhere): read the Agent's pending requests again. */ onPermissionsChanged?: () => void;
+  /** A quick reply went out. */ onReplied?: () => void;
+  onOpenEvidence: (ref: string) => void; onRefresh: () => void;
 }) {
   const { colors } = theme;
   const toast = useToast();
   const reply = data?.latestReply;
   const state = ownTurnRunning(agent) || data?.isRunning ? "执行中" : data?.isFinal ? "本轮结果" : null;
+  // 快捷回复 (opus-B26): only under the reply the category was read from, never for subagents (their parent answers them); they
+  // answer this turn only (P1-1), and with the whole reply right above them they need no quote.
+  const nudge = agent.replyNudge && !agent.parentAgentId && !agent.archivedAt && pending === 0 && !ownTurnRunning(agent) && !data?.isRunning ? agent.replyNudge : null;
   const copy = () => { if (!reply) return; void copyText(reply.text).then(() => toast.show("已复制最新回复", { variant: "success" })).catch(() => toast.error("复制失败，可长按选择文本")); };
   // The header slot is always rendered: web counts null children when indexing sticky headers, native drops them.
   return <ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingBottom: space.xxl }} stickyHeaderIndices={[1]}>
@@ -76,13 +85,7 @@ export function ResultView({ theme, agent, data, loading, error, header, lead, i
     <PinnedInput theme={theme} message={data?.firstInput ?? null} confirmed={data?.coverage.firstInputConfirmed === true} loading={loading} inset={inset} />
     <View style={{ paddingHorizontal: inset, paddingTop: space.lg, gap: space.xl }}>
       {lead}
-      {pending > 0 ? <View style={{ gap: space.sm }}>
-        <Banner theme={theme} tone="warning" message={`等待你批准 ${pending} 项请求`} action={onResolvePermissions ? { label: "去处理", onPress: onResolvePermissions } : undefined} />
-        {permissions.map((request, index) => <View key={string(request.id) || index} style={{ gap: 2, paddingHorizontal: space.xs }}>
-          <Text style={{ color: colors.foreground, fontSize: fontSize.small, fontWeight: "500" }}>{string(request.title) || string(request.name) || "待处理请求"}</Text>
-          <MetaLine theme={theme} numberOfLines={2} parts={[string(request.kind), string(request.description)]} />
-        </View>)}
-      </View> : null}
+      {pending > 0 ? <PendingRequests theme={theme} agent={agent} pending={pending} permissions={permissions} compact={compact} onResolve={onResolvePermissions} onChanged={onPermissionsChanged} /> : null}
       {error ? <Banner theme={theme} tone="danger" message={error} action={{ label: "重试", onPress: onRefresh }} /> : null}
       <View style={{ gap: space.sm }}>
         <PaneLabel theme={theme} icon="MessageSquareText" tone="info" trailing={<MetaLine theme={theme} parts={[reply?.at ? relativeTime(reply.at) : null, state]} />}>最新回复</PaneLabel>
@@ -92,6 +95,9 @@ export function ResultView({ theme, agent, data, loading, error, header, lead, i
             <Button theme={theme} label="复制" icon="Copy" variant="ghost" size="sm" accessibilityLabel="复制最新回复" onPress={copy} />
             <Button theme={theme} label="在时间线中查看" icon="ListTree" variant="ghost" size="sm" accessibilityLabel="查看回复上下文" onPress={() => onOpenEvidence(reply.ref)} />
           </View>
+          {nudge ? <View style={{ padding: space.md, borderRadius: radius.lg, borderWidth: hairline, borderColor: hue(theme, "violet", "line"), backgroundColor: hue(theme, "violet", "soft") }}>
+            <QuickReplies key={`${agent.id}:${agent.lastUserMessageAt ?? ""}:${agent.observedTurnStartedAt ?? ""}:${nudge}`} theme={theme} agentId={agent.id} agentTitle={agent.title || "未命名 Agent"} nudge={nudge} expectPrompt={agent.lastUserMessageAt} expectRound={agent.observedTurnStartedAt ?? null} compact={compact} onSent={onReplied} />
+          </View> : null}
         </> : loading ? <Skeleton theme={theme} rows={3} /> : <EmptyState theme={theme} icon="MessageSquare" title="还没有回复" message="有新回复时会自动更新，执行过程在时间线查看" />}
       </View>
       {data?.testEvidence.length ? <View>
@@ -115,5 +121,33 @@ export function ResultView({ theme, agent, data, loading, error, header, lead, i
       {data?.coverage.truncated ? <MetaLine theme={theme} numberOfLines={2} parts={["只显示宿主保留的内容，过长部分已截断"]} /> : null}
     </View>
   </ScrollView>;
+}
+const requestKinds: Record<PendingRequest["kind"], { label: string; tone: "amber" | "violet" | "sky" | "gray"; icon: string }> = {
+  tool: { label: "权限", tone: "amber", icon: "Hand" }, plan: { label: "计划", tone: "amber", icon: "ClipboardList" }, question: { label: "提问", tone: "violet", icon: "MessageCircleQuestion" },
+  mode: { label: "切换模式", tone: "sky", icon: "ToggleRight" }, other: { label: "请求", tone: "gray", icon: "CircleHelp" },
+};
+/**
+ * What the Agent waits on (opus-F12): a question with its choices or a plan to approve, both answered in the conversation
+ * (it has the full request), or a tool to allow, answered right here with the provider's own choices (opus-B12).
+ */
+function PendingRequests({ theme, agent, pending, permissions, compact, onResolve, onChanged }: { theme: PluginTheme; agent: AgentRecord; pending: number; permissions: readonly Record<string, unknown>[]; compact: boolean;
+  onResolve?: () => void; onChanged?: () => void }) {
+  const { colors } = theme, waiting = waitingKind(agent);
+  const requests = permissions.map(request => ({ request, id: string(request.id), inline: !agent.archivedAt && !!permissionView(request, agent.cwd)?.inline, ...summarizeRequest(request) }));
+  const message = waiting === "question" ? pending > 1 ? `Agent 在问你 ${pending} 个问题` : "Agent 在问你一个问题" : waiting === "plan" ? "Agent 写好了计划，等你批准" : `等待你批准 ${pending} 项请求`;
+  return <View style={{ gap: space.sm }}>
+    <Banner theme={theme} tone={waiting === "question" ? "violet" : "warning"} icon={waiting === "question" ? "MessageCircleQuestion" : waiting === "plan" ? "ClipboardList" : undefined} message={message}
+      action={onResolve ? { label: waiting === "question" ? "去回答" : waiting === "plan" ? "查看计划" : "去处理", onPress: onResolve } : undefined} />
+    {requests.map((request, index) => { const look = requestKinds[request.kind];
+      if (request.inline) return <PermissionPanel key={request.id || index} theme={theme} agentId={agent.id} agentCwd={agent.cwd} request={request.request} compact={compact} onSettled={onChanged} />;
+      return <View key={request.id || index} style={{ gap: 4, paddingHorizontal: space.xs }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+          <Badge theme={theme} label={look.label} tone={look.tone} icon={look.icon} />
+          <Text numberOfLines={3} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "600", lineHeight: 19 }}>{request.title || "待处理请求"}</Text>
+        </View>
+        {request.options.length ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>{request.options.map(option => <Badge key={option} theme={theme} label={option} tone="violet" />)}</View> : null}
+        {request.detail ? <Text selectable numberOfLines={3} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17, fontFamily: request.kind === "tool" ? monoFont : undefined }}>{request.detail}</Text> : null}
+      </View>; })}
+  </View>;
 }
 export const permissionRequests = (snapshot: unknown) => { const value = object(snapshot); return Array.isArray(value.pendingPermissions) ? value.pendingPermissions.map(object) : []; };

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { StatsDirectory } from "../server/stats-directory";
 import type { StatsDirectoryAgent } from "../server/stats-types";
-import { addCall, emptyData } from "../server/tokens/data";
+import { addCall, emptyData, noteThread } from "../server/tokens/data";
 import { buildTokenLive } from "../server/tokens/live";
 import { type LedgerCall } from "../server/tokens/types";
 import { tokenLiveSchema } from "../shared/tokens";
@@ -78,4 +78,14 @@ test("a busy 60-minute projection fits the payload budget and remains a memory-o
   tokenLiveSchema.parse(result); const bytes = Buffer.byteLength(JSON.stringify(result));
   assert.ok(bytes < 12_000); assert.equal(result.agents.length, 12); times.sort((a, b) => a - b);
   context.diagnostic(`1000-call live projection: ${bytes} bytes; median ${times[15].toFixed(2)} ms (timing is diagnostic, not a flaky assertion).`);
+});
+
+test("a Codex subagent thread's output shows on the row of the session that spawned it", () => {
+  const data = emptyData(), directory = new StatsDirectory();
+  directory.agents = [{ id: "agent", sessionId: "parent", title: "派出子 Agent 的会话", createdAt: "2026-09-23T00:00:00Z" } as StatsDirectoryAgent];
+  addCall(data, call({ key: "own", sessionId: "parent", output: 300 }), null, NOW);
+  addCall(data, call({ key: "child", sessionId: "child", output: 500, subagent: true }), null, NOW);
+  noteThread(data, "child", "parent");
+  const result = tokenLiveSchema.parse(buildTokenLive(data, { ...full, detail: "agents" }, NOW, directory));
+  assert.deepEqual(result.agents.map(agent => [agent.sessionId, agent.agentId, agent.title, agent.output10m, agent.calls10m]), [["parent", "agent", "派出子 Agent 的会话", 800, 2]]);
 });

@@ -1,8 +1,8 @@
 // Preview stand-ins for the host APIs: real Lucide icons, host-shaped modal sheets and toasts, a fixture RPC.
 import * as Lucide from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { rpc } from "./fixtures.js";
+import { rpc, scenario } from "./fixtures.js";
 
 export { FlatList, ScrollView, TextInput };
 globalThis.__missingIcons = new Set();
@@ -16,6 +16,12 @@ export function Icon({ name, size = 16, color = "currentColor" }) {
 const compact = () => innerWidth < 700;
 /** Mirrors the host's AdaptiveModalSheet: a centered card on desktop, a bottom sheet on phones. */
 export function Modal({ title, open, onOpenChange, children }) {
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    // Native sheets can finish their dismissal after a different sheet has opened.
+    if (scenario === "delayed-sheets" && wasOpen.current && !open) setTimeout(() => onOpenChange(false), 400);
+    wasOpen.current = open;
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const key = event => { if (event.key === "Escape") onOpenChange(false); };

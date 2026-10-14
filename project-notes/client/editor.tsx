@@ -1,10 +1,12 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
-import { useState } from "react";
+import { useRpc } from "@getpaseo/plugin/client";
+import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import type { BoardItem, BoardProject, NoteFields, NoteKind } from "../shared/board";
 import { Banner, Button, Chip, Segmented, Spacer, hairline, space } from "./kit";
 import { ProjectList } from "./projects";
+import { promptEnvironmentRpc, structurePrompt } from "../shared/enhance";
 import { FieldLabel, FormField, KINDS, KIND_ICONS, KIND_LABELS, KIND_TONES, MARK_HUES, PickerButton, ScopeMark, StatusSegmented } from "./ui";
 
 export type Editor = { original: BoardItem | null; projectId: string; fields: NoteFields };
@@ -23,8 +25,30 @@ export function EditorForm({ theme, editor, projects, projectName, busy, compact
   onChange: (fields: Partial<NoteFields>) => void; onProject: (projectId: string) => void; onCancel: () => void; onSave: () => void; onCopyDraft: () => void; onLoadLatest: () => void;
 }) {
   const [picking, setPicking] = useState(false);
+  const probe = useRpc(promptEnvironmentRpc);
+  const [enhancing, setEnhancing] = useState(false);
+  const [enhanceNotice, setEnhanceNotice] = useState<string | null>(null);
+  const latest = useRef(editor); latest.current = editor;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  async function enhance() {
+    if (enhancing || busy) return;
+    const draft = latest.current;
+    setEnhancing(true); setEnhanceNotice(null);
+    try {
+      const environment = await probe({ projectId: draft.projectId });
+      if (!mounted.current) return;
+      const current = latest.current;
+      if (current.projectId !== draft.projectId || current.fields.title !== draft.fields.title || current.fields.body !== draft.fields.body || current.fields.kind !== draft.fields.kind) {
+        setEnhanceNotice("草稿已变化，请再次生成模板；已有输入已保留。"); return;
+      }
+      onChange({ body: structurePrompt(draft.fields.title, draft.fields.body, environment) });
+      setEnhanceNotice(environment.notices.join(" ") || "模板已填入，保存前请核对范围、约束和验收标准。");
+    } catch (error) { if (mounted.current) setEnhanceNotice(error instanceof Error ? error.message : "生成模板失败，草稿已保留。"); }
+    finally { if (mounted.current) setEnhancing(false); }
+  }
   const { fields } = editor, creating = editor.original === null, name = projectName(editor.projectId), { colors } = theme;
-  const canSave = !busy && !changedElsewhere && fields.title.trim().length > 0 && projects.some(project => project.id === editor.projectId);
+  const canSave = !busy && !enhancing && !changedElsewhere && fields.title.trim().length > 0 && projects.some(project => project.id === editor.projectId);
   const kinds = <Segmented theme={theme} value={fields.kind} accessibilityLabel="类型" options={KINDS.map(kind => ({ value: kind, label: KIND_LABELS[kind], icon: KIND_ICONS[kind], tone: KIND_TONES[kind] }))} onChange={kind => { if (!busy) onChange({ kind }); }} />;
   const save = <Button theme={theme} label="保存" variant="primary" busy={busy} disabled={!canSave} onPress={onSave} />;
   const copyDraft = <Button theme={theme} label="复制草稿" icon="Copy" variant="ghost" size="sm" onPress={onCopyDraft} />;
@@ -51,6 +75,10 @@ export function EditorForm({ theme, editor, projects, projectName, busy, compact
       </View>
       <FormField theme={theme} label="标题" value={fields.title} onChangeText={title => onChange({ title })} maxLength={160} editable={!busy} autoFocus={creating} placeholder={TITLE_HINTS[fields.kind]} onSubmitEditing={canSave ? onSave : undefined} />
       <FormField theme={theme} label="正文" value={fields.body} onChangeText={body => onChange({ body })} maxLength={32000} editable={!busy} multiline grow={!compact} minHeight={compact ? 140 : 160} maxHeight={compact ? 320 : undefined} placeholder={BODY_HINTS[fields.kind]} />
+      {fields.kind === "prompt" ? <View style={{ gap: space.sm }}>
+        <Button theme={theme} label="生成四段模板" icon="WandSparkles" size="sm" busy={enhancing} disabled={busy || changedElsewhere} onPress={() => { void enhance(); }} />
+        {enhanceNotice ? <Banner theme={theme} tone="info" message={enhanceNotice} /> : null}
+      </View> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", columnGap: space.xl, rowGap: space.lg }}>
         {fields.kind === "task" ? <View style={{ gap: space.xs + 2 }}>
           <FieldLabel theme={theme}>状态</FieldLabel>

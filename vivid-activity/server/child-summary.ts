@@ -1,0 +1,102 @@
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
+import { childLoaded, childReadable, CHILD_TIMELINE_PAGE_SIZE, recentChildTimelineEntries, type ChildRecord } from "../shared/child-agent";
+import type { ChildSummaryInput, ChildSummaryOutput, ChildSummaryRow } from "../shared/child-summary";
+import { formatReasoningText, resolveToolCallPresentation } from "../shared/presentation";
+import { zh } from "../shared/vivid-model";
+
+const LEVELS: Record<string, string> = { info: "通知", warning: "警告", warn: "警告", error: "错误", success: "成功" };
+
+/** Byte limits include multibyte Chinese/emoji and JSON escapes, so previews stay small for every language. */
+function clip(value: string | undefined, bytes: number): string | undefined {
+  if (!value) return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  if (Buffer.byteLength(JSON.stringify(text)) - 2 <= bytes) return text;
+  let result = "";
+  for (const point of text) {
+    if (Buffer.byteLength(JSON.stringify(result + point + "…")) - 2 > bytes) break;
+    result += point;
+  }
+  return result + "…";
+}
+
+export function childSummaryRow(entry: { seqStart: number; seqEnd: number; item: AgentTimelineItem }): ChildSummaryRow {
+  const item = entry.item;
+  const row: ChildSummaryRow = { k: String(entry.seqStart), i: "Puzzle", t: "动态", c: "unknown" };
+  switch (item.type) {
+    case "reasoning": Object.assign(row, { i: "Brain", t: "思考", x: formatReasoningText(item.text), c: "reasoning" }); break;
+    case "tool_call": {
+      const presentation = resolveToolCallPresentation(item);
+      Object.assign(row, { i: presentation.icon, t: zh(presentation.label), x: presentation.summary, c: presentation.category, s: item.status });
+      break;
+    }
+    case "assistant_message": Object.assign(row, { i: "MessageSquare", t: "Agent", x: item.text, c: "communication" }); break;
+    case "user_message": Object.assign(row, { i: "MessageSquare", t: "提示词", x: item.text, c: "communication" }); break;
+    case "todo": Object.assign(row, { i: "ListChecks", t: "任务", x: `已完成 ${item.items.filter((task) => task.completed).length}/${item.items.length} 项`, c: "plan" }); break;
+    case "error": Object.assign(row, { i: "CircleX", t: "错误", x: item.message, c: "failed" }); break;
+    case "notification": Object.assign(row, { i: "Bell", t: LEVELS[item.level] ?? item.level, x: item.message, c: item.level === "error" ? "failed" : "communication" }); break;
+    case "compaction": Object.assign(row, { i: "Archive", t: "上下文已压缩", c: "plan", s: item.status }); break;
+    case "plugin": row.t = item.kind; break;
+  }
+  row.t = clip(row.t, 36) ?? "动态";
+  row.x = clip(row.x, 72);
+  return row;
+}
+
+/**
+ * The child's status for the card: closed when archived or not loaded. 0.6.0 (codex-F18): loaded means a live record, the
+ * one carrying `activeTurn` (shared/child-agent.ts childLoaded): a daemon that went down leaves its Agents stored as
+ * running or idle, and reading one of those would load it.
+ */
+function cardStatus(agent: ChildRecord): string | null {
+  return agent.archivedAt || !childLoaded(agent) ? "closed" : agent.status ?? null;
+}
+
+/**
+ * Reads locally; the phone receives only the three compact rows it actually draws. 0.6.0 merge: the card's 0.6.0 rules
+ * for reading a child (loaded by its record, fail closed when the status check fails) moved here with the reading.
+ */
+export async function handleChildSummary(input: ChildSummaryInput, context: PluginHandlerContext): Promise<ChildSummaryOutput> {
+  const missing: ChildSummaryOutput = { status: "missing", agent: null, rows: [] };
+  if (input.agentId.startsWith("provider:")) return missing;
+  const handle = context.paseo.agents.ref(input.agentId);
+  // `fetch_agent` reads the stored record of an Agent that is not loaded and never loads it.
+  let agent: ChildRecord | null | undefined;
+  try {
+    agent = (await handle.refresh())?.agent ?? null;
+  } catch (error) {
+    if (/not found/i.test(error instanceof Error ? error.message : String(error))) return missing;
+    // 0.6.0 (grok-F9, pi-F2): no answer, so no telling whether reading would load the child: read nothing by itself.
+    // The user's own read still goes ahead, as it would for a closed child.
+    if (!input.manual) return { status: "unconfirmed", agent: null, rows: [] };
+    agent = undefined;
+  }
+  if (agent === null) return missing;
+  const status = agent ? cardStatus(agent) : null;
+  const current = status ? { status } : null;
+  if (!input.manual && !childReadable(status)) return { status: "closed", agent: current, rows: [] };
+  if (input.statusOnly) return { status: "ok", agent: current, rows: [] };
+  const page = await handle.timeline.refetch({ direction: "tail", limit: CHILD_TIMELINE_PAGE_SIZE, projection: "projected" });
+  const after = page.agent ? cardStatus(page.agent) : status;
+  const output: ChildSummaryOutput = {
+    status: "ok",
+    agent: after ? { status: after } : null,
+    rows: recentChildTimelineEntries(page.entries).slice(-3).map(childSummaryRow),
+  };
+  // Keep even three long tool summaries below ~10 KiB/min (12 responses plus RPC envelopes and 4/3 relay expansion).
+  // Sequence start is stable for an updated entry; the revision sequence need not cross the wire just to key a row.
+  while (Buffer.byteLength(JSON.stringify(output)) > 500) {
+    const candidates = output.rows.filter((row) => row.x && Buffer.byteLength(row.x) > 3);
+    const longest = candidates.sort((left, right) => Buffer.byteLength(right.x!) - Buffer.byteLength(left.x!))[0];
+    if (longest) {
+      const budget = Buffer.byteLength(longest.x!) - 12;
+      longest.x = budget < 6 ? undefined : clip(longest.x, budget);
+      continue;
+    }
+    const title = output.rows.filter((row) => Buffer.byteLength(row.t) > 12).sort((left, right) => Buffer.byteLength(right.t) - Buffer.byteLength(left.t))[0];
+    if (!title) break;
+    title.t = clip(title.t, 12)!;
+  }
+  return output;
+}

@@ -11,7 +11,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, stat, type FileHandle } from "node:fs/promises";
+import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -28,6 +28,8 @@ export interface CliDeps {
   store: BoardStore;
   /** Paseo 项目列表（不含随手记）。 */
   loadProjects: () => Promise<BoardProject[]>;
+  /** Paseo 的持久工作区归属；命令行无需连接 daemon。 */
+  loadWorkspaces?: () => Promise<BoardWorkspace[]>;
   stdout: (text: string) => void;
   /** Standard input as text, refused once it passes `maxBytes`. */
   readStdin: (maxBytes: number) => Promise<string>;
@@ -35,13 +37,15 @@ export interface CliDeps {
   env: Record<string, string | undefined>;
 }
 
+export interface BoardWorkspace { projectId: string; cwd: string }
+
 const INBOX: BoardProject = { id: INBOX_PROJECT_ID, name: "随手记", path: "" };
 /** UTF-8 takes at most 3 bytes per UTF-16 unit, so a larger body file or stdin can never pass the body limit. */
 const MAX_BODY_BYTES = BODY_MAX_LENGTH * 3;
 /** The same bound as the `paseo project ls` output that projects.json stands in for. */
 const MAX_PROJECTS_BYTES = 8 * 1024 * 1024;
 const VALUE_OPTIONS = new Set(["project", "kind", "status", "title", "body", "body-file", "priority", "request-id", "limit"]);
-const FLAG_OPTIONS = new Set(["json", "pinned", "no-pinned", "all", "trash", "help", "high", "normal"]);
+const FLAG_OPTIONS = new Set(["json", "pinned", "no-pinned", "all", "trash", "help", "high", "normal", "history"]);
 
 export interface ParsedArgs { command: string; positionals: string[]; values: Map<string, string>; flags: Set<string> }
 
@@ -64,14 +68,26 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 }
 
 /** 项目引用：inbox / prj_… / 绝对路径 / 名称（精确或唯一子串）。省略时按当前目录归属。 */
-export function resolveProject(ref: string | undefined, projects: readonly BoardProject[], cwd: string): BoardProject {
+export function resolveProject(ref: string | undefined, projects: readonly BoardProject[], cwd: string, workspaces: readonly BoardWorkspace[] = []): BoardProject {
   const byPath = (target: string): BoardProject | null => {
     const resolved = path.resolve(target);
+    const contains = (root: string) => resolved === root || resolved.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+    // Workspace ownership wins even when an external worktree sits below a different project's root.
+    const matches = workspaces.filter(workspace => contains(path.resolve(workspace.cwd)))
+      .sort((a, b) => path.resolve(b.cwd).length - path.resolve(a.cwd).length);
+    const closest = matches[0];
+    if (closest) {
+      const equallyClose = matches.filter(workspace => path.resolve(workspace.cwd).length === path.resolve(closest.cwd).length);
+      if (new Set(equallyClose.map(workspace => workspace.projectId)).size > 1) throw new CliError(`目录 ${target} 对应多个工作区项目，请用 --project 指定项目 ID。`);
+      const project = projects.find(project => project.id === closest.projectId);
+      if (!project) throw new CliError(`目录 ${target} 的工作区所属项目已不可用，请用 --project 指定项目。`);
+      return project;
+    }
     let best: BoardProject | null = null;
     for (const project of projects) {
       if (!project.path) continue;
       const root = path.resolve(project.path);
-      if (resolved === root || resolved.startsWith(root + path.sep)) if (!best || root.length > path.resolve(best.path).length) best = project;
+      if (contains(root)) if (!best || root.length > path.resolve(best.path).length) best = project;
     }
     return best;
   };
@@ -94,6 +110,23 @@ export function resolveProject(ref: string | undefined, projects: readonly Board
   throw new CliError(`找不到项目「${wanted}」。可用项目：inbox、${projects.map(p => p.name).join("、") || "（无）"}`);
 }
 
+async function resolveCliProject(ref: string | undefined, projects: readonly BoardProject[], deps: CliDeps, cwd = deps.cwd): Promise<BoardProject> {
+  if (ref?.trim() && !path.isAbsolute(ref.trim())) return resolveProject(ref, projects, cwd);
+  const workspaces = await deps.loadWorkspaces?.() ?? [];
+  const paths = new Map<string, Promise<string>>();
+  const canonical = (value: string) => {
+    if (!paths.has(value)) paths.set(value, realpath(value).catch(() => path.resolve(value)));
+    return paths.get(value)!;
+  };
+  const [target, canonicalProjects, canonicalWorkspaces] = await Promise.all([
+    canonical(ref?.trim() || cwd),
+    Promise.all(projects.map(async project => ({ ...project, path: project.path ? await canonical(project.path) : "" }))),
+    Promise.all(workspaces.map(async workspace => ({ ...workspace, cwd: await canonical(workspace.cwd) }))),
+  ]);
+  const project = resolveProject(undefined, canonicalProjects, target, canonicalWorkspaces);
+  return projects.find(candidate => candidate.id === project.id)!;
+}
+
 export const USAGE = `拾页 · 项目手记 命令行
 
 用法：node bin/notes.mjs <命令> [选项]
@@ -105,7 +138,7 @@ export const USAGE = `拾页 · 项目手记 命令行
   add --title <标题> [--project <ref>] [--kind task|prompt|idea] [--body <正文> | --body-file <路径|->]
       [--status todo|doing|done] [--high] [--pinned] [--request-id <id>]
                                  新增一条；省略 --project 时按当前目录（或 PASEO_AGENT_CWD）归属
-  show <itemId>                  显示一条完整内容
+  show <itemId> [--history]      显示一条完整内容；--history 单独读取最近 10 版修改快照
   update <itemId> [--title] [--body|--body-file] [--kind] [--status] [--high|--normal] [--pinned|--no-pinned]
   done <itemId>                  标记任务完成
   delete <itemId> / restore <itemId>
@@ -218,7 +251,7 @@ async function locateItem(id: string, args: ParsedArgs, deps: CliDeps, projects:
   if (!z.string().uuid().safeParse(id).success) throw new CliError(`「${id}」不是有效的记录 ID。`);
   const nameOf = (projectId: string) => projects.find(p => p.id === projectId) ?? { id: projectId, name: `历史项目 · ${projectId.slice(-8)}`, path: "" };
   if (args.values.has("project")) {
-    const project = resolveProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps.cwd);
+    const project = await resolveCliProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps);
     const item = (await deps.store.read(project.id)).items.find(x => x.id === id);
     if (!item) throw new CliError(`项目「${project.name}」里没有记录 ${id}。`);
     return { item, project };
@@ -251,7 +284,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     const projects = await projectsWithInbox(deps);
     const nameOf = (projectId: string) => projects.find(p => p.id === projectId)?.name ?? `历史项目 · ${projectId.slice(-8)}`;
     const { boards, unavailable } = args.values.has("project")
-      ? { boards: [await deps.store.read(resolveProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps.cwd).id)], unavailable: [] as Unavailable }
+      ? { boards: [await deps.store.read((await resolveCliProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps)).id)], unavailable: [] as Unavailable }
       : await readEveryBoard(deps, projects);
     const kind = args.values.has("kind") ? kindSchema.parse(args.values.get("kind")) : undefined;
     const status = args.values.has("status") ? statusSchema.parse(args.values.get("status")) : undefined;
@@ -274,7 +307,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
 
   if (args.command === "add") {
     const projects = await deps.loadProjects();
-    const project = resolveProject(args.values.get("project"), projects, deps.env.PASEO_AGENT_CWD ?? deps.cwd);
+    const project = await resolveCliProject(args.values.get("project"), projects, deps, deps.env.PASEO_AGENT_CWD ?? deps.cwd);
     if (!args.values.has("title")) throw new CliError("add 需要 --title。");
     const fields: NoteFields = fieldsSchema.parse({
       kind: args.values.get("kind") ?? "task",
@@ -296,7 +329,10 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     const projects = await projectsWithInbox(deps);
     const { item, project } = await locateItem(id, args, deps, projects);
     if (args.command === "show") {
-      emit(`${formatItem(item, project.name)}\n${item.body ? "\n" + item.body : "（无正文）"}`, { ...item, projectName: project.name });
+      const loaded = args.flags.has("history") ? await deps.store.readHistory(item.projectId, item.id) : undefined;
+      const history = loaded?.versions;
+      const warning = loaded?.missing ? `\n\n有 ${loaded.missingCount} 个修改快照缺失。请从备份恢复，或在手记详情确认「放弃缺失的快照并继续」；当前正文仍保留。` : "";
+      emit(`${formatItem(item, project.name)}\n${item.body ? "\n" + item.body : "（无正文）"}${history ? "\n\n修改快照\n" + history.map(version => `第 ${version.revision} 版 · ${version.title}\n${version.body}`).join("\n\n") : ""}${warning}`, { ...item, projectName: project.name, ...(loaded ? { history: loaded.versions, historyMissing: loaded.missing, historyMissingCount: loaded.missingCount } : {}) });
       return 0;
     }
     const requestId = args.values.get("request-id") ?? `cli-${randomUUID()}`;
@@ -342,10 +378,25 @@ export async function loadPaseoProjects(env: Record<string, string | undefined>)
 }
 
 
+/** 0.11 workspace-registry: JSON 数组，cwd → projectId；CLI 的 workspace ls 行只有项目显示名。 */
+export async function loadPaseoWorkspaces(env: Record<string, string | undefined>): Promise<BoardWorkspace[]> {
+  try {
+    const raw = await readFileLimited(path.join(paseoHome(env), "projects", "workspaces.json"), MAX_PROJECTS_BYTES, "workspaces.json ");
+    const rows = z.array(z.object({
+      workspaceId: z.string(), projectId: z.string(), cwd: z.string().refine(path.isAbsolute), archivedAt: z.string().nullable(),
+    })).parse(JSON.parse(raw));
+    return rows.filter(row => !row.archivedAt).map(({ projectId, cwd }) => ({ projectId, cwd }));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new CliError(`无法读取 Paseo 工作区归属：${(error as Error).message}。请用 --project 指定项目 ID。`);
+  }
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const deps: CliDeps = {
     store: new BoardStore(defaultStorageRoot()),
     loadProjects: () => loadPaseoProjects(process.env),
+    loadWorkspaces: () => loadPaseoWorkspaces(process.env),
     stdout: text => process.stdout.write(text),
     readStdin: maxBytes => readLimited(process.stdin, maxBytes, "标准输入"),
     cwd: process.cwd(),

@@ -1,28 +1,20 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
-import React, { useMemo, useState, type ReactNode } from "react";
-import { Pressable, Text, View, type TextStyle } from "react-native";
-import { ChildAgentTimeline } from "./child-agent";
-import { useHighlightTokens, type HighlightToken } from "./highlight";
-import type { ActivityStyles } from "./activity";
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Pressable, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import { extractPaseoChildAgentId } from "../shared/child-agent";
+import { instantParts, instantText, isInstantString } from "../shared/clock";
+import { exaOutputText, exaToolKind, exaToolSummary, parseExaSearchResults, type ExaSearchResult, } from "../shared/exa";
+import { formatUnknownValue, notInHeader, outputView, paseoToolLeafName, paseoToolResult, paseoToolSummary, stripAnsi, type ActivityPalette, } from "../shared/presentation";
 import { statusLabel } from "../shared/vivid-model";
-import {
-  exaOutputText,
-  exaToolKind,
-  exaToolSummary,
-  parseExaSearchResults,
-  type ExaSearchResult,
-} from "../shared/exa";
-import {
-  formatUnknownValue,
-  notInHeader,
-  paseoToolLeafName,
-  paseoToolSummary,
-  paseoToolResult,
-  previewText,
-  type ActivityPalette,
-} from "../shared/presentation";
+import type { ActivityStyles } from "./activity";
+import { ChildAgentTimeline } from "./child-agent";
+import { OutputCopyButtons } from "./copy-button";
+import { useHighlightTokens, type HighlightToken } from "./highlight";
+import { aria } from "./kit";
+import { StatusPill, statusColor } from "./status-pill";
+import { useForeground } from "./use-foreground";
+export { StatusPill } from "./status-pill";
 
 type Theme = PluginTimelineItemProps["theme"];
 type JsonRecord = Record<string, unknown>;
@@ -95,35 +87,6 @@ function stableItemKey(value: unknown, prefix: string): string {
   }
 }
 
-function statusColor(
-  status: string | undefined,
-  palette: ActivityPalette
-): string {
-  switch (status?.toLowerCase()) {
-    case "running":
-    case "initializing":
-      return palette.statusColors.running;
-    case "completed":
-    case "idle":
-    case "active":
-    case "succeeded":
-    case "healthy":
-    case "success":
-      return palette.statusColors.completed;
-    case "failed":
-    case "error":
-    case "unhealthy":
-      return palette.statusColors.failed;
-    case "canceled":
-    case "paused":
-    case "stopped":
-    case "closed":
-      return palette.statusColors.canceled;
-    default:
-      return palette.categoryColors.unknown;
-  }
-}
-
 export function Section({
   title,
   children,
@@ -141,20 +104,114 @@ export function Section({
   );
 }
 
-export function StatusPill({
+// 本地补丁（0.6.0，opus-F49）：原生端（Yoga）的 Text 默认不收缩，放在 row 里长了就溢出、被裁掉。
+/** A row child that takes the rest of the row (main axis = width, so `flex: 1` is safe here). */
+const ROW_FILL: ViewStyle = { flex: 1, minWidth: 0 };
+/** Secondary words after a list row's title: they may wrap, and never take more than 60% of the row from the title. */
+const ROW_TAIL: TextStyle = { flexShrink: 1, maxWidth: "60%" };
+
+// 本地补丁（0.6.0，opus-F53）：时间里的「9 小时后」按分钟刷新。显示中的时间共用一个 60 秒定时器：App 在后台时不订阅，
+// 没有订阅者就停；停着时读到的「现在」旧了一分钟以上就当场换新，展开一行时不会先闪一下过时的相对时间。
+const minuteListeners = new Set<() => void>();
+let minuteTimer: ReturnType<typeof setInterval> | null = null;
+let minuteNow = Date.now();
+function subscribeMinute(listener: () => void): () => void {
+  minuteListeners.add(listener);
+  if (minuteTimer === null) {
+    minuteTimer = setInterval(() => {
+      minuteNow = Date.now();
+      for (const each of minuteListeners) each();
+    }, 60_000);
+  }
+  return () => {
+    minuteListeners.delete(listener);
+    if (minuteListeners.size === 0 && minuteTimer !== null) {
+      clearInterval(minuteTimer);
+      minuteTimer = null;
+    }
+  };
+}
+const idleMinute = () => () => {};
+function readMinute(): number {
+  if (minuteTimer === null && Date.now() - minuteNow >= 60_000) minuteNow = Date.now();
+  return minuteNow;
+}
+/** The time now, refreshed every minute while the app is in the foreground. */
+function useMinuteNow(): number {
+  const foreground = useForeground();
+  return useSyncExternalStore(foreground ? subscribeMinute : idleMinute, readMinute, readMinute);
+}
+
+/**
+ * 本地补丁（0.6.0，opus-F53）：严格的 ISO-8601 时刻（daemon 写的 `2026-10-13T00:00:00.000Z` 这类 UTC 串）按设备时区显示成
+ * 「明天 05:00（9 小时后）」，规则见 shared/clock.ts；将来的相对时间用运行中的蓝色，过去的用次要色。
+ * 原文不丢：点一下换成原文，再点换回；读屏念的名称里两者都有。不是严格时刻的值原样显示。
+ * 按下区是一个 row，里面的 Text 收缩折行；放进 row 里时由 `containerStyle` 给出它在 row 里的伸缩。
+ */
+function InstantText({
   value,
+  prefix = "",
+  style,
+  containerStyle,
   palette,
   styles,
 }: {
   value: string;
+  /** Words before the time, e.g. 「0 9 * * * · 下次运行 」. */
+  prefix?: string;
+  style: StyleProp<TextStyle>;
+  containerStyle?: StyleProp<ViewStyle>;
   palette: ActivityPalette;
   styles: ActivityStyles;
 }) {
-  const color = statusColor(value, palette);
+  const now = useMinuteNow();
+  const [raw, setRaw] = useState(false);
+  const parts = instantParts(value, now);
+  if (!parts) {
+    return (
+      <Text selectable style={style}>
+        {`${prefix}${value}`}
+      </Text>
+    );
+  }
   return (
-    <View style={styles.paseoStatus}>
-      <Text style={[styles.paseoStatusText, { color }]}>{statusLabel(value)}</Text>
-    </View>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${prefix}${instantText(value, now)}，原文 ${value}`}
+      accessibilityState={{ selected: raw }}
+      {...aria({ pressed: raw })}
+      onPress={() => setRaw((current) => !current)}
+      style={[{ flexDirection: "row" }, containerStyle]}
+    >
+      <Text selectable style={[style, { flexShrink: 1, minWidth: 0 }]}>
+        {raw ? `${prefix}${value}` : `${prefix}${parts.day} ${parts.clock}`}
+        {!raw && parts.relative ? (
+          <Text style={{ color: parts.future ? palette.statusColors.running : styles.mutedText.color }}>
+            {`（${parts.relative}）`}
+          </Text>
+        ) : null}
+      </Text>
+    </Pressable>
+  );
+}
+
+/** One scalar field value: strict ISO-8601 instants read in the device's zone (`InstantText`), the rest as text. */
+function ScalarValue({
+  value,
+  palette,
+  styles,
+}: {
+  value: unknown;
+  palette: ActivityPalette;
+  styles: ActivityStyles;
+}) {
+  if (isInstantString(value)) {
+    return <InstantText value={value} style={styles.paseoValue} palette={palette} styles={styles} />;
+  }
+  return (
+    <Text selectable style={styles.paseoValue}>
+      {scalarText(value)}
+    </Text>
   );
 }
 
@@ -169,12 +226,7 @@ function PaseoFieldValue({
   styles: ActivityStyles;
   depth?: number;
 }) {
-  if (depth > 2)
-    return (
-      <Text selectable style={styles.paseoValue}>
-        {scalarText(value)}
-      </Text>
-    );
+  if (depth > 2) return <ScalarValue value={value} palette={palette} styles={styles} />;
   const record = asRecord(value);
   if (record) {
     const entries = Object.entries(record).filter(
@@ -212,11 +264,7 @@ function PaseoFieldValue({
       </View>
     );
   }
-  return (
-    <Text selectable style={styles.paseoValue}>
-      {scalarText(value)}
-    </Text>
-  );
+  return <ScalarValue value={value} palette={palette} styles={styles} />;
 }
 
 function PaseoField({
@@ -381,7 +429,7 @@ function PromptBlock({
     <Pressable
       accessibilityLabel={`${expanded ? "收起" : "展开"}提示词：${text}`}
       accessibilityRole="button"
-      accessibilityState={{ expanded }}
+      {...aria({ expanded })}
       onPress={() => setExpanded((current) => !current)}
     >
       <Text numberOfLines={expanded ? undefined : 2} selectable style={styles.paseoPrompt}>
@@ -448,15 +496,22 @@ export function PaseoCodeBlock({
   styles: ActivityStyles;
 }) {
   const [showAll, setShowAll] = useState(false);
-  const preview = useMemo(() => previewText(code), [code]);
-  const displayCode = showAll ? code : preview.text;
+  // 0.5.0: terminal escape sequences (logs, terminal captures) never show; the copy buttons sit next to the label.
+  const clean = useMemo(() => stripAnsi(code), [code]);
+  const view = useMemo(() => outputView(code, clean, showAll, language === "ansi", false), [clean, code, language, showAll]);
+  const { preview, shown: displayCode } = view;
   const tokens = useHighlightTokens(
-    displayCode,
+    view.highlight,
     language,
     theme.colors,
   );
+  const title = label ?? "输出";
   return (
-    <Section title={label ?? "输出"} styles={styles}>
+    <View style={styles.section}>
+      <View style={styles.codeHeader}>
+        <Text style={[styles.detailLabel, { flexShrink: 1 }]}>{title}</Text>
+        <OutputCopyButtons clean={clean} raw={code} label={`复制${title}`} theme={theme} styles={styles} />
+      </View>
       <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
         <View style={styles.codeSurface}>
           {tokens ? (
@@ -471,6 +526,7 @@ export function PaseoCodeBlock({
       {preview.truncated ? (
         <Pressable
           accessibilityRole="button"
+          {...aria({ expanded: showAll })}
           onPress={() => setShowAll(!showAll)}
           style={styles.showMoreButton}
         >
@@ -481,7 +537,7 @@ export function PaseoCodeBlock({
           </Text>
         </Pressable>
       ) : null}
-    </Section>
+    </View>
   );
 }
 
@@ -638,6 +694,7 @@ function ModeList({
                   <Text
                     style={[
                       styles.paseoListItemMeta,
+                      ROW_TAIL,
                       { color: palette.categoryColors.agent },
                     ]}
                   >
@@ -758,6 +815,7 @@ function AgentTool({
           {childAgentId ? (
             <ChildAgentTimeline
               agentId={childAgentId}
+              theme={theme}
               palette={palette}
               styles={styles}
             />
@@ -1680,6 +1738,8 @@ function ScheduleList({
       <View style={styles.paseoList}>
         {schedules.map((schedule) => {
           const record = asRecord(schedule);
+          const expression = fieldString(asRecord(record?.cadence), "expression");
+          const nextRunAt = fieldString(record, "nextRunAt");
           return (
             <View
               key={stableItemKey(schedule, "schedule")}
@@ -1699,10 +1759,18 @@ function ScheduleList({
                   />
                 ) : null}
               </View>
-              <Text style={styles.paseoListItemMeta}>
-                {fieldString(asRecord(record?.cadence), "expression") ??
-                  fieldString(record, "nextRunAt")}
-              </Text>
+              {/* 本地补丁（0.6.0，opus-F53）：cron 表达式后面接设备时区的下次运行时间（暂停、结束的没有下次）。 */}
+              {nextRunAt ? (
+                <InstantText
+                  value={nextRunAt}
+                  prefix={`${expression ? `${expression} · ` : ""}下次运行 `}
+                  style={styles.paseoListItemMeta}
+                  palette={palette}
+                  styles={styles}
+                />
+              ) : expression ? (
+                <Text style={styles.paseoListItemMeta}>{expression}</Text>
+              ) : null}
               <Text numberOfLines={1} style={styles.paseoListItemMeta}>
                 {fieldString(record, "prompt")}
               </Text>
@@ -1731,14 +1799,24 @@ function ScheduleRuns({
       <View style={styles.paseoList}>
         {runs.map((run) => {
           const record = asRecord(run);
+          const scheduledFor = fieldString(record, "scheduledFor");
           return (
             <View key={stableItemKey(run, "run")} style={styles.paseoListItem}>
               <View style={styles.paseoListItemHeader}>
-                <Text style={styles.paseoListItemTitle}>
-                  {fieldString(record, "scheduledFor") ??
-                    fieldString(record, "id") ??
-                    "运行"}
-                </Text>
+                {/* 本地补丁（0.6.0，opus-F53）：这次运行排定的时刻，按设备时区显示。 */}
+                {scheduledFor ? (
+                  <InstantText
+                    value={scheduledFor}
+                    style={styles.paseoListItemTitle}
+                    containerStyle={ROW_FILL}
+                    palette={palette}
+                    styles={styles}
+                  />
+                ) : (
+                  <Text style={styles.paseoListItemTitle}>
+                    {fieldString(record, "id") ?? "运行"}
+                  </Text>
+                )}
                 {fieldString(record, "status") ? (
                   <StatusPill
                     value={fieldString(record, "status")!}
@@ -2361,7 +2439,7 @@ function BrowserLogs({
               >
                 <View style={styles.paseoListItemHeader}>
                   <Text style={[styles.paseoListItemTitle, { color: statusColor(level, palette) }]}>{level}</Text>
-                  <Text style={styles.paseoListItemMeta}>
+                  <Text style={[styles.paseoListItemMeta, ROW_TAIL]}>
                     {fieldString(record, "source")}
                   </Text>
                 </View>
@@ -2415,9 +2493,12 @@ function ExaResultList({
       <View style={styles.paseoList}>
         {results.map((result) => (
           <View key={result.url ?? result.title} style={styles.paseoListItem}>
-            <Text selectable style={styles.paseoListItemTitle}>
-              {result.title}
-            </Text>
+            {/* 本地补丁（0.6.0，opus-F49）：标题样式带 flex: 1，放在 row 里才安全；直接放进自动高度的列，原生端可能塌成 0 高。 */}
+            <View style={styles.paseoListItemHeader}>
+              <Text selectable style={styles.paseoListItemTitle}>
+                {result.title}
+              </Text>
+            </View>
             {result.url ? (
               <Text selectable style={styles.paseoListItemMeta}>
                 {result.url}

@@ -7,7 +7,7 @@ type Fixture = typeof globalThis & {
   __previewRpcCalls: Array<{ name: string; input: { agentId?: string; attentionTimestamp?: string } }>; __previewTimelineCalls: unknown[];
   __previewTimelineActive(id: string): number; __previewGetAgent(id: string): { attentionTimestamp: string; pendingPermissions: unknown[] };
   __previewCompleteAgent(id: string): { attentionTimestamp: string; previewReply: { text: string } }; __previewNativeReadAgent(id: string): boolean;
-  __previewUpdateAgent(id: string, changes: object): void;
+  __previewUpdateAgent(id: string, changes: object): void; __previewSetResume(entry: { agentId: string; status: string; reason: string | null }): void;
   __previewRestoreAudit?: { before: { agentId: string; agentCount: number; userMessages: number }; after: { agentId: string; agentCount: number; userMessages: number } };
 };
 const ranges = /^(24 小时|最近 7 天|最近 30 天|全部时间)$/;
@@ -111,7 +111,8 @@ test("overview quick scopes, status filtering, search, and fixture screenshot", 
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   await open(page, testInfo);
-  await expect(page.getByRole("button", { name: "需要处理 4", exact: true })).toBeVisible();
+  // A child Agent's unread result (验证重复请求) no longer counts: its parent has it (2.13, opus-F15).
+  await expect(page.getByRole("button", { name: "需要处理 3", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "执行中 3", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "未读 2", exact: true })).toBeVisible();
   // The first session is on screen right under the toolbar and chips.
@@ -119,7 +120,7 @@ test("overview quick scopes, status filtering, search, and fixture screenshot", 
   expect(first!.y).toBeLessThan(40 + 160);
   await noHorizontalOverflow(page);
   await screenshot(page, testInfo, "overview");
-  await page.getByRole("button", { name: "需要处理 4", exact: true }).click();
+  await page.getByRole("button", { name: "需要处理 3", exact: true }).click();
   await expect(page.getByRole("button", { name: "查看 检查发布流水线，异常", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "查看 规划下一轮迭代，待回复", exact: true })).toHaveCount(0);
@@ -165,7 +166,7 @@ test("后台执行中: a finished session whose subagent still works is 执行�
   await open(page, testInfo, "background");
   await expect(page.getByRole("button", { name: "执行中 4", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "未读 1", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "需要处理 3", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "需要处理 2", exact: true })).toBeVisible();
   const row = page.getByRole("button", { name: "查看 整理性能基线，执行中", exact: true });
   await expect(row.getByText("后台 · 整理压测脚本", { exact: true })).toBeVisible();
   await expect(row.getByText(/^后台 \d+:\d{2}$/)).toBeVisible();
@@ -206,6 +207,67 @@ test("inspector timeline, tool details, history, diagnostics, and back", async (
   await expect(detail.getByText("payment-root", { exact: true })).toBeVisible();
   await noHorizontalOverflow(page);
   await closeDetail(page);
+  expect(errors).toEqual([]);
+});
+
+test("查找 in the timeline counts hits among the loaded rows, steps through them and opens a collapsed tool", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo);
+  await page.getByRole("button", { name: "查看 重构支付服务，执行中", exact: true }).click();
+  const detail = page.getByTestId("agent-detail");
+  await detail.getByRole("tab", { name: "时间线", exact: true }).click();
+  await detail.getByRole("button", { name: "查找", exact: true }).click();
+  const box = detail.getByRole("textbox", { name: "在时间线里查找", exact: true });
+  await box.fill("幂等");
+  // Only the loaded rows are searched, and the bar says how many (codex-B1).
+  await expect(detail.getByLabel(/^第 1 处，共 \d+ 处$/)).toBeVisible();
+  await expect(detail.getByText(/^已加载 \d+ 条/).first()).toBeVisible();
+  await detail.getByRole("button", { name: "下一处", exact: true }).click();
+  await expect(detail.getByLabel(/^第 2 处，共 \d+ 处$/)).toBeVisible();
+  await detail.getByRole("button", { name: "上一处", exact: true }).click();
+  await expect(detail.getByLabel(/^第 1 处，共 \d+ 处$/)).toBeVisible();
+  // Case does not matter, every word must appear, and a hit inside a collapsed tool output opens that row.
+  await box.fill("pass PAYMENTS");
+  await expect(detail.getByLabel(/^第 1 处，共 \d+ 处$/)).toBeVisible();
+  await expect(detail.getByText("PASS payments/idempotency.test.ts", { exact: false }).first()).toBeVisible();
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "timeline-find");
+  await box.fill("没有这个词");
+  await expect(detail.getByLabel("没有找到", { exact: true })).toBeVisible();
+  await expect(detail.getByText(/^已加载的 \d+ 条里没有找到/).first()).toBeVisible();
+  await detail.getByRole("button", { name: "关闭查找", exact: true }).click();
+  await expect(box).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("查找's 下一处 inside one long tool output scrolls to that hit itself, 211 lines further down (codex-obs-send-ui-F2)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo);
+  await page.getByRole("button", { name: "查看 检查发布流水线，异常", exact: true }).click();
+  const detail = page.getByTestId("agent-detail");
+  await detail.getByRole("tab", { name: "时间线", exact: true }).click();
+  await detail.getByRole("button", { name: "查找", exact: true }).click();
+  await detail.getByRole("textbox", { name: "在时间线里查找", exact: true }).fill("ECONNRESET");
+  // Both hits are in the verbose rerun's output, which the first one opens.
+  await expect(detail.getByLabel("第 1 处，共 2 处", { exact: true })).toBeVisible();
+  const current = detail.getByTestId("find-current");
+  await expect(current).toHaveText("ECONNRESET");
+  await expect(current).toBeInViewport();
+  await detail.getByRole("button", { name: "下一处", exact: true }).click();
+  await expect(detail.getByLabel("第 2 处，共 2 处", { exact: true })).toBeVisible();
+  // The same row, 211 lines down: the list scrolls to the hit's line, not just to the row.
+  await expect(current.locator("xpath=..")).toContainText("(retry 3/3), giving up");
+  await expect(current).toBeInViewport();
+  const box = (await current.boundingBox())!, viewport = page.viewportSize()!;
+  expect(box.y).toBeGreaterThanOrEqual(0); expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  // 上一处 goes back up to the first one, inside the same output.
+  await detail.getByRole("button", { name: "上一处", exact: true }).click();
+  await expect(detail.getByLabel("第 1 处，共 2 处", { exact: true })).toBeVisible();
+  await expect(current.locator("xpath=..")).toContainText("(retry 1/3)");
+  await expect(current).toBeInViewport();
+  await noHorizontalOverflow(page);
   expect(errors).toEqual([]);
 });
 
@@ -331,6 +393,8 @@ test("activity, empty, disconnected, loading, stale and retained error states", 
   await expect(page.getByLabel("同步失败", { exact: true }).first()).toBeVisible();
 });
 
+const heatCell = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}–\d{2}:\d{2}，/;
+const dailyBar = /^\d{4}-\d{2}-\d{2}，完成 \d+，失败 \d+，取消 \d+/;
 test("analytics heatmap, daily results and project usage remain interactive on narrow screens", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -351,23 +415,29 @@ test("analytics heatmap, daily results and project usage remain interactive on n
   await expect(page.getByRole("button", { name: "24 小时", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^筛选/ })).toHaveCount(0);
   await expect(page.getByText("活跃时段", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /时 UTC，执行事件/ })).toHaveCount(168);
-  await expect(page.getByRole("button", { name: /时 UTC，执行事件 [1-9][0-9]*$/ }).first()).toBeVisible();
-  await page.getByRole("button", { name: /0 时 UTC，执行事件/ }).first().click();
-  await expect(page.getByText(/00:00–01:00 UTC$/)).toBeVisible();
-  const gapDay = await page.evaluate(() => new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10));
-  await page.getByRole("button", { name: `${gapDay} 3 时 UTC，执行事件 无观测数据`, exact: true }).click();
+  // Cells are local days and hours of the browser's zone (the fixture sends its offset), not UTC.
+  await expect(page.getByRole("button", { name: heatCell })).toHaveCount(168);
+  await expect(page.getByRole("button", { name: /，执行事件 [1-9][0-9]*$/ }).first()).toBeVisible();
+  await page.getByRole("button", { name: /^\d{4}-\d{2}-\d{2} 00:\d{2}–01:\d{2}，执行事件/ }).first().click();
+  await expect(page.getByText(/^\d{4}-\d{2}-\d{2} · 00:\d{2}–01:\d{2}$/)).toBeVisible();
+  // The fixture's coverage gap starts at 03:00 UTC two days ago: find that hour on the browser's clock.
+  const gapCell = await page.evaluate(() => {
+    const offset = -new Date().getTimezoneOffset() * 60_000, at = new Date(Math.floor(Date.now() / 86_400_000) * 86_400_000 - 2 * 86_400_000 + 3 * 3_600_000 + offset);
+    const pad = (value: number) => String(value).padStart(2, "0"), minute = pad(at.getUTCMinutes());
+    return `${at.toISOString().slice(0, 10)} ${pad(at.getUTCHours())}:${minute}–${pad((at.getUTCHours() + 1) % 24)}:${minute}，执行事件 无观测数据`;
+  });
+  await page.getByRole("button", { name: gapCell, exact: true }).click();
   await expect(page.getByText("这个时间段没有在线采集覆盖，不能视为没有执行。", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "输出快照", exact: true }).click();
   await expect(page.getByText("颜色表示提供方报告的输出 tokens 快照峰值，非该小时累计消耗。", { exact: true })).toBeVisible();
   await noHorizontalOverflow(page);
   await screenshot(page, testInfo, "analytics");
-  await page.getByRole("button", { name: /UTC，完成 \d+，失败 \d+，取消 \d+/ }).first().click();
+  await page.getByRole("button", { name: dailyBar }).first().click();
   await expect(page.getByText("每日结果", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "7 天", exact: true }).click();
-  await expect(page.getByRole("button", { name: /UTC，完成 \d+，失败 \d+，取消 \d+/ })).toHaveCount(7);
+  await expect(page.getByRole("button", { name: dailyBar })).toHaveCount(7);
   await page.getByRole("tab", { name: "28 天", exact: true }).click();
-  await expect(page.getByRole("button", { name: /UTC，完成 \d+，失败 \d+，取消 \d+/ })).toHaveCount(28);
+  await expect(page.getByRole("button", { name: dailyBar })).toHaveCount(28);
   await selectProject(page, "Delivery Systems");
   await expect(page.getByRole("button", { name: "查看项目 Delivery Systems", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "查看项目 Commerce Platform", exact: true })).toHaveCount(0);
@@ -623,6 +693,365 @@ test("viewing results keeps them unread until an explicit acknowledgement and a 
   await expect(page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true }).getByLabel("已完成，未读结果", { exact: true })).toBeVisible();
 });
 
+test("需要处理 says why in one line, and rows show questions, plans, limits, todo progress, context, merge requests and heartbeats", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "attention-states");
+  // A question is 待回复, a plan is its own state; each says what it wants without asking a model (opus-B3, opus-F12).
+  const question = page.getByRole("button", { name: "查看 审查数据库迁移，提问", exact: true });
+  await expect(question.getByText("问你：迁移先在哪个环境执行？（预发布 / 生产 / 两边都跑）", { exact: true })).toBeVisible();
+  const plan = page.getByRole("button", { name: "查看 拆分订单服务，计划待批", exact: true });
+  await expect(plan.getByText("计划待批：订单服务拆成读写两层", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "待回复 2", exact: true })).toBeVisible();
+  // Why a turn stopped (opus-B2 / F13), in the device's clock.
+  const limit = page.getByRole("button", { name: "查看 整理性能基线，额度用尽", exact: true });
+  await expect(limit.getByText(/^额度用尽 · (明天 )?\d{2}:\d{2} 恢复$/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /^查看 核对项目名称与工作区，/ }).getByText("可能未收尾：停在工具调用之后，没有收尾回复", { exact: true })).toBeVisible();
+  // A running turn's todo progress and a context window close to full (opus-B12, opus-B13).
+  const running = page.getByRole("button", { name: "查看 重构支付服务，执行中", exact: true });
+  await expect(running.getByText("3/7", { exact: true })).toBeVisible();
+  await expect(running.getByText("上下文 88%", { exact: true })).toBeVisible();
+  // The merge request a reply linked (opus-B16) sits beside the row, not inside it; a heartbeat will wake 规划下一轮迭代 (opus-B8).
+  await expect(page.getByRole("link", { name: "打开合并请求 !128", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^查看 规划下一轮迭代，/ }).getByText(/09:00 唤醒$/)).toBeVisible();
+  expect(await page.locator("button button, [role=button] [role=button]").count()).toBe(0);
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "attention-states");
+  // 恢复后续跑 (opus-B9): a tap, a confirmation that states the wake time, then one schedule request.
+  await limit.click();
+  const detail = page.getByTestId("agent-detail");
+  await expect(detail.getByTestId("stop-card")).toBeVisible();
+  expect(await page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "resume").length)).toBe(0);
+  await detail.getByRole("button", { name: /^恢复后续跑 · .*唤醒$/ }).click();
+  const confirm = page.getByRole("dialog", { name: "恢复后续跑", exact: true });
+  await expect(confirm.getByText(/额度已经恢复/)).toBeVisible();
+  await screenshot(page, testInfo, "resume-confirm");
+  await confirm.getByRole("button", { name: /^确认 .* 续跑$/ }).click();
+  await expect.poll(() => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "resume").map(operation => (operation.input as { agentId: string }).agentId))).toEqual(["performance-baseline"]);
+  // The card reads the ledger: the scheduled resume can be canceled right there, with one more tap (opus-B37).
+  await detail.getByRole("button", { name: "取消续跑", exact: true }).click();
+  await detail.getByRole("button", { name: "确认取消续跑", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.resume.cancel")).map(call => call.agentId)).toEqual(["performance-baseline"]);
+  await expect(toast(page, "已取消续跑")).toBeVisible();
+  // 交给另一个 Provider (opus-B23): a profile on another base is picked, the first message points at the original, one create.
+  await detail.getByRole("button", { name: "交给另一个 Provider…", exact: true }).click();
+  const handover = page.getByRole("dialog", { name: "交给另一个 Provider", exact: true });
+  await expect(handover.getByRole("radio", { name: /^Profile 日常 · Opus 5\.5/ })).toHaveAttribute("aria-checked", "true");
+  await expect(handover.getByRole("radio", { name: /^Profile 实现 · 长程执行与交付，同一额度来源/ })).toBeVisible();
+  await expect(handover.getByRole("textbox").first()).toHaveValue(/paseo inspect performance-baseline/);
+  await screenshot(page, testInfo, "handover");
+  await handover.getByRole("button", { name: "新建并交接", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "create" && operation.workspaceId)
+    .map(operation => ({ provider: (operation.input as { config: { provider: string } }).config.provider, labels: (operation.input as { labels: unknown }).labels })))).toEqual([{ provider: "claude/claude-opus-5-5", labels: { "observatory.handover-from": "performance-baseline" } }]);
+  await expect(handover).toHaveCount(0);
+  // 知道了 on a stop clears it from 需要处理 without calling the turn complete: no completion receipt, the stop stays visible.
+  await closeDetail(page);
+  await page.getByRole("button", { name: /^查看 核对项目名称与工作区，/ }).click();
+  await page.getByTestId("agent-detail").getByRole("button", { name: "知道了", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.read-state.mark")).map(call => [call.agentId, call.kind])).toEqual([["renamed-project-check", "error"]]);
+  await closeDetail(page);
+  await expect(page.getByRole("button", { name: /^查看 核对项目名称与工作区，/ }).getByText("未收尾", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^查看 核对项目名称与工作区，已完成/ })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("恢复后续跑 the ledger could not settle: a restart that may have prompted it is never sent again, an edited heartbeat is the user's (codex-obs-resume-F2, F4)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "attention-states");
+  await page.evaluate(() => (globalThis as Fixture).__previewSetResume({ agentId: "performance-baseline", status: "failed", reason: "restart-unsure" }));
+  await page.getByRole("button", { name: "查看 整理性能基线，额度用尽", exact: true }).click();
+  const card = page.getByTestId("agent-detail").getByTestId("stop-card");
+  await expect(card.getByText("未能确认续跑", { exact: true })).toBeVisible();
+  await expect(card.getByText(/宿主重启打断了这次续跑，没能确认续跑是否送达。为免重复，观测台不会自动重发/)).toBeVisible();
+  // Nothing is sent again on its own: the user looks at the session, then can schedule it again.
+  await expect(card.getByRole("button", { name: "重新安排…", exact: true })).toBeVisible();
+  await expect(card.getByRole("button", { name: "取消续跑", exact: true })).toHaveCount(0);
+  await noHorizontalOverflow(page);
+  await page.waitForTimeout(500); // the state's entrance has played
+  await screenshot(page, testInfo, "resume-restart-unsure");
+  // The card keeps the ledger's answer for a while: a fresh page reads the next state.
+  await open(page, testInfo, "attention-states");
+  await page.evaluate(() => (globalThis as Fixture).__previewSetResume({ agentId: "performance-baseline", status: "canceled", reason: "edited" }));
+  await page.getByRole("button", { name: "查看 整理性能基线，额度用尽", exact: true }).click();
+  await expect(card.getByText("心跳被改过", { exact: true })).toBeVisible();
+  await expect(card.getByText(/续跑的心跳在 Paseo 里被改过，观测台不再管理它/)).toBeVisible();
+  await expect(card.getByRole("button", { name: "取消续跑", exact: true })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: /^恢复后续跑/ })).toBeVisible();
+  await page.waitForTimeout(500); // the state's entrance has played
+  await screenshot(page, testInfo, "resume-edited");
+  expect(await page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "resume" || operation.type === "resume-cancel").length)).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test("就地审批 answers one tool request with the provider's own choices, and 快捷回复 sends the button's words", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "approvals");
+  const operations = () => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "permission" || operation.type === "send").map(operation => structuredClone(operation)));
+  // Claude's shell request: the whole command and where it runs; without provider actions the choices are ours (opus-B12).
+  await page.getByRole("button", { name: /^查看 审查数据库迁移，/ }).click();
+  const detail = page.getByTestId("agent-detail");
+  const shell = detail.getByTestId("permission-panel").first();
+  await expect(shell.getByText("$ npm run migrate:check -- --dry-run --env staging", { exact: true })).toBeVisible();
+  await expect(shell.getByText(/^工作目录 /)).toBeVisible();
+  await expect(shell.getByRole("button", { name: "拒绝并中断：执行数据库迁移检查", exact: true })).toBeVisible();
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "approval-inline");
+  await shell.getByRole("button", { name: "批准：执行数据库迁移检查", exact: true }).click();
+  await expect.poll(operations).toEqual([{ type: "permission", agentId: "migration-review", requestId: "permission-1", response: { behavior: "allow" } }]);
+  await expect(detail.getByText("已批准", { exact: true })).toBeVisible();
+  await closeDetail(page);
+  // An ACP edit offers the agent's own choices, answered by id; one that lasts (Always Allow) takes a second tap.
+  await page.getByRole("button", { name: /^查看 同步订单表结构，/ }).click();
+  const edit = page.getByTestId("agent-detail").getByTestId("permission-panel").first();
+  await expect(edit.getByRole("button", { name: "Allow：Edit db/migrations/0042_orders.sql", exact: true })).toBeVisible();
+  await expect(edit.getByRole("button", { name: "Reject：Edit db/migrations/0042_orders.sql", exact: true })).toBeVisible();
+  await edit.getByRole("button", { name: "Always Allow：Edit db/migrations/0042_orders.sql", exact: true }).click();
+  await expect(edit.getByRole("alert")).toContainText("不只这一次");
+  expect(await operations()).toHaveLength(1);
+  await edit.getByRole("button", { name: "确定Always Allow：Edit db/migrations/0042_orders.sql", exact: true }).click();
+  await expect.poll(async () => (await operations()).at(-1)).toEqual({ type: "permission", agentId: "schema-sync", requestId: "permission-acp-1", response: { behavior: "allow", selectedActionId: "allow_always" } });
+  await closeDetail(page);
+  // 快捷回复 (opus-B26): the reply asked whether to go on; one tap sends the button's words as a sentence, with one message id.
+  await page.getByRole("button", { name: /^查看 规划下一轮迭代，/ }).click();
+  const replies = page.getByTestId("agent-detail").getByTestId("quick-replies");
+  await expect(replies.getByRole("button", { name: "给「规划下一轮迭代」发送「先别动」", exact: true })).toBeVisible();
+  await screenshot(page, testInfo, "quick-replies");
+  await replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true }).click();
+  await expect.poll(async () => (await operations()).filter(operation => operation.type === "send")).toEqual([expect.objectContaining({ agentId: "iteration-plan", input: "继续，按你说的做。", options: expect.objectContaining({ messageId: expect.any(String) }) })]);
+  // The new turn takes the reply (and its buttons) away; the toast says what went.
+  await expect(toast(page, "已回复「规划下一轮迭代」：继续，按你说的做")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("就地审批 shows a long request to its end once expanded, and a Grep's pattern with its path (codex-obs-send-ui-F1)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "approvals");
+  await page.getByRole("button", { name: /^查看 审查数据库迁移，/ }).click();
+  const detail = page.getByTestId("agent-detail");
+  // A 5,000-character command (2.14.0 kept only 4,000): collapsed, only its first lines are drawn; expanded, all of it, to its last words.
+  const long = detail.getByLabel("审批请求：检查全部订单分表", { exact: true });
+  await expect(long.getByText(/^\$ npm run migrate:check -- --dry-run --tables orders_000,/)).toBeVisible();
+  await expect(long.getByText(/&& echo 检查结束$/)).toHaveCount(0);
+  await long.getByRole("button", { name: "展开完整请求内容", exact: true }).click();
+  await expect(long.getByText(/orders_449 && echo 检查结束$/)).toBeVisible();
+  await expect(long.getByText("description: 逐个分表只读检查", { exact: true })).toBeVisible();
+  await long.getByRole("button", { name: "收起请求内容", exact: true }).click();
+  await expect(long.getByText(/&& echo 检查结束$/)).toHaveCount(0);
+  // The Grep: its pattern on the target line, and the path and mode it searches with, which used to be dropped.
+  const grep = detail.getByLabel("审批请求：Grep", { exact: true });
+  await expect(grep.getByText("TODO", { exact: true })).toBeVisible();
+  await expect(grep.getByText("path: db/migrations\noutput_mode: content", { exact: true })).toBeVisible();
+  await noHorizontalOverflow(page);
+  expect(errors).toEqual([]);
+});
+
+// ---------- 发送账本 (observatory.deferred.*) ----------
+const sends = (page: Page) => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "send").map(operation => structuredClone(operation)));
+
+test("快捷回复 whose outcome the host cannot tell is held in its row: 仍然发送 / 取消, and the replies stay locked until it is settled", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "send-unknown");
+  await page.getByRole("button", { name: /^查看 规划下一轮迭代，/ }).click();
+  const replies = page.getByTestId("agent-detail").getByTestId("quick-replies");
+  await replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true }).click();
+  // The ledger sent it once; the host never said whether it arrived: 待确认, with the reason, and nothing goes out again on its own.
+  const row = replies.getByLabel("待确认：快捷回复「继续，按你说的做」", { exact: true });
+  await expect(row).toBeVisible();
+  await expect(row.getByText(/没收到发送结果，可能已经送达/)).toBeVisible();
+  await expect(row.getByRole("button", { name: "仍然发送：快捷回复「继续，按你说的做」", exact: true })).toBeVisible();
+  await expect(replies.getByRole("button", { name: "给「规划下一轮迭代」发送「先别动」", exact: true })).toBeDisabled();
+  expect(await sends(page)).toHaveLength(1);
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "quick-reply-held");
+  // 取消: it is settled as not sent again; the replies are free once more.
+  await row.getByRole("button", { name: "取消：快捷回复「继续，按你说的做」", exact: true }).click();
+  await expect(replies.getByLabel("已取消：快捷回复「继续，按你说的做」", { exact: true })).toBeVisible();
+  await expect(replies.getByRole("button", { name: "给「规划下一轮迭代」发送「先别动」", exact: true })).toBeEnabled();
+  expect(await sends(page)).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test("发给这个 Agent whose answer was lost after the ledger sent it settles from the list: shown as delivered, never sent twice", async ({ page }, testInfo) => {
+  await open(page, testInfo, "send-lost-reply");
+  await page.getByRole("tab", { name: /^(智能分析|分析)$/ }).click();
+  await reportsView(page);
+  await page.getByRole("button", { name: "新建分析", exact: true }).first().click();
+  await page.getByRole("button", { name: "选择分析 重构支付服务", exact: true }).click();
+  const panel = page.getByTestId("insights-panel");
+  await panel.getByRole("button", { name: "分析当前 Agent", exact: true }).click();
+  await panel.getByRole("button", { name: "发给这个 Agent", exact: true }).first().click();
+  const sheet = page.getByRole("dialog", { name: "发给这个 Agent", exact: true });
+  await sheet.getByRole("button", { name: "插入这一轮", exact: true }).click();
+  // The sheet never got the answer; the ledger's list shows the message went out, under the id it was sent with.
+  await expect(sheet.getByText("这条消息已经送达。改一下内容就是一条新消息。", { exact: true })).toBeVisible();
+  await expect(sheet.getByLabel("已送达：分析建议「复用已通过的测试结果」", { exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "插入这一轮", exact: true })).toBeDisabled();
+  await noHorizontalOverflow(page);
+  const sent = await sends(page);
+  expect(sent).toEqual([expect.objectContaining({ agentId: "payment-root", input: expect.stringContaining("复用已通过的测试结果") })]);
+  expect((await rpcCalls(page, "observatory.deferred.send")).map(call => call.messageId)).toEqual([(sent[0] as { options: { messageId: string } }).options.messageId]);
+});
+
+test("发给这个 Agent: a turn that cannot take it offers 等这一轮结束再发; queued beside the analysis, it goes out once the turn ends", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "deferred");
+  await page.getByRole("tab", { name: /^(智能分析|分析)$/ }).click();
+  await reportsView(page);
+  await page.getByRole("button", { name: "新建分析", exact: true }).first().click();
+  await page.getByRole("button", { name: "选择分析 重构支付服务", exact: true }).click();
+  const panel = page.getByTestId("insights-panel");
+  await panel.getByRole("button", { name: "分析当前 Agent", exact: true }).click();
+  await panel.getByRole("button", { name: "发给这个 Agent", exact: true }).first().click();
+  const sheet = page.getByRole("dialog", { name: "发给这个 Agent", exact: true });
+  await expect(sheet.getByText(/运行中，这个 Agent 不支持插话/)).toBeVisible();
+  await sheet.getByRole("button", { name: "发送", exact: true }).click();
+  // Three choices: interrupt it, wait for the turn, or not now. Nothing went out yet.
+  await expect(sheet.getByText(/发送消息会中断它当前的回合/)).toBeVisible();
+  await expect(sheet.getByText("「等这一轮结束再发」：不打断当前回合，等它这一轮结束后自动发送。", { exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "中断并发送", exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "取消", exact: true })).toBeVisible();
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "send-three-choices");
+  await sheet.getByRole("button", { name: "等这一轮结束再发", exact: true }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(toast(page, "已排队：等「重构支付服务」这一轮结束后自动发送")).toBeVisible();
+  // Its row stays beside the analysis, breathing amber, with 取消排队; nothing was sent.
+  const row = panel.getByLabel("排队中：分析建议「复用已通过的测试结果」", { exact: true });
+  await expect(row).toBeVisible();
+  await expect(row.getByRole("button", { name: "取消排队：分析建议「复用已通过的测试结果」", exact: true })).toBeVisible();
+  expect(await sends(page)).toEqual([]);
+  await screenshot(page, testInfo, "send-queued");
+  // The turn ends: the ledger sends it, once, with the queued id, and the row turns to 已送达.
+  await page.evaluate(() => (globalThis as Fixture).__previewUpdateAgent("payment-root", { status: "idle", activeTurn: null }));
+  const queued = (await rpcCalls(page, "observatory.deferred.enqueue"))[0]!.messageId;
+  await expect.poll(() => sends(page)).toEqual([expect.objectContaining({ agentId: "payment-root", input: expect.stringContaining("复用已通过的测试结果"), options: { activeTurnBehavior: "steer", messageId: queued } })]);
+  await expect(panel.getByLabel("已送达：分析建议「复用已通过的测试结果」", { exact: true })).toBeVisible({ timeout: 12_000 });
+  expect(errors).toEqual([]);
+});
+
+test("发给这个 Agent: 等这一轮结束再发 answered with a held message keeps the sheet open with its reason and 仍然发送, not 已排队 (codex-obs-send-ui-R2)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "deferred-held");
+  await page.getByRole("tab", { name: /^(智能分析|分析)$/ }).click();
+  await reportsView(page);
+  await page.getByRole("button", { name: "新建分析", exact: true }).first().click();
+  await page.getByRole("button", { name: "选择分析 重构支付服务", exact: true }).click();
+  const panel = page.getByTestId("insights-panel");
+  await panel.getByRole("button", { name: "分析当前 Agent", exact: true }).click();
+  await panel.getByRole("button", { name: "发给这个 Agent", exact: true }).first().click();
+  const sheet = page.getByRole("dialog", { name: "发给这个 Agent", exact: true });
+  await sheet.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(sheet.getByRole("button", { name: "等这一轮结束再发", exact: true })).toBeVisible();
+  // The turn ends before the tap: the ledger sends it at once, and the host never says whether it arrived.
+  await page.evaluate(() => (globalThis as Fixture).__previewUpdateAgent("payment-root", { status: "idle", activeTurn: null }));
+  await sheet.getByRole("button", { name: "等这一轮结束再发", exact: true }).click();
+  // Held for the user: the sheet stays, its row says why and offers 仍然发送; nothing claims it will go out on its own.
+  await expect(toast(page, "这条消息在等你确认，见下方。")).toBeVisible();
+  const row = sheet.getByLabel("待确认：分析建议「复用已通过的测试结果」", { exact: true });
+  await expect(row.getByText(/^没收到发送结果，可能已经送达。点「仍然发送」会先查会话记录/)).toBeVisible();
+  await expect(row.getByRole("button", { name: "仍然发送：分析建议「复用已通过的测试结果」", exact: true })).toBeVisible();
+  await expect(toast(page, "已排队：等「重构支付服务」这一轮结束后自动发送")).toHaveCount(0);
+  expect(await sends(page)).toHaveLength(1);
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "send-held-on-queue");
+  expect(errors).toEqual([]);
+});
+
+test("快捷回复 answered on another device first: the tap here is answered with that reply, which locks them; nothing else goes out (codex-obs-attn-R3)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "send-unknown");
+  await page.getByRole("button", { name: /^查看 规划下一轮迭代，/ }).click();
+  const replies = page.getByTestId("agent-detail").getByTestId("quick-replies");
+  await expect(replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true })).toBeEnabled();
+  // Another device taps 先别动 for the same turn; the host never says whether it arrived, so it waits for the user there.
+  expect(await page.evaluate(() => (globalThis as Fixture & { __previewOtherDeviceReply(id: string, text: string): Promise<{ status: string }> }).__previewOtherDeviceReply("iteration-plan", "先别动").then(answer => answer.status))).toBe("held");
+  // This device, not yet told, taps the other button: the ledger answers with 先别动, for the same turn.
+  await replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true }).click();
+  await expect(toast(page, "这一轮的回复「先别动」在等你确认，见下方。")).toBeVisible();
+  await expect(replies.getByLabel("待确认：快捷回复「先别动」", { exact: true })).toBeVisible();
+  await expect(replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true })).toBeDisabled();
+  await expect(replies.getByTestId("quick-reply-sent")).toHaveCount(0);
+  expect((await sends(page)).map(operation => (operation as { input?: string }).input)).toEqual(["先别动。"]);
+  await noHorizontalOverflow(page);
+  expect(errors).toEqual([]);
+});
+
+test("快捷回复 whose round the plugin's own record cannot vouch for is not sent: the server answers busy, saying why, and 重试 checks again (codex-obs-attn-R3-remaining)", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "approvals");
+  await page.getByRole("button", { name: /^查看 规划下一轮迭代，/ }).click();
+  const replies = page.getByTestId("agent-detail").getByTestId("quick-replies");
+  const go = replies.getByRole("button", { name: "给「规划下一轮迭代」发送「继续，按你说的做」", exact: true });
+  await expect(go).toBeEnabled();
+  // The plugin's store could not read its saved history: its record cannot vouch for the round this reply answers.
+  const storeError = (message: string | null) => page.evaluate(text => (globalThis as Fixture & { __previewTelemetryError(message: string | null): void }).__previewTelemetryError(text), message);
+  await storeError("已保存的事件历史无法读取，已重新开始记录；原文件另存了一份备份。");
+  await go.click();
+  await expect(replies.getByText("没能确认这条消息还适用（观测台的记录暂时有问题，核实不了「规划下一轮迭代」最近一轮），没有发送。请稍后再试。", { exact: true })).toBeVisible();
+  expect(await sends(page)).toEqual([]);
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "quick-reply-unverified");
+  // Saved again: 重试 checks once more, and it goes out.
+  await storeError(null);
+  await replies.getByRole("button", { name: "重试", exact: true }).click();
+  await expect.poll(() => sends(page)).toEqual([expect.objectContaining({ agentId: "iteration-plan", input: "继续，按你说的做。" })]);
+  await expect(toast(page, "已回复「规划下一轮迭代」：继续，按你说的做")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("观测设置 counts child Agents' results in 需要处理 only when asked, and 归档已读完成 takes two taps", async ({ page }, testInfo) => {
+  await open(page, testInfo);
+  await expect(page.getByRole("button", { name: "需要处理 3", exact: true })).toBeVisible();
+  await menu(page, "观测设置");
+  const settings = page.getByRole("dialog", { name: "观测设置", exact: true });
+  await settings.getByRole("switch", { name: "子 Agent 完成也计入需要处理", exact: true }).click();
+  await expect.poll(async () => (await rpcCalls(page, "observatory.preferences.update")).some(call => (call.settings as { childCompletions?: boolean } | undefined)?.childCompletions === true)).toBe(true);
+  await settings.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(page.getByRole("button", { name: "需要处理 4", exact: true })).toBeVisible();
+  // Read one result, then archive the read ones: the first tap only marks them.
+  await page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true }).click();
+  const detail = page.getByTestId("agent-detail");
+  await expect(detail.getByText("最新回复", { exact: true })).toBeVisible();
+  const read = detail.getByRole("button", { name: /^(标记已读|已读并看下一个)$/ });
+  if (await read.count()) await read.first().click(); else await detailMenu(page, "标记已读");
+  await expect.poll(() => marks(page).then(calls => calls.length)).toBe(1);
+  if (await page.getByTestId("agent-detail").count()) await closeDetail(page);
+  await expect(page.getByRole("button", { name: "未读 1", exact: true })).toBeVisible();
+  // A read child whose parent still runs stays: only 整理性能基线 is offered.
+  await menu(page, "归档已读完成（1）");
+  await expect(page.getByRole("alert").getByText(/将归档列表里标红的 1 个已读完成会话/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "查看 整理性能基线，已完成，待归档", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "archive").length)).toBe(0);
+  await screenshot(page, testInfo, "archive-marked");
+  await page.getByRole("button", { name: "确认归档 1 个", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "archive").map(operation => operation.agentId))).toEqual(["performance-baseline"]);
+});
+
+test("归档已读完成 stays off, saying why, while the heartbeats cannot all be read", async ({ page }, testInfo) => {
+  await open(page, testInfo, "heartbeats-error");
+  await page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true }).click();
+  const detail = page.getByTestId("agent-detail");
+  await expect(detail.getByText("最新回复", { exact: true })).toBeVisible();
+  const read = detail.getByRole("button", { name: /^(标记已读|已读并看下一个)$/ });
+  if (await read.count()) await read.first().click(); else await detailMenu(page, "标记已读");
+  await expect.poll(() => marks(page).then(calls => calls.length)).toBe(1);
+  if (await page.getByTestId("agent-detail").count()) await closeDetail(page);
+  // A read result would be offered, but a heartbeat might still point at it: the entry is disabled with the reason (opus-B18).
+  await page.getByRole("button", { name: "更多操作", exact: true }).first().click();
+  const more = page.getByRole("dialog", { name: "更多操作", exact: true });
+  await expect(more.getByRole("button", { name: "归档已读完成", exact: true })).toBeDisabled();
+  await expect(more.getByText(/^暂不可用：定时任务目录读不出来/)).toBeVisible();
+  expect(await page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "archive").length)).toBe(0);
+});
+
 test("native conversation read state synchronizes without clearing unrelated approvals", async ({ page }, testInfo) => {
   await open(page, testInfo);
   await page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true }).click();
@@ -638,7 +1067,7 @@ test("native conversation read state synchronizes without clearing unrelated app
   expect(alteredApproval).toBe(false);
   const waiting = page.getByRole("button", { name: "查看 审查数据库迁移，待审批", exact: true });
   await expect(waiting.getByText("待审批 2", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "需要处理 3", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "需要处理 2", exact: true })).toBeVisible();
   await page.evaluate(() => (globalThis as Fixture).__previewNativeReadAgent("payment-validation"));
   await expect(page.getByRole("button", { name: "未读 0", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true })).toBeVisible();
@@ -956,6 +1385,21 @@ test("看板 shows the statistics board and its live counts open the matching se
   expect(errors).toEqual([]);
 });
 
+test("看板's quota chip shows an old reading with its time, never as an alarm", async ({ page }, testInfo) => {
+  await open(page, testInfo, "quota-stale");
+  await page.getByRole("tab", { name: /^看板/ }).click();
+  // The last reading forecast running out, then reads failed: the chip says when it was read instead (codex-F8).
+  const chip = page.getByRole("button", { name: /已用 \d+%，读数 [^，]+，不是当前读数$/ });
+  await expect(chip).toBeVisible();
+  await expect(chip.getByText(/用完$/)).toHaveCount(0);
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "quota-stale");
+  await open(page, testInfo);
+  await page.getByRole("tab", { name: /^看板/ }).click();
+  await expect(page.getByRole("button", { name: /已用 \d+%/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /不是当前读数$/ })).toHaveCount(0);
+});
+
 test("明细 ranks models, harnesses, vendors, projects and tools, and 观测 keeps the observation charts", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -978,7 +1422,7 @@ test("明细 ranks models, harnesses, vendors, projects and tools, and 观测 ke
   await expect(page.getByText("常用工具", { exact: true })).toBeVisible();
   await noHorizontalOverflow(page);
   await dimensions.getByRole("tab", { name: "观测", exact: true }).click();
-  await expect(page.getByRole("button", { name: /时 UTC，执行事件/ })).toHaveCount(168);
+  await expect(page.getByRole("button", { name: heatCell })).toHaveCount(168);
   expect(errors).toEqual([]);
 });
 
@@ -1064,6 +1508,10 @@ test("Token 页 shows today's usage, the live speed chart and breakdowns from th
   await expect(page.getByText("claude-opus-5-5", { exact: true }).first()).toBeVisible();
   const calls = await tokenCalls(page);
   expect(calls.find(call => call.name === "observatory.tokens.get")!.input.range).toBe("30d");
+  // Days and hours are the device's: the request names its zone (opus-F42).
+  expect(calls.find(call => call.name === "observatory.tokens.get")!.input).toMatchObject({ timeZone: await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone) });
+  // Grok CLI and Pi logs are counted too (opus-F35, opus-F36).
+  await expect(page.getByText(/Grok CLI \d+ 个会话/).first()).toBeVisible();
   expect(calls.find(call => call.name === "observatory.tokens.live" && call.input.detail === "full")!.input).toMatchObject({ windowMinutes: 30, detail: "full" });
   await noHorizontalOverflow(page);
   await screenshot(page, testInfo, "tokens");
@@ -1185,7 +1633,9 @@ test("智能分析总览 writes suggestions on demand and shows progress, failur
   await open(page, testInfo, "insights-rich");
   await page.getByRole("tab", { name: /^(智能分析|分析)$/ }).click();
   await page.getByRole("button", { name: "更新建议 · 2 份新报告", exact: true }).click();
-  await expect.poll(() => rpcCalls(page, "observatory.insights.suggest")).toEqual([{ days: 7 }]);
+  // The 7 days are the device's local days: the request carries its zone (opus-F40).
+  const browserZone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  await expect.poll(() => rpcCalls(page, "observatory.insights.suggest")).toEqual([{ days: 7, timeZone: browserZone, utcOffsetMinutes: expect.any(Number) }]);
   await page.getByRole("tablist", { name: "总览范围", exact: true }).getByRole("tab", { name: "30 天", exact: true }).click();
   await expect.poll(async () => (await rpcCalls(page, "observatory.insights.overview")).some(call => call.days === 30)).toBe(true);
   await open(page, testInfo, "insights-suggesting");
@@ -1237,10 +1687,13 @@ test("分析设置 picks a profile or another model, and the Agent's 分析 tab 
   await panel.getByRole("button", { name: "发给这个 Agent", exact: true }).first().click();
   const send = page.getByRole("dialog", { name: "发给这个 Agent", exact: true });
   await expect(send.getByRole("textbox", { name: "消息", exact: true })).toHaveValue(/复用已通过的测试结果/);
-  await send.getByRole("button", { name: "发送", exact: true }).click();
+  // 重构支付服务 is running on a provider that takes a message mid-turn: it is steered in, not interrupted (opus-F10).
+  await expect(send.getByText(/运行中，插进当前回合，不打断/)).toBeVisible();
+  await send.getByRole("button", { name: "插入这一轮", exact: true }).click();
   await expect(send).toHaveCount(0);
   const sent = await page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "send"));
-  expect(sent).toEqual([expect.objectContaining({ agentId: "payment-root", input: expect.stringContaining("复用已通过的测试结果") })]);
+  // One message id per message: a retry reuses it, so the host delivers the message at most once (kit send-plan).
+  expect(sent).toEqual([expect.objectContaining({ agentId: "payment-root", input: expect.stringContaining("复用已通过的测试结果"), options: { activeTurnBehavior: "steer", messageId: expect.any(String) } })]);
 });
 
 test("分析设置 lets the built-in Grok CLI use another model and reasoning effort, and resets to grok-4.7 · xhigh", async ({ page }, testInfo) => {
@@ -1513,7 +1966,7 @@ test.describe("定时运行", () => {
     await expect(page.getByText("暂时读不到定时运行", { exact: true })).toBeVisible();
     await expect(page.getByText("模拟：定时任务目录暂时读不到", { exact: true })).toBeVisible();
     await openSchedules(page, testInfo, "schedules-notice");
-    await expect(page.getByText(/^定时运行账本损坏，已另存为 schedule-ledger\.corrupt-/)).toBeVisible();
+    await expect(page.getByText(/^定时运行账本损坏，已另存为 schedule-ledger\.corrupt\.json /)).toBeVisible();
     await noHorizontalOverflow(page);
   });
 });

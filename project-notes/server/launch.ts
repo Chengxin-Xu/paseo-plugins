@@ -4,14 +4,17 @@ import path from "node:path";
 import { z } from "zod";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { launchInputSchema, launchReceiptSchema, type LaunchInput, type LaunchOptions, type LaunchReceipt } from "../shared/launch";
+import { INBOX_PROJECT_ID, type BoardItem } from "../shared/board";
 import { ProjectDirectory, withTimeout, type PaseoProject } from "./dashboard";
 import { BoardStore, defaultStorageRoot } from "./store";
 
 type Paseo = PluginHandlerContext["paseo"];
 type ListProjects = () => Promise<PaseoProject[]>;
-const journalSchema = launchReceiptSchema.omit({ replayed: true }).extend({ inputHash: z.string() });
+const journalSchema = launchReceiptSchema.omit({ replayed: true }).extend({
+  inputHash: z.string(), projectId: launchInputSchema.shape.projectId.optional(), isolation: launchInputSchema.shape.isolation.optional(),
+});
 type Journal = z.infer<typeof journalSchema>;
-type Prepared = { project: LaunchOptions["projects"][number]; featureValues?: Record<string, unknown> };
+type Prepared = { project: LaunchOptions["projects"][number]; attachment: ReturnType<typeof sourceAttachment>; featureValues?: Record<string, unknown> };
 const message = (e: unknown) => e instanceof Error ? e.message : "操作未完成";
 /**
  * Provider and launch errors come from the daemon and the providers as they are. The dialog shows them in full and every
@@ -30,6 +33,15 @@ function absoluteDirectory(value: string) {
   return value;
 }
 
+function sourceAttachment(note: BoardItem, projectName: string) {
+  // The task is the user's edited prompt. Source metadata must not reintroduce deleted note content.
+  const text = `来源：手记 #${note.id}\n项目：${projectName}\n标题：${note.title}\n状态：${{ todo: "待办", doing: "进行中", done: "已完成" }[note.status]}\n重点：${note.priority === "high" ? "是" : "否"}`;
+  return { type: "text" as const, mimeType: "text/plain" as const, contextKind: "project-notes", title: `手记 #${note.id.slice(0, 8)} · ${note.title}`, text };
+}
+
+const launchSuffix = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 12);
+const terminal = (stage: LaunchReceipt["stage"]) => stage === "started" || stage === "rejected" || stage === "uncertain";
+
 export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listProjects: ListProjects = async () => (await paseo.projects.list()).projects): Promise<LaunchOptions> {
   const left = budget(24_000);
   const projects = (await listProjects()).map(p => ({ id: p.projectId, name: p.projectDisplayName, path: p.projectRootPath, kind: p.projectKind }));
@@ -42,22 +54,26 @@ export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listPr
     withTimeout(paseo.config.get(), left(6_000), timedOut),
   ]);
   let catalog = initialCatalog;
-  if (!catalog.entries.some(p => p.enabled !== false && p.status === "ready" && p.models?.length)) {
+  if (!catalog.entries.some(p => p.enabled !== false && p.status === "ready")) {
     const waitMs = Math.max(1, left(8_000) - 500);
     catalog = await withTimeout(paseo.providers.waitForReady({ cwd: project.path, timeoutMs: waitMs }), waitMs + 500, timedOut)
       .catch(() => withTimeout(paseo.providers.snapshot({ cwd: project.path }), left(5_000), timedOut));
   }
   return {
     projects, project,
-    providers: catalog.entries.filter(p => p.enabled !== false).map(p => ({
-      id: p.provider, label: p.label || p.provider, status: p.status, error: p.error ? clip(p.error) : null,
-      models: (p.models ?? []).filter(m => m.isSelectable !== false).map(m => ({
+    providers: catalog.entries.filter(p => p.enabled !== false).map(p => {
+      const models = (p.models ?? []).filter(m => m.isSelectable !== false).map(m => ({
         id: m.id, label: m.label || m.id, isDefault: Boolean(m.isDefault),
         thinkingOptions: (m.thinkingOptions ?? []).map(o => ({ id: o.id, label: o.label })),
         defaultThinkingOptionId: m.defaultThinkingOptionId ?? m.thinkingOptions?.find(o => o.isDefault)?.id ?? null,
-      })),
-      modes: (p.modes ?? []).map(m => ({ id: m.id, label: m.label })), defaultModeId: p.defaultModeId ?? null,
-    })),
+      }));
+      // The SDK requires provider/model; the daemon normalizes "default" to the provider's configured model.
+      if (p.status === "ready" && !models.length) models.push({ id: "default", label: "默认", isDefault: true, thinkingOptions: [], defaultThinkingOptionId: null });
+      return {
+        id: p.provider, label: p.label || p.provider, status: p.status, error: p.error ? clip(p.error) : null, models,
+        modes: (p.modes ?? []).map(m => ({ id: m.id, label: m.label })), defaultModeId: p.defaultModeId ?? null,
+      };
+    }),
     // Never return daemon credentials, environment, or provider config to the client.
     profiles: (settings.config.agentProfiles ?? []).map(p => ({
       id: p.id, name: p.name, provider: p.provider, model: p.model ?? null,
@@ -69,7 +85,7 @@ export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listPr
 /** A launch is asynchronous, journaled before mutations, and never blindly retried. */
 export class LaunchService {
   private accepting = new Map<string, Promise<LaunchReceipt>>();
-  private active = new Map<string, Promise<void>>();
+  private active = new Map<string, { record: Journal; done: Promise<void> }>();
   private stopping = false;
   constructor(private readonly boards: BoardStore, private readonly projects = new ProjectDirectory(), private readonly root = path.join(defaultStorageRoot(), "..", "launches")) {}
 
@@ -95,19 +111,52 @@ export class LaunchService {
     } finally { await unlink(tmp).catch(() => {}); }
   }
   private receipt(record: Journal, replayed = false): LaunchReceipt {
-    const { inputHash: _hash, ...receipt } = record;
+    const { inputHash: _hash, projectId: _project, isolation: _isolation, ...receipt } = record;
     // Room for the capped cause plus the guidance after it; also caps records written before the cap existed.
     return { ...receipt, error: receipt.error === null ? null : clip(receipt.error, MAX_ERROR_CHARS + 100), replayed };
   }
   private checkAlive() { if (this.stopping) throw new Error("插件正在重载，启动流程已停止；检查现有工作区后再继续。"); }
 
   async status(id: string, paseo?: Paseo): Promise<LaunchReceipt | null> {
-    const record = await this.read(id);
+    let record = await this.read(id);
+    const running = this.active.get(id);
+    // rename exposes the terminal journal before directory fsync and run cleanup finish. Wait for our own terminal
+    // save before returning it or recovering IDs; another process's terminal record must not await our ongoing RPCs.
+    if (record && terminal(record.stage) && running && terminal(running.record.stage)) {
+      await running.done;
+      record = await this.read(id);
+    }
     if (!record) return null;
-    if (record.stage !== "started" && record.stage !== "uncertain" && record.stage !== "rejected" && !this.active.has(id) && !this.accepting.has(id)) {
-      // Interrupted (e.g. plugin reload). Look up, never create, what the daemon already made.
-      const found = record.agentId || !paseo ? null : await this.findAgent(paseo, id).catch(() => null);
-      return this.receipt({ ...record, workspaceId: record.workspaceId ?? found?.workspaceId ?? null, agentId: record.agentId ?? found?.agentId ?? null, stage: "uncertain", error: "启动流程已中断。已有工作区或会话可能仍在，请先打开检查；不会自动重复创建。" }, true);
+    if (record.stage !== "started" && record.stage !== "rejected" && !this.active.has(id) && !this.accepting.has(id)) {
+      // Interrupted or an uncertain reply: look up, never create or send, what the daemon already made.
+      let lookupComplete = false, agentLookupComplete = Boolean(record.agentId), found: { agentId: string; workspaceId: string | null } | null = null;
+      let workspaceId = record.workspaceId, projectId = record.projectId, isolation = record.isolation;
+      if (paseo && !record.agentId) {
+        try {
+          found = await this.findAgent(paseo, id);
+          workspaceId ??= found?.workspaceId ?? null;
+          agentLookupComplete = true;
+        } catch { /* A failed lookup is not proof that no resource exists. */ }
+      }
+      if (paseo && !workspaceId && !found && !record.agentId && isolation !== "local") {
+        try {
+          const result = await this.findWorkspace(paseo, id, projectId);
+          workspaceId = result.workspace?.id ?? null;
+          if (result.workspace) { projectId = result.workspace.projectId; isolation = "worktree"; }
+          lookupComplete = agentLookupComplete && result.complete;
+        } catch { /* Keep uncertain when a complete read-only scan is unavailable. */ }
+      }
+      const latest = await this.read(id);
+      if (latest && (latest.stage !== record.stage || latest.workspaceId !== record.workspaceId || latest.agentId !== record.agentId)) return this.receipt(latest, true);
+      if (record.stage === "prepared" && record.projectId && isolation === "worktree" && lookupComplete && !workspaceId && !found && !record.agentId) {
+        const rejected: Journal = { ...record, stage: "rejected", error: "启动在创建前已中断，尚未创建工作区或会话，可以修改选项后重试。" };
+        await this.save(rejected);
+        return this.receipt(rejected, true);
+      }
+      const recovered: Journal = { ...record, projectId, isolation, workspaceId, agentId: record.agentId ?? found?.agentId ?? null, stage: "uncertain", error: record.stage === "uncertain" ? record.error : "启动流程已中断。已有工作区或会话可能仍在，请先打开检查；不会自动重复创建。" };
+      // Persist recovered identifiers at every interrupted stage, including a lost workspace.create reply.
+      if (found || workspaceId !== record.workspaceId) await this.save(recovered);
+      return this.receipt(recovered, true);
     }
     return this.receipt(record, true);
   }
@@ -115,6 +164,24 @@ export class LaunchService {
     const result = await withTimeout(paseo.agents.list({ filter: { labels: { "project-notes.launch-id": id }, includeArchived: true }, page: { limit: 5 } }), 5_000, "查询已创建会话超时");
     const agent = result.entries.find(entry => entry.agent.labels?.["project-notes.launch-id"] === id)?.agent;
     return agent ? { agentId: agent.id, workspaceId: agent.workspaceId ?? null } : null;
+  }
+  private async findWorkspace(paseo: Paseo, id: string, projectId?: string) {
+    const end = Date.now() + 12_000, slug = `notes-${launchSuffix(id)}`;
+    let cursor: string | undefined;
+    const visited = new Set<string>();
+    // query searches name/projectId/id, not worktreeSlug. Old journals lack projectId: scan all pages safely.
+    for (let page = 0; page < 100 && Date.now() < end; page++) {
+      const result = await withTimeout(paseo.workspaces.list({
+        ...(projectId ? { filter: { projectId } } : {}), page: { limit: 100, ...(cursor ? { cursor } : {}) },
+      }), Math.min(5_000, end - Date.now()), "查询已创建工作区超时");
+      const workspace = result.entries.find(entry => entry.worktreeSlug === slug && (!projectId || entry.projectId === projectId));
+      if (workspace) return { workspace, complete: true };
+      if (!result.pageInfo.hasMore) return { workspace: null, complete: true };
+      const next = result.pageInfo.nextCursor;
+      if (!next || visited.has(next)) break;
+      visited.add(next); cursor = next;
+    }
+    return { workspace: null, complete: false };
   }
 
   async start(raw: LaunchInput, paseo: Paseo): Promise<LaunchReceipt> {
@@ -140,17 +207,18 @@ export class LaunchService {
       if (existing.inputHash !== this.hash(input)) throw new Error("该启动标识已经用于不同内容，请先检查已有会话。");
       return (await this.status(input.launchId, paseo))!;
     }
-    const record: Journal = { launchId: input.launchId, inputHash: this.hash(input), stage: "prepared", workspaceId: null, agentId: null, error: null };
+    const record: Journal = { launchId: input.launchId, inputHash: this.hash(input), projectId: input.projectId, isolation: input.isolation, stage: "prepared", workspaceId: null, agentId: null, error: null };
     await this.save(record);
     const run = Promise.resolve().then(() => this.run(record, input, paseo));
-    this.active.set(input.launchId, run);
-    void run.finally(() => { if (this.active.get(input.launchId) === run) this.active.delete(input.launchId); });
+    this.active.set(input.launchId, { record, done: run });
+    void run.finally(() => { if (this.active.get(input.launchId)?.done === run) this.active.delete(input.launchId); });
     return this.receipt(record);
   }
 
   private async validate(input: LaunchInput, paseo: Paseo): Promise<Prepared> {
     const board = await this.boards.read(input.sourceProjectId);
-    if (!board.items.some(x => x.id === input.itemId && !x.deletedAt)) throw new Error("这条手记已删除或不存在，请刷新后重新选择。");
+    const note = board.items.find(x => x.id === input.itemId && !x.deletedAt);
+    if (!note) throw new Error("这条手记已删除或不存在，请刷新后重新选择。");
     const options = await loadLaunchOptions(paseo, input.projectId, () => this.projects.list(paseo, true));
     if (!options.project) throw new Error("目标项目已经不存在，请选择当前主机上的项目。");
     if (input.isolation === "worktree" && options.project.kind !== "git") throw new Error("这个项目不支持 Git worktree，请选择 Local 工作区。");
@@ -161,7 +229,8 @@ export class LaunchService {
     if (!model) throw new Error("所选模型当前不可用，请重新选择。");
     if (input.modeId && !provider.modes.some(m => m.id === input.modeId)) throw new Error("所选权限模式已不可用，请重新选择。");
     if (input.thinkingOptionId && !model.thinkingOptions.some(m => m.id === input.thinkingOptionId)) throw new Error("所选思考档位已不可用，请重新选择。");
-    const prepared: Prepared = { project: options.project };
+    const sourceProject = input.sourceProjectId === INBOX_PROJECT_ID ? "随手记" : options.projects.find(project => project.id === input.sourceProjectId)?.name ?? input.sourceProjectId;
+    const prepared: Prepared = { project: options.project, attachment: sourceAttachment(note, sourceProject) };
     if (input.profileId) {
       const { config } = await paseo.config.get();
       const profile = config.agentProfiles?.find(p => p.id === input.profileId);
@@ -177,7 +246,7 @@ export class LaunchService {
     try {
       const prepared = await this.validate(input, paseo);
       this.checkAlive(); record.stage = "creating_workspace"; await this.save(record); this.checkAlive();
-      const suffix = createHash("sha256").update(input.launchId).digest("hex").slice(0, 12);
+      const suffix = launchSuffix(input.launchId);
       // Daemon-side idempotency (0.9): replaying this launch can never create a second workspace or agent.
       const workspace = await paseo.workspaces.create({
         idempotencyKey: `project-notes:${input.launchId}:workspace`,
@@ -203,7 +272,7 @@ export class LaunchService {
       });
       record.agentId = agent.id; record.stage = "agent_ready"; await this.save(record);
       this.checkAlive(); record.stage = "sending"; await this.save(record); this.checkAlive();
-      await agent.send(input.prompt, { messageId: `project-notes-${input.launchId}` });
+      await agent.send(input.prompt, { messageId: `project-notes-${input.launchId}`, attachments: [prepared.attachment] });
       record.stage = "started"; record.error = null; await this.save(record);
     } catch (e) {
       const noMutation = record.stage === "prepared";
@@ -213,5 +282,10 @@ export class LaunchService {
       try { await this.save(record); } catch { /* A prior durable stage still prevents automatic replay after restart. */ }
     }
   }
-  stop() { this.stopping = true; }
+  async stop() {
+    this.stopping = true;
+    // Acceptance may still be writing prepared; wait for it to register its run before draining runs.
+    await Promise.allSettled([...this.accepting.values()]);
+    await Promise.allSettled([...this.active.values()].map(run => run.done));
+  }
 }

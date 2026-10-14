@@ -5,8 +5,9 @@ import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { archiveReadOriginSchema, getReadReceipts, markCompletionRead, readReceiptSchema, type ArchiveReadOrigin, type MarkCompletionReadInput, type MarkCompletionReadResult, type ReadReceipt, type ReadReceiptsResponse } from "../shared/read-state";
+import type { AgentTelemetry } from "../shared/telemetry";
 import { object } from "../shared/timeline";
-import { createProviderSubagentBridge } from "./provider-subagents";
+import type { ProviderBridge } from "./provider-subagents";
 import { telemetryDirectory } from "./telemetry";
 import { ensurePrivateDirectory } from "./paseo-home";
 import { contentRevision } from "./revision";
@@ -61,7 +62,7 @@ export class ReadReceiptStore {
   async record(input: ReadReceipt): Promise<ReadReceipt> {
     await this.ready;
     const receipt = readReceiptSchema.parse(input), previous = this.receipts.get(receipt.agentId);
-    if (Date.parse(receipt.readAt) < Date.parse(receipt.completionAt)) throw new Error("Read receipt cannot precede completion");
+    if (Date.parse(receipt.readAt) < Date.parse(receipt.completionAt)) throw new Error("已读时间早于完成时间，回执未保存");
     if (previous && (Date.parse(previous.completionAt) > Date.parse(receipt.completionAt)
       || Date.parse(previous.completionAt) === Date.parse(receipt.completionAt) && Date.parse(previous.readAt) >= Date.parse(receipt.readAt))) return { ...previous };
     this.receipts.set(receipt.agentId, receipt); this.trim();
@@ -100,11 +101,33 @@ export async function rememberArchiveReadOrigin(origin: ArchiveReadOrigin): Prom
 }
 
 export interface CompletionReadTransport { request(message: Record<string, unknown>, responseType: string): Promise<Record<string, unknown>> }
+/**
+ * What the plugin itself observed (server/telemetry.ts `TelemetryStore` is one): each Agent's latest turn, to verify the
+ * completion a receipt names and the stop 知道了 is about, and the record of 知道了 on a stop. `turnStartedAt`: when that turn
+ * began, which tells a heartbeat's turn from the one the host's attention stamp names (codex-obs-attn-F1); without it only a
+ * newer prompt does.
+ */
+export interface ReadStateTelemetry {
+  /** `persistenceError`: the store's own, set while its record may be incomplete (as the send's check reads it, server/send-ledger.ts). */
+  snapshot(agentId: string): Promise<{ persistenceError?: string | null; agents: ReadonlyArray<Pick<AgentTelemetry, "agentId" | "outcome" | "turnEndedAt" | "stop"> & Partial<Pick<AgentTelemetry, "turnStartedAt">>> }>;
+  ackStop(agentId: string, stopAt: string): Promise<boolean>;
+}
+/**
+ * Whether the round a page names (待回复: the turn it saw start and end) is still the latest one the plugin observed: the same
+ * instants, nothing observed matching nothing (codex-obs-attn-R2). A turn begun since, ended or not, is another round. A
+ * round named by its start alone (a quick reply's rearm, codex-obs-attn-R4) is compared by its start.
+ */
+function sameRound(round: { startedAt: string | null; endedAt?: string | null }, observed: { turnStartedAt?: string | null; turnEndedAt: string | null } | null): boolean {
+  const at = (value: string | null | undefined) => { const parsed = Date.parse(value ?? ""); return Number.isFinite(parsed) ? parsed : null; };
+  return at(round.startedAt) === at(observed?.turnStartedAt) && (round.endedAt === undefined || at(round.endedAt) === at(observed?.turnEndedAt));
+}
+type ObservedTurn = Awaited<ReturnType<ReadStateTelemetry["snapshot"]>>["agents"][number];
 export class CompletionReadController {
   private readonly generations = new Map<string, number>();
   private readonly pending = new Map<string, { token: string; promise: Promise<MarkCompletionReadResult> }>();
   private closed = false;
-  constructor(private readonly store: ReadReceiptStore, private readonly transport: CompletionReadTransport, private readonly now: () => number = Date.now) {}
+  constructor(private readonly store: ReadReceiptStore, private readonly transport: CompletionReadTransport, private readonly now: () => number = Date.now,
+    private readonly telemetry?: ReadStateTelemetry) {}
   bump(agentId: string) {
     this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
     if (this.generations.size > 4000) for (const id of this.generations.keys()) {
@@ -112,13 +135,42 @@ export class CompletionReadController {
     }
   }
   async mark(paseo: PaseoApi, input: MarkCompletionReadInput): Promise<MarkCompletionReadResult> {
-    const token = JSON.stringify([input.attentionTimestamp, input.lastUserMessageAt]);
+    const token = JSON.stringify([input.attentionTimestamp, input.lastUserMessageAt, input.kind ?? null, input.completionAt ?? null, input.stopAt ?? null, input.rearm === true, input.round ?? null]);
     const existing = this.pending.get(input.agentId);
     if (existing?.token === token) return existing.promise;
     if (existing) return { agentId: input.agentId, status: "stale", receipt: await this.store.get(input.agentId), message: "此会话正在同步另一次已读操作，请刷新状态后重试。" };
     const promise = this.perform(paseo, input).finally(() => this.pending.delete(input.agentId));
     this.pending.set(input.agentId, { token, promise }); return promise;
   }
+  /**
+   * The plugin's own record of this Agent's latest turn (`record`, null when it has none: never observed, or no telemetry here),
+   * and the error its store reports, while that record may be incomplete.
+   */
+  private async observed(agentId: string): Promise<{ record: ObservedTurn | null; error: string | null }> {
+    if (!this.telemetry) return { record: null, error: null };
+    const snapshot = await this.telemetry.snapshot(agentId);
+    return { record: snapshot.agents.find(item => item.agentId === agentId) ?? null, error: snapshot.persistenceError ?? null };
+  }
+
+  /**
+   * The completion a receipt names. The host's attention is edge-triggered: a turn that ends while an older result is still
+   * unread leaves that older stamp, so the page shows the newer, observed end as unread and sends it as `completionAt`
+   * (codex-F5). The stamp names an earlier turn once the latest one began after it: a newer prompt, or a turn the plugin saw
+   * start, as a heartbeat or another system notification starts one without a prompt (codex-obs-attn-F1). The receipt then
+   * names exactly the end the plugin observed of that latest, completed turn (not in the future); a claim of anything else,
+   * the older stamp included, is stale. While the stamp names the latest turn it is the token, as before. Older clients send
+   * no claim; without telemetry nothing is verified.
+   */
+  private completionToken(input: MarkCompletionReadInput, native: string, observed: ObservedTurn | null): string | null {
+    const claimed = input.completionAt;
+    if (!claimed || !this.telemetry) return native;
+    const prompt = Date.parse(input.lastUserMessageAt ?? ""), started = Date.parse(observed?.turnStartedAt ?? "");
+    const since = Math.max(Number.isFinite(prompt) ? prompt : -Infinity, Number.isFinite(started) ? started : -Infinity);
+    if (!(Date.parse(native) < since)) return native;
+    const at = Date.parse(claimed);
+    return at >= since && at <= this.now() && observed?.outcome === "completed" && observed.turnEndedAt !== null && Date.parse(observed.turnEndedAt) === at ? claimed : null;
+  }
+
   private async perform(paseo: PaseoApi, input: MarkCompletionReadInput): Promise<MarkCompletionReadResult> {
     const { agentId } = input;
     const previous = await this.store.get(agentId);
@@ -126,7 +178,11 @@ export class CompletionReadController {
     if (this.closed) return result("failed", "已读同步正在关闭，请稍后重试。");
     const generation = this.generations.get(agentId) ?? 0;
     const changed = () => this.closed || generation !== (this.generations.get(agentId) ?? 0);
-    const quiet = (agent: Record<string, unknown>) => !agent.archivedAt && ["idle", "closed"].includes(String(agent.status))
+    const error = input.kind === "error";
+    // 知道了 on a stop names it; only the stop the plugin observed for this prompt can be acknowledged (opus-F34). Without
+    // telemetry it is an ordinary 知道了 that clears native attention.
+    const stopAt = error && this.telemetry ? input.stopAt ?? null : null;
+    const quiet = (agent: Record<string, unknown>) => !agent.archivedAt && (error ? ["idle", "closed", "error"] : ["idle", "closed"]).includes(String(agent.status))
       && !agent.activeTurn && Array.isArray(agent.pendingPermissions) && agent.pendingPermissions.length === 0
       && agent.attentionReason !== "permission";
     const samePrompt = (agent: Record<string, unknown>) => (agent.lastUserMessageAt ?? null) === input.lastUserMessageAt;
@@ -136,8 +192,44 @@ export class CompletionReadController {
       const agent = object(before.agent);
       if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
       if (!quiet(agent) || !samePrompt(agent)) return result("stale", "会话已开始新任务、需要审批或已归档，本次未标记已读。");
-      if (agent.requiresAttention !== true || agent.attentionReason !== "finished") return result("not_unread", "当前会话没有待查看的完成结果；原生状态已同步。");
+      // A claim of the host's own stamp is checked too: a heartbeat may have run another turn since (codex-obs-attn-F1).
+      const seen = stopAt !== null || input.completionAt || input.round ? await this.observed(agentId) : null, observed = seen?.record ?? null;
+      if (stopAt !== null && observed?.stop?.at !== stopAt) return result("stale", "停下的原因已有更新，请刷新后再确认。");
+      // 待回复 names its round: a heartbeat's next round asks again under the same host tokens, and a page still on the earlier
+      // question must not mark the new one read, here or in the receipt of a session the host has not loaded (codex-obs-attn-R2).
+      // So does a quick reply's rearm, the round it answers (codex-obs-attn-R4). A round that cannot be checked here clears nothing:
+      // no telemetry, or a store that reports an error, whose record may be behind (as the reply's own check, codex-obs-attn-R3-remaining).
+      if (input.round && seen?.error) return result("failed", "观测台的记录暂时有问题，核实不了这一轮，本次未标记已读；请稍后再试。");
+      if (input.round && (!this.telemetry || !sameRound(input.round, observed))) return result("stale", "这之后它又跑了一轮，请刷新后看最新的提问再标记已读。");
+      if (agent.requiresAttention !== true || (error ? !["finished", "error"].includes(String(agent.attentionReason)) : agent.attentionReason !== "finished")) {
+        // No native attention to clear: a turn the host closed mid-way raised none (and one opened in Paseo has none left).
+        // 知道了 is then the plugin's own record on the stop, the only way such a stop is seen.
+        if (stopAt === null) return result("not_unread", error ? "这次异常已经看过了；原生状态已同步。" : "当前会话没有待查看的完成结果；原生状态已同步。");
+        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
+        return await this.telemetry!.ackStop(agentId, stopAt) ? result("read", "已标记为知道了。", previous) : result("stale", "停下的原因已有更新，请刷新后再确认。");
+      }
       if (agent.attentionTimestamp !== input.attentionTimestamp) return result("stale", "已有更新的完成结果，请先查看最新结果。");
+      // An Agent the host has not loaded: clearing its attention loads it (a provider process that then stays), and an ACP
+      // Agent cannot be loaded again at all, so the request fails (P2-3, P2-4). Its token was checked above; the receipt here,
+      // for that token or the newer completion it stands for, is what the page counts as read, and the host's flag goes when
+      // the session is next loaded. A quick reply (`rearm`) loads the Agent to send anyway and clears it as before.
+      const unloaded = agent.status === "closed" && input.rearm !== true;
+      const receiptFor = (completionAt: string) => this.store.record({ agentId, completionAt, lastUserMessageAt: input.lastUserMessageAt, readAt: new Date(this.now()).toISOString() });
+      if (unloaded && error) {
+        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
+        if (stopAt !== null && !await this.telemetry!.ackStop(agentId, stopAt)) return result("stale", "停下的原因已有更新，请刷新后再确认。");
+        // 知道了 as clearing would have made it: a failure's token says it was seen; a finished turn's result is seen with its
+        // stop (that token, or the newer completion it stands for when the server can verify it).
+        const token = agent.attentionReason === "finished" ? this.completionToken(input, input.attentionTimestamp!, observed) : input.attentionTimestamp!;
+        const receipt = token ? await receiptFor(token).catch(() => previous) : previous;
+        return result("read", "已标记为知道了（会话没有载入，没有为此载入它）。", receipt);
+      }
+      const completionAt = error ? null : this.completionToken(input, input.attentionTimestamp!, observed);
+      if (!error && completionAt === null) return result("stale", "完成结果已有更新，请刷新后再标记已读。");
+      if (unloaded) {
+        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
+        return result("read", "已标记为已读（会话没有载入，没有为此载入它）。", await receiptFor(completionAt!));
+      }
       // The native RPC (still in 0.9) has no compare-and-swap token. Exact preconditions,
       // lifecycle generations and postchecks detect races; never claim atomicity.
       const response = await this.transport.request({ type: "clear_agent_attention", agentId }, "clear_agent_attention_response");
@@ -149,9 +241,12 @@ export class CompletionReadController {
       const confirmed = object(after?.agent);
       if (!after?.agent || changed() || !quiet(confirmed) || !samePrompt(confirmed) || confirmed.requiresAttention !== false)
         return result("stale", "会话已有新状态，本次未记录新的已读回执，请刷新查看。");
-      const receipt = await this.store.record({ agentId, completionAt: input.attentionTimestamp,
-        lastUserMessageAt: input.lastUserMessageAt, readAt: new Date(this.now()).toISOString() });
-      return result("read", "已标记为已读，并同步到 Paseo。", receipt);
+      if (error) {
+        // The same record as without native attention, so a stop seen here stays seen whichever way it was seen.
+        if (stopAt !== null) await this.telemetry?.ackStop(agentId, stopAt).catch(() => false);
+        return result("read", "已标记为知道了，并同步到 Paseo。", previous);
+      }
+      return result("read", "已标记为已读，并同步到 Paseo。", await receiptFor(completionAt!));
     } catch (error) {
       return result("failed", `已读同步未确认：${error instanceof Error ? error.message.replaceAll("子任务", "已读") : "宿主暂不可用"}。请刷新后确认状态。`);
     }
@@ -159,14 +254,14 @@ export class CompletionReadController {
   async close() { this.closed = true; await Promise.allSettled([...this.pending.values()].map(entry => entry.promise)); await this.store.close(); }
 }
 
-export function registerReadState(server: PluginServerContext): () => Promise<void> {
+/**
+ * `telemetry`: the plugin's own observations (pass the `TelemetryStore`). Without it a stop the host raised no attention for
+ * cannot be acknowledged, and a receipt always names the host's attention stamp.
+ */
+export function registerReadState(server: PluginServerContext, bridge: Pick<ProviderBridge, "request">, telemetry?: ReadStateTelemetry) {
   const store = new ReadReceiptStore();
   activeReadReceiptStore = store;
-  const bridge = createProviderSubagentBridge({
-    send(message) { if (!process.send) throw new Error("当前环境没有 Paseo 宿主通道"); process.send(message); },
-    listen(listener) { process.on("message", listener); return () => process.off("message", listener); },
-  });
-  const controller = new CompletionReadController(store, bridge);
+  const controller = new CompletionReadController(store, bridge, Date.now, telemetry);
   server.handle(getReadReceipts, ({ revision }) => store.read(revision));
   server.handle(markCompletionRead, (input, { paseo }) => controller.mark(paseo, input));
   const removers = [
@@ -176,5 +271,5 @@ export function registerReadState(server: PluginServerContext): () => Promise<vo
     server.on("agent.permission_resolved", ({ agent }) => controller.bump(agent.id)),
     server.on("agent.archived", async ({ agent, archivedAt }) => { controller.bump(agent.id); await store.recordArchiveOrigin({ agentId: agent.id, archivedAt, lastUserMessageAt: null }); }),
   ];
-  return async () => { removers.forEach(remove => remove()); bridge.dispose(); await controller.close(); if (activeReadReceiptStore === store) activeReadReceiptStore = null; };
+  return { store, async close() { removers.forEach(remove => remove()); await controller.close(); if (activeReadReceiptStore === store) activeReadReceiptStore = null; } };
 }

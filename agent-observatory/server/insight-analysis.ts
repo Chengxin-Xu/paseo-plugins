@@ -10,20 +10,44 @@ import { excerptText } from "../shared/evidence";
 const PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|$)/g;
 /** header.payload.signature, both JSON parts base64url (`eyJ` is `{"`); an unsigned token has an empty signature. */
 const JWT = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g;
-/** Vendor prefixes: OpenAI/Stripe-style sk-/pk-, GitHub gh?_ and github_pat_, xAI, AWS access keys, Google API keys, Slack, GitLab. */
-const PREFIXED = /\b(?:(?:sk|pk|gh[pousr]|github_pat|xai)[-_][A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,})/g;
-/** `password=…`, `"api_key": "…"`, `Authorization: Basic …`: the value after a credential key (any prefix, e.g. `DB_PASSWORD`). */
-const KEYED = /((?:authorization|api[_-]?key|access[_-]?(?:token|key)|refresh[_-]?token|secret[_-]?key|private[_-]?key|client[_-]?secret|password|passwd|secret)["']?\s*[=:]\s*["']?)(?:(?:Bearer|Basic|Token)[ \t]+)?(?!\[)[^\s"'`,;\]}]{8,}/gi;
+/**
+ * Vendor prefixes: OpenAI/Stripe-style sk-/pk-/rk-, GitHub gh?_ and github_pat_, xAI, Groq, AWS access keys (long-term and
+ * temporary), Google API keys, OAuth tokens and client secrets, Slack bot/user/app/refresh tokens, GitLab, npm, Hugging Face,
+ * SendGrid, Stripe webhook secrets, Composio. A prefix also counts right after a JSON escape such as `\n`.
+ */
+const PREFIXED = /(?:\b|(?<=\\[nrt]))(?:(?:sk|pk|rk|gh[pousr]|github_pat|xai)[-_][A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|ya29\.[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{20,}|xox[abeprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,}|gl(?:pat|dt|rt|ptt|cbt|ft|oas|soat|imt|agent|wt)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9]{24,}|gsk_[A-Za-z0-9]{40,}|ak_[A-Za-z0-9]{20,})/g;
+/**
+ * `password=…`, `"api_key": "…"`, `Authorization: Basic …`: the value after a credential key (any prefix, e.g. `DB_PASSWORD`),
+ * also in JSON that was stringified once more (`\"password\": \"…\"`).
+ */
+const KEYED = /((?:authorization|api[_-]?key|access[_-]?(?:token|key)|refresh[_-]?token|secret[_-]?key|private[_-]?key|client[_-]?secret|password|passwd|secret)\\?["']?\s*[=:]\s*\\?["']?)(?:(?:Bearer|Basic|Token)[ \t]+)?(?!\[)(?:[^\s"'`,;\]}\\]|\\(?!["'])){8,}/gi;
 /**
  * `token=…` / `GITHUB_TOKEN: …` (not `tokens`, `max_tokens`). Only values that look generated: token characters with a digit or at
  * least 32 of them, not followed by `(`, `[` or `{` (code such as `const token = readToken(agent)` stays). The value is matched once
  * (an atomic lookahead), so a long run cannot backtrack.
  */
-const TOKEN = /(token["']?\s*[=:]\s*["']?)(?!\[)(?=[\w.~+/=%-]*[0-9]|[\w.~+/=%-]{32})(?=([\w.~+/=%-]{8,}))\2(?![(\[{])/gi;
+const TOKEN = /(token\\?["']?\s*[=:]\s*\\?["']?)(?!\[)(?=[\w.~+/=%-]*[0-9]|[\w.~+/=%-]{32})(?=([\w.~+/=%-]{8,}))\2(?![(\[{])/gi;
 /** A bare `Bearer <token>` (headers in curl commands, logs). */
 const BEARER = /(\bBearer[ \t]+)(?!\[)[A-Za-z0-9._~+/=-]{16,}/gi;
+/** `user:password@` in a URL of any scheme (https, postgres, mongodb+srv, redis, amqp…); a scheme starts where a word does. */
+const USERINFO = /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+/** Slack and Discord webhook URLs carry their secret in the path. */
+const WEBHOOK = /((?:hooks\.slack\.com\/(?:services|workflows|triggers)|discord(?:app)?\.com\/api\/webhooks)\/)[A-Za-z0-9_/-]{8,}/gi;
+/** Signing and key parameters of a URL query (`?key=`, presigned `X-Amz-Signature=`, Azure SAS `sig=`). */
+const QUERY_KEY = /([?&](?:key|sig|signature|x-amz-signature)=)(?!\[)[^\s&#"'<>]{8,}/gi;
 
-/** Never forward common credential literals into a trajectory analysis prompt. Not exhaustive: unknown formats pass through. */
+/**
+ * A field whose name says it holds a credential (`password`, `PGPASSWORD`, `api_key`, `x-api-key`, `AWS_SECRET_ACCESS_KEY`,
+ * `AWS_SESSION_TOKEN`, `Authorization`, `client_secret`, `credentials`): every string under it is masked whole, whatever it looks
+ * like, before anything is cut or turned into JSON. `max_tokens`, `tokenCount` or `secretName` are not credentials.
+ */
+const CREDENTIAL_FIELD = /(?:authorization|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|secret|password|passwd|passphrase|token|credentials?)$/i;
+export const isCredentialField = (name: string): boolean => CREDENTIAL_FIELD.test(name);
+
+/**
+ * Never forward common credential literals into a trajectory analysis prompt. Not exhaustive: unknown formats, bare secrets
+ * without a key or prefix (an AWS secret key on its own line) and passwords under 8 characters or with spaces pass through.
+ */
 export function redactSecrets(text: string): string {
   return text
     .replace(PRIVATE_KEY, "[private key redacted]")
@@ -32,7 +56,16 @@ export function redactSecrets(text: string): string {
     .replace(KEYED, "$1[redacted]")
     .replace(TOKEN, "$1[redacted]")
     .replace(BEARER, "$1[redacted]")
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@");
+    .replace(USERINFO, "$1[redacted]@")
+    .replace(WEBHOOK, "$1[redacted]")
+    .replace(QUERY_KEY, "$1[redacted]");
+}
+/** redactSecrets on every string of a parsed model answer: a provider reviewer can read files on its own and quote them. */
+export function redactStrings(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (depth > 8 || !value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(entry => redactStrings(entry, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactStrings(entry, depth + 1)]));
 }
 export function assessTrajectory(trajectory: SessionTrajectory, trigger: "manual" | "auto", minimumTurns = 3, minimumTools = 3) {
   const turnCount = trajectory.counts.userTurns;
@@ -71,9 +104,10 @@ export function buildAnalysisRequest(trajectory: SessionTrajectory, question?: s
   const limit = options.compact ? 70000 : 120000;
   const combined = [...new Map([...(options.historicalEvidence ?? []), ...trajectory.rows].map(row => [row.ref, row])).values()];
   const selected = selectAnalysisRows(combined, options.compact ? 90 : 180);
-  const safeMetadata = (value: unknown): unknown => {
-    if (typeof value === "string") return redactSecrets(excerptText(value, 1000).text);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, safeMetadata(entry)]));
+  // Masked before it is cut, with the field names in mind (see summarizeTrajectoryRow).
+  const safeMetadata = (value: unknown, secret = false): unknown => {
+    if (typeof value === "string") return excerptText(secret && value ? "[redacted]" : redactSecrets(value), 1000).text;
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, safeMetadata(entry, secret || isCredentialField(key))]));
     return value;
   };
   const instructions = [
@@ -100,9 +134,9 @@ export function buildAnalysisRequest(trajectory: SessionTrajectory, question?: s
     });
     const data = { agent: safeMetadata(trajectory.agent), project: safeMetadata(trajectory.project), capturedAt: trajectory.capturedAt,
       coverage: safeMetadata(trajectory.coverage), counts: trajectory.counts,
-      previousReview: options.previousReview ? { jobId: options.previousReview.jobId, summary: redactSecrets(excerptText(options.previousReview.summary, 600).text),
-        findings: options.previousReview.findings.slice(0, 12).map(finding => ({ id: finding.id, title: redactSecrets(finding.title), detail: redactSecrets(excerptText(finding.detail, 600).text),
-          recommendation: redactSecrets(excerptText(finding.recommendation, 400).text), evidence: finding.evidence.filter(ref => selected.some(row => row.ref === ref)).slice(0, 6) })) } : undefined,
+      previousReview: options.previousReview ? { jobId: options.previousReview.jobId, summary: excerptText(redactSecrets(options.previousReview.summary), 600).text,
+        findings: options.previousReview.findings.slice(0, 12).map(finding => ({ id: finding.id, title: redactSecrets(finding.title), detail: excerptText(redactSecrets(finding.detail), 600).text,
+          recommendation: excerptText(redactSecrets(finding.recommendation), 400).text, evidence: finding.evidence.filter(ref => selected.some(row => row.ref === ref)).slice(0, 6) })) } : undefined,
       analysisWindow: { providedRows: evidence.length, sourceRows: trajectory.rows.length, sampled, sourceCountsAreWindowTotals: true },
       rows: evidence.map(row => ({ ref: row.ref, at: row.at, turnId: row.turnId, type: row.kind, tool: row.toolName, status: row.toolStatus, text: row.text })) };
     prompt = `${instructions}\n\n<trajectory_data>${JSON.stringify(data)}</trajectory_data>`;
@@ -156,7 +190,7 @@ export function parseInsightOutput(output: string, accept?: (value: unknown) => 
 }
 export function parseInsightText(output: string, references: Set<string>): { report: InsightReport; usage: InsightJob["usage"] } {
   const { data, usage: reportedUsage } = parseInsightOutput(output, value => insightReportSchema.safeParse(value).success);
-  const parsed = insightReportSchema.safeParse(data);
+  const parsed = insightReportSchema.safeParse(redactStrings(data));
   if (!parsed.success) throw new InsightReportError("分析报告字段不完整或超出限制。可以重试分析。", reportedUsage);
   const report = parsed.data;
   let unsupported = 0, invalidReferences = 0;

@@ -3,12 +3,16 @@ import {
   type StatsBreakdownRow, type StatsDay, type StatsMetrics, type StatsRange, type StatsSnapshot, type StatsTool,
 } from "../shared/stats";
 import {
-  STATS_DAY_MS, type StatsAgentRecord, type StatsAttribution, type StatsDirectoryAgent, type StatsHour, type StatsToolDay,
+  statsDayText, statsLocalDay, statsLocalHour, statsZone,
+  type StatsAgentRecord, type StatsAttribution, type StatsDirectoryAgent, type StatsHour, type StatsToolHour,
 } from "./stats-types";
 
 export interface StatsSnapshotInput {
   now: number; range: StatsRange; utcOffsetMinutes: number;
-  hours: readonly StatsHour[]; attributions: readonly StatsAttribution[]; toolDays: readonly StatsToolDay[];
+  /** Device IANA zone; days follow it when this server knows it and it agrees with `utcOffsetMinutes` at `now`. */
+  timeZone?: string | null;
+  /** All hour-keyed (UTC): each is regrouped into the device's local days, so no day boundary is baked into storage. */
+  hours: readonly StatsHour[]; attributions: readonly StatsAttribution[]; toolHours: readonly StatsToolHour[];
   records: readonly StatsAgentRecord[]; running: ReadonlyMap<string, number>; directory: readonly StatsDirectoryAgent[];
   observedSince: string | null; contentSince: string | null; directoryTruncated: boolean;
   /** Open Agents whose final reply asks the user (待回复), from the reply ledger. */
@@ -22,8 +26,7 @@ export interface StatsSnapshotInput {
 }
 
 const metricKeys = Object.keys(emptyStatsMetrics()) as (keyof StatsMetrics)[];
-const dayNumber = (at: number, offset: number) => Math.floor((at + offset) / STATS_DAY_MS);
-const dayString = (day: number) => new Date(day * STATS_DAY_MS).toISOString().slice(0, 10);
+const dayString = statsDayText;
 const weekday = (day: number) => ((day + 3) % 7 + 7) % 7;
 const active = (metrics: StatsMetrics) => metrics.sessions > 0 || metrics.turns > 0;
 const text = (value: string | null | undefined, fallback: string, maximum = 240) => (value?.trim() || fallback).slice(0, maximum);
@@ -87,7 +90,9 @@ function finishGroups(groups: Map<string, Group>, limit: number, dimension: Dime
 /** Pure projection. Busy-time advancement and stale-running reconciliation belong to the store. */
 export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
   const { now, range, utcOffsetMinutes } = input;
-  const offset = utcOffsetMinutes * 60_000, today = dayNumber(now, offset), count = statsRangeDays[range];
+  const zone = statsZone(utcOffsetMinutes, input.timeZone, now);
+  const dayOf = (at: number) => statsLocalDay(at, zone), hourOf = (at: number) => statsLocalHour(at, zone);
+  const today = dayOf(now), count = statsRangeDays[range];
   const first = today - count + 1, previousFirst = first - count, from = dayString(first), to = dayString(today);
   const days = new Map<number, StatsMetrics>();
   const getDay = (day: number) => {
@@ -105,9 +110,9 @@ export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
   for (const hour of input.hours) {
     const at = Date.parse(hour.hour);
     if (!Number.isFinite(at)) continue;
-    const day = dayNumber(at, offset);
+    const day = dayOf(at);
     add(getDay(day), hour, false);
-    if (inRange(day)) punchcard.turns[weekday(day) * 24 + new Date(at + offset).getUTCHours()] += hour.turns;
+    if (inRange(day)) punchcard.turns[weekday(day) * 24 + hourOf(at)] += hour.turns;
     if (hour.peakParallel > 0 && (!peakParallel || hour.peakParallel > peakParallel.count || (hour.peakParallel === peakParallel.count && at < Date.parse(peakParallel.at)))) {
       peakParallel = { count: hour.peakParallel, at: new Date(at).toISOString() };
     }
@@ -118,12 +123,12 @@ export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
   const fanouts = new Map<string, number>();
   let children = 0, maxDepth = 0;
   for (const agent of directory.values()) {
-    const at = Date.parse(agent.createdAt), day = Number.isFinite(at) ? dayNumber(at, offset) : NaN;
+    const at = Date.parse(agent.createdAt), day = Number.isFinite(at) ? dayOf(at) : NaN;
     const selected = inRange(day), child = Boolean(agent.parentAgentId), open = agent.archivedAt === null;
     if (Number.isFinite(day)) {
       getDay(day).sessions++;
       if (child) getDay(day).childSessions++;
-      if (selected) punchcard.sessions[weekday(day) * 24 + new Date(at + offset).getUTCHours()]++;
+      if (selected) punchcard.sessions[weekday(day) * 24 + hourOf(at)]++;
     }
     if (open) {
       live.open++;
@@ -152,18 +157,29 @@ export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
     }
   }
 
-  const agentTurns = new Map<string, number>();
+  // Each Agent's hours in range are summed first, so the four breakdowns add one total per Agent, not one per hour.
+  const agentTotals = new Map<string, { metrics: StatsMetrics; days: Set<number>; lastActiveAt: number }>();
   for (const attribution of input.attributions) {
-    // Attribution is retained by UTC day; this intentionally has the documented edge approximation.
-    if (attribution.day < from || attribution.day > to) continue;
-    const agent = directory.get(attribution.agentId);
-    const at = Date.parse(attribution.lastActiveAt), day = dayNumber(Number.isFinite(at) ? at : Date.parse(`${attribution.day}T00:00:00.000Z`), offset);
-    agentTurns.set(attribution.agentId, (agentTurns.get(attribution.agentId) ?? 0) + attribution.turns);
+    // An hour belongs to the local day it starts in, as the 看板 hours above (in a :30 / :45 zone, the one hour that
+    // spans midnight counts for the day it starts in).
+    const at = Date.parse(attribution.hour), day = Number.isFinite(at) ? dayOf(at) : NaN;
+    if (!inRange(day)) continue;
+    let total = agentTotals.get(attribution.agentId);
+    if (!total) { total = { metrics: emptyStatsMetrics(), days: new Set(), lastActiveAt: -Infinity }; agentTotals.set(attribution.agentId, total); }
+    add(total.metrics, attribution, false);
+    if (attribution.turns > 0) total.days.add(day);
+    const last = Date.parse(attribution.lastActiveAt);
+    if (last > total.lastActiveAt) total.lastActiveAt = last;
+  }
+  const agentTurns = new Map<string, number>();
+  for (const [agentId, total] of agentTotals) {
+    const agent = directory.get(agentId), lastActiveAt = Number.isFinite(total.lastActiveAt) ? new Date(total.lastActiveAt).toISOString() : null;
+    agentTurns.set(agentId, total.metrics.turns);
     for (const dimension of dimensions) {
       const group = groupFor(groups[dimension], identity(dimension, agent));
-      add(group.row, attribution, false);
-      if (attribution.turns > 0 && inRange(day)) group.days.add(day);
-      latest(group, attribution.lastActiveAt);
+      add(group.row, total.metrics, false);
+      for (const day of total.days) group.days.add(day);
+      if (lastActiveAt) latest(group, lastActiveAt);
     }
   }
   // Hooks may briefly precede directory visibility. Preserve their current, unattributed running count.
@@ -211,16 +227,17 @@ export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
   const busiestSession = busiest ? { agentId: busiest[0], title: titleOf(directory.get(busiest[0])), turns: busiest[1] } : null;
   const tools = new Map<string, { row: StatsTool; kinds: Map<StatsTool["kind"], number> }>();
   const kinds = new Map(TOOL_KINDS.map(kind => [kind, { name: kind, kind, calls: 0, failures: 0 } satisfies StatsTool]));
-  for (const day of input.toolDays) {
-    if (day.day < from || day.day > to) continue;
-    for (const tool of day.tools) {
+  for (const hour of input.toolHours) {
+    const at = Date.parse(hour.hour);
+    if (!Number.isFinite(at) || !inRange(dayOf(at))) continue;
+    for (const tool of hour.tools) {
       const name = tool.name.trim().slice(0, 160);
       let named = tools.get(name);
       if (!named) { named = { row: { name, kind: tool.kind, calls: 0, failures: 0 }, kinds: new Map() }; tools.set(name, named); }
       named.row.calls += tool.calls; named.row.failures += tool.failures;
       named.kinds.set(tool.kind, (named.kinds.get(tool.kind) ?? 0) + tool.calls);
     }
-    for (const tool of day.kinds ?? day.tools) { const kind = kinds.get(tool.kind)!; kind.calls += tool.calls; kind.failures += tool.failures; }
+    for (const tool of hour.kinds ?? hour.tools) { const kind = kinds.get(tool.kind)!; kind.calls += tool.calls; kind.failures += tool.failures; }
   }
   const rankedTools = [...tools.values()].filter(tool => tool.row.calls > 0).map(tool => {
     tool.row.kind = [...tool.kinds].sort(([a, ac], [b, bc]) => bc - ac || TOOL_KINDS.indexOf(a) - TOOL_KINDS.indexOf(b))[0][0];
@@ -228,7 +245,7 @@ export function buildStatsSnapshot(input: StatsSnapshotInput): StatsSnapshot {
   }).sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name)).slice(0, 24);
 
   return {
-    generatedAt: new Date(now).toISOString(), range, utcOffsetMinutes, from, to,
+    generatedAt: new Date(now).toISOString(), range, utcOffsetMinutes, timeZone: zone.name, from, to,
     observedSince: input.observedSince, contentSince: input.contentSince, directoryTruncated: input.directoryTruncated,
     totals, previous, allTime, daily, calendar, punchcard,
     streak: { current, longest, longestEnd, activeDays: activeDays.filter(inRange).length, activeDaysAllTime: activeDays.length },

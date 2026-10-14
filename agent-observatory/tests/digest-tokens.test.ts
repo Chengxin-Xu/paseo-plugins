@@ -38,3 +38,11 @@ test("an overlapping older turn can receive an otherwise unmatched call, but nev
   attachTokens(list, { source: "codex", calls: [call(50000)] }, 60000);
   assert.equal(list[0]!.tokens?.calls, 1); assert.equal(list[1]!.tokens, null);
 });
+
+test("a record standing for several model calls (a Grok turn) counts them all; every token source reaches 复盘", () => {
+  const list = turns(), tokens = attachTokens(list, { source: "codex", calls: [{ ...call(22000), calls: 4 }, call(23500)] }, 40000)!;
+  assert.equal(tokens.totals.calls, 5); assert.deepEqual(list.map(turn => turn.tokens?.calls), [4, 1]);
+  // The digest schema names every ledger source (claude, codex, grok, pi): Pi and Grok sessions get their tokens too.
+  assert.equal(attachTokens(turns(), { source: "pi", calls: [call(22000)] }, 40000)?.source, "pi");
+  assert.equal(attachTokens(turns(), { source: "grok", calls: [{ ...call(22000), calls: 3 }] }, 40000)?.totals.calls, 3);
+});

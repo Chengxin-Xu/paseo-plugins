@@ -1,6 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { tokenCountsSchema } from "./tokens";
+import { TOKEN_SOURCES, tokenCountsSchema } from "./tokens";
 
 /**
  * Execution digest (复盘) of one agent. The server folds the agent's canonical timeline (every raw event with its own
@@ -147,7 +147,7 @@ export const digestSchema = z.object({
   highlights: z.array(digestHighlightSchema).max(30),
   /** From the token ledger when the agent's provider session was found in the local logs. */
   tokens: z.object({
-    source: z.enum(["claude", "codex"]),
+    source: z.enum(TOKEN_SOURCES),
     totals: tokenCountsSchema,
     /** Per call, oldest first, thinned evenly to at most 400: end time, output, all input read, speed (tok/s) or null. */
     calls: z.array(z.tuple([at, count, count, z.number().nonnegative().finite().nullable()])).max(400),

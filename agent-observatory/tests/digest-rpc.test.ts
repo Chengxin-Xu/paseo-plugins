@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import Module from "node:module";
 import test from "node:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement } from "react";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { digestResponseSchema, getDigest } from "../shared/digest";
 import type { TelemetryEvent } from "../shared/telemetry";
-import { DigestService, registerDigest } from "../server/digest";
+import { ACTIVE_CLOCK_MS, DigestService, registerDigest } from "../server/digest";
 import type { TokenCall } from "../server/token-source";
 import type { TelemetryStore } from "../server/telemetry";
 
@@ -54,8 +57,30 @@ test("revisions cover same-call token corrections, same-count telemetry replacem
   f.events.push({ id: "1", agentId: "a", agentTitle: "", at: new Date(15000).toISOString(), type: "turn_failed", label: "" }); await changed();
   f.events[0] = { ...f.events[0]!, id: "2", type: "turn_completed" }; await changed();
   f.setStatus("running"); await changed();
-  f.setNow(20001); assert.equal((await service.read({ agentId: "a", revision: response.revision }, f.paseo)).mode, "unchanged");
-  f.setNow(30000); await changed();
+  // While running the revision follows a 30 s clock (the client's running poll), not every 10 s.
+  const unchanged = async () => assert.equal((await service.read({ agentId: "a", revision: response.revision }, f.paseo)).mode, "unchanged");
+  f.setNow(29_999); await unchanged();
+  f.setNow(30_000); await changed();
+  f.setNow(45_000); await unchanged();
+  f.setNow(60_000); await changed();
+  f.setStatus("idle"); await changed();
+  f.setNow(600_000); await unchanged();
+  await service.close();
+});
+
+test("a versioned token history is compared by its version, not call by call (opus-F70)", async () => {
+  const f = fixture();
+  let version = "v1";
+  const calls: TokenCall[] = [{ at: 10000, start: 8000, model: null, input: 10, cacheRead: 0, cacheWrite: 0, output: 20, reasoning: 0, subagent: false }];
+  const service = new DigestService({ ...f.deps, tokens: { callsForSessions: async () => ({ source: "claude" as const, calls: calls.map(item => ({ ...item })), version }) } });
+  const first = await service.read({ agentId: "a" }, f.paseo);
+  assert.equal(first.mode, "full"); if (first.mode !== "full") return;
+  assert.equal(first.tokens?.totals.output, 20);
+  calls[0]!.output = 999;
+  assert.equal((await service.read({ agentId: "a", revision: first.revision }, f.paseo)).mode, "unchanged", "same logs, same version: nothing to send");
+  version = "v2";
+  const next = await service.read({ agentId: "a", revision: first.revision }, f.paseo);
+  assert.equal(next.mode, "full"); if (next.mode === "full") assert.equal(next.tokens?.totals.output, 999);
   await service.close();
 });
 
@@ -104,4 +129,28 @@ test("empty timelines still return cheap unchanged revisions without a history c
   const first = await service.read({ agentId: "empty" }, f.paseo);
   const next = await service.read({ agentId: "empty", revision: first.revision }, f.paseo);
   assert.equal(next.mode, "unchanged"); await service.close();
+});
+
+// The client hook reads AppState from react-native (Flow source node cannot load) and RPCs from the host: stub both, in the background.
+const loader = Module as unknown as { _resolveFilename(request: string, ...rest: unknown[]): string; _cache: Record<string, unknown> };
+const stubs: Record<string, unknown> = { "react-native": { AppState: { currentState: "background", addEventListener: () => ({ remove() {} }) } },
+  "@getpaseo/plugin/client": { useRpc: () => async () => { throw new Error("a server render never fetches"); } } };
+for (const [name, value] of Object.entries(stubs)) loader._cache[`\0stub:${name}`] = { id: `\0stub:${name}`, filename: `\0stub:${name}`, loaded: true, exports: value };
+const resolveFilename = loader._resolveFilename;
+loader._resolveFilename = function (request, ...rest) { return request in stubs ? `\0stub:${request}` : resolveFilename.call(this, request, ...rest); };
+// A server render runs the hook once, without effects or fetches. react-dom has no type declarations here; React Query is
+// imported statically above, so it is the same CommonJS instance the hook requires.
+const { renderToString } = require("react-dom/server") as { renderToString(element: ReturnType<typeof createElement>): string };
+
+test("a running digest is polled on the revision clock's grain, and not at all in the background", async () => {
+  // Imported only now, after the stubs are in place.
+  const { digestPollMs, useDigest } = await import("../client/use-digest");
+  assert.equal(digestPollMs(true, true), ACTIVE_CLOCK_MS); assert.ok(ACTIVE_CLOCK_MS >= 20_000 && ACTIVE_CLOCK_MS <= 30_000);
+  assert.equal(digestPollMs(true, false), 60_000); assert.equal(digestPollMs(false, true), false);
+  const client = new QueryClient();
+  function Digest() { useDigest("a", true, true); return null; }
+  renderToString(createElement(QueryClientProvider, { client }, createElement(Digest)));
+  const options = client.getQueryCache().getAll()[0]!.options as Record<string, unknown>;
+  assert.equal(options.enabled, false); assert.equal(options.refetchInterval, false); assert.equal(options.refetchOnWindowFocus, false);
+  client.clear();
 });

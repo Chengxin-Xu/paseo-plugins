@@ -1,4 +1,4 @@
-import type { Digest, DigestTurn } from "../../shared/digest";
+import { digestSchema, type Digest, type DigestTurn } from "../../shared/digest";
 import { addTokenCounts, emptyTokenCounts } from "../../shared/tokens";
 import type { TokenCallSource } from "../token-source";
 
@@ -10,10 +10,14 @@ export function sampleEvenly<T>(values: readonly T[], maximum: number): T[] {
   return Array.from({ length: maximum }, (_, index) => values[Math.round(index * (values.length - 1) / (maximum - 1))]!);
 }
 const count = (value: number) => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+type DigestSource = NonNullable<Digest["tokens"]>["source"];
+const digestSources: readonly string[] = digestSchema.shape.tokens.unwrap().shape.source.options;
+/** A log source 复盘 can name; another one's history is left out rather than failing the digest's schema. */
+const isDigestSource = (source: string): source is DigestSource => digestSources.includes(source);
 
 /** Attribute each call once, preferring the latest-started turn when the five-second tolerances overlap. */
 export function attachTokens(turns: DigestTurn[], history: TokenHistory, now: number): Digest["tokens"] {
-  if (!history) return null;
+  if (!history || !isDigestSource(history.source)) return null;
   const totals = emptyTokenCounts(), tuples: NonNullable<Digest["tokens"]>["calls"] = [];
   const ordered = [...turns].sort((a, b) => a.start - b.start || a.index - b.index);
   // Max-end tree lets a backwards search prune entire expired ranges, including overlapping turns.
@@ -32,7 +36,8 @@ export function attachTokens(turns: DigestTurn[], history: TokenHistory, now: nu
   for (const call of [...history.calls].sort((a, b) => a.at - b.at)) {
     if (!Number.isFinite(call.at) || call.at < 0) continue;
     const at = Math.floor(call.at), duration = call.start !== null && Number.isFinite(call.start) && call.start >= 0 && call.start <= at ? at - call.start : 0;
-    const counts = { calls: 1, input: count(call.input), cacheWrite: count(call.cacheWrite), cacheRead: count(call.cacheRead), output: count(call.output),
+    // A record can stand for several model calls (a Grok turn, server/token-source).
+    const counts = { calls: Math.max(1, count(call.calls ?? 1)), input: count(call.input), cacheWrite: count(call.cacheWrite), cacheRead: count(call.cacheRead), output: count(call.output),
       reasoning: count(call.reasoning), genMs: duration, genOutput: duration > 0 ? count(call.output) : 0 };
     addTokenCounts(totals, counts);
     while (last + 1 < ordered.length && ordered[last + 1]!.start <= at) last++;

@@ -4,7 +4,7 @@ import type { BrowserActivity } from '../shared/browser';
 const actions:Record<string,string>={
  navigate:'打开网页',back:'返回上一页',forward:'前往下一页',reload:'刷新网页',demo:'打开体验页',
  stop:'停止浏览器',restart:'重启浏览器',newTab:'新建标签',tab:'切换标签',closeTab:'关闭标签',pin:'固定标签',
- click:'点击页面',scroll:'滚动页面',text:'输入文字',key:'按下按键',mode:'切换操作模式',viewport:'调整画面尺寸',fitWidth:'适应完整页面宽度',
+ click:'点击页面',scroll:'滚动页面',text:'输入文字',key:'按下按键',mode:'切换操作模式',viewport:'调整画面尺寸',devicePreset:'切换设备仿真',handleDialog:'处理网页对话框',fitWidth:'适应完整页面宽度',
  browser_navigate:'打开网页',browser_navigate_back:'返回上一页',browser_navigate_forward:'前往下一页',
  browser_click:'点击页面',browser_type:'输入文字',browser_fill_form:'填写表单',browser_press_key:'按下按键',
  browser_select_option:'选择选项',browser_hover:'移动鼠标',browser_drag:'拖动页面',browser_resize:'调整画面尺寸',
@@ -31,6 +31,12 @@ export class BrowserActivityLog{
  private entries:BrowserActivity[]=[];
  start(source:BrowserActivity['source'],name:unknown,page:ActivityPage,tabAction?:unknown):string{
   const id=randomUUID();this.entries.unshift({id,source,action:activityAction(name,tabAction),status:'running',...safePage(page),startedAt:Date.now(),endedAt:null});this.entries=this.entries.slice(0,12);return id;
+ }
+ /** Typing or scrolling arrives in many small batches: one that follows the same kind on the same tab within windowMs extends that entry instead of pushing the history out. */
+ continue(source:BrowserActivity['source'],name:unknown,page:ActivityPage,windowMs=10_000):string{
+  const latest=this.entries[0],action=activityAction(name);
+  if(latest&&latest.source===source&&latest.action===action&&latest.tabId===page.tabId&&latest.status==='completed'&&latest.endedAt!==null&&Date.now()-latest.endedAt<=windowMs){latest.status='running';latest.endedAt=null;return latest.id;}
+  return this.start(source,name,page);
  }
  update(id:string,page:ActivityPage,tabAction?:string):void{
   const entry=this.entries.find(item=>item.id===id);if(!entry||entry.status!=='running')return;

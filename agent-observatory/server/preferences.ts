@@ -3,13 +3,15 @@ import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { completionSnoozeSchema, defaultViewPreferences, getPreferences, savedViewSchema, updatePreferences, viewPreferencesSchema,
-  type CompletionSnooze, type PreferencesSnapshot, type PreferencesUpdate, type PreferencesUpdateResult, type SavedView, type ViewPreferences } from "../shared/preferences";
+import { completionSnoozeSchema, defaultObservatorySettings, defaultViewPreferences, getPreferences, observatorySettingsSchema, savedViewSchema, updatePreferences, viewPreferencesSchema,
+  type CompletionSnooze, type ObservatorySettings, type PreferencesSnapshot, type PreferencesUpdate, type PreferencesUpdateResult, type SavedView, type ViewPreferences } from "../shared/preferences";
 import { telemetryDirectory } from "./telemetry";
 import { ensurePrivateDirectory } from "./paseo-home";
 
 const storedViewSchema = z.object({ key: z.string().min(1).max(256), updatedAt: z.iso.datetime({ offset: true }), view: viewPreferencesSchema, savedViews: z.array(savedViewSchema).max(12) });
-const fileSchema = z.object({ version: z.literal(1), revision: z.number().int().nonnegative(), views: z.array(storedViewSchema).max(32), snoozes: z.array(completionSnoozeSchema).max(2000) });
+// `settings` is optional: files written before 2.13 have none (and 2.12 ignores the key).
+const fileSchema = z.object({ version: z.literal(1), revision: z.number().int().nonnegative(), views: z.array(storedViewSchema).max(32), snoozes: z.array(completionSnoozeSchema).max(2000),
+  settings: observatorySettingsSchema.partial().optional() });
 type StoredView = z.infer<typeof storedViewSchema>;
 
 export class PreferencesStore {
@@ -19,6 +21,7 @@ export class PreferencesStore {
   private revision = 0;
   private views = new Map<string, StoredView>();
   private snoozes: CompletionSnooze[] = [];
+  private settings: ObservatorySettings = { ...defaultObservatorySettings };
   private error: string | null = null;
   private corrupt = false;
   private closed = false;
@@ -36,6 +39,7 @@ export class PreferencesStore {
       this.revision = data.revision;
       for (const view of data.views) this.views.set(view.key, view);
       this.snoozes = data.snoozes;
+      this.settings = { ...defaultObservatorySettings, ...data.settings };
     } catch (error) {
       if ((error as { code?: string }).code !== "ENOENT") {
         this.corrupt = true;
@@ -48,7 +52,13 @@ export class PreferencesStore {
     const stored = this.views.get(viewKey);
     // The live view never carries search text (older clients saved it and it followed people to other devices); saved views keep theirs.
     return structuredClone({ revision: this.revision, view: { ...(stored?.view ?? defaultViewPreferences(viewKey)), query: "" }, savedViews: stored?.savedViews ?? [],
-      snoozes: this.snoozes.filter(snooze => Date.parse(snooze.until) > this.now()), error: this.error });
+      snoozes: this.snoozes.filter(snooze => Date.parse(snooze.until) > this.now()), error: this.error, settings: { ...this.settings } });
+  }
+
+  /** What the server-side attention summary needs: live snoozes and the host settings. */
+  async attentionInputs(): Promise<{ snoozes: CompletionSnooze[]; settings: ObservatorySettings }> {
+    await this.mutations;
+    return { snoozes: this.snoozes.filter(snooze => Date.parse(snooze.until) > this.now()).map(snooze => ({ ...snooze })), settings: { ...this.settings } };
   }
 
   async get(viewKey: string): Promise<PreferencesSnapshot> {
@@ -92,8 +102,10 @@ export class PreferencesStore {
       if (snoozes.length >= 2000) throw new Error("稍后提醒已达到 2,000 条保留上限，请先取消部分提醒。");
       snoozes.unshift({ ...input.snooze });
     }
+    const settings: ObservatorySettings = { ...this.settings, ...input.settings };
     const changed = JSON.stringify(old?.view ?? defaultViewPreferences(input.viewKey)) !== JSON.stringify(view)
-      || JSON.stringify(old?.savedViews ?? []) !== JSON.stringify(savedViews) || JSON.stringify(this.snoozes) !== JSON.stringify(snoozes);
+      || JSON.stringify(old?.savedViews ?? []) !== JSON.stringify(savedViews) || JSON.stringify(this.snoozes) !== JSON.stringify(snoozes)
+      || JSON.stringify(this.settings) !== JSON.stringify(settings);
     if (!changed) return { status: "updated", ...this.current(input.viewKey) };
     if (!old && this.views.size >= 32) {
       const oldest = [...this.views.values()].filter(view => view.savedViews.length === 0).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0];
@@ -101,7 +113,7 @@ export class PreferencesStore {
       this.views.delete(oldest.key);
     }
     this.views.set(input.viewKey, { key: input.viewKey, updatedAt: at, view, savedViews });
-    this.snoozes = snoozes; this.revision += 1;
+    this.snoozes = snoozes; this.settings = settings; this.revision += 1;
     await this.persist();
     return { status: "updated", ...this.current(input.viewKey) };
   }
@@ -113,7 +125,7 @@ export class PreferencesStore {
       if (this.corrupt) { try { await rename(this.file, `${this.file}.corrupt`); } catch { /* unreadable/absent original */ } this.corrupt = false; }
       const handle = await open(temporary, "wx", 0o600);
       try {
-        await handle.writeFile(JSON.stringify({ version: 1, revision: this.revision, views: [...this.views.values()], snoozes: this.snoozes }), "utf8");
+        await handle.writeFile(JSON.stringify({ version: 1, revision: this.revision, views: [...this.views.values()], snoozes: this.snoozes, settings: this.settings }), "utf8");
         await handle.sync();
       } finally { await handle.close(); }
       await rename(temporary, this.file); this.error = null;
@@ -124,9 +136,9 @@ export class PreferencesStore {
   async close() { this.closed = true; await this.mutations; }
 }
 
-export function registerPreferences(server: PluginServerContext): () => Promise<void> {
+export function registerPreferences(server: PluginServerContext) {
   const store = new PreferencesStore();
   server.handle(getPreferences, ({ viewKey }) => store.get(viewKey));
   server.handle(updatePreferences, input => store.update(input));
-  return () => store.close();
+  return { store, close: () => store.close() };
 }

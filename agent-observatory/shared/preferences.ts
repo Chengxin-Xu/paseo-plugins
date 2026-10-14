@@ -1,6 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { AGENT_STATUSES, knownCompletionAt, type AgentRecord } from "./model";
+import { AGENT_STATUSES, knownCompletionAt, timestamp, type AgentRecord } from "./model";
 
 const iso = z.iso.datetime({ offset: true });
 const viewKey = z.string().min(1).max(256);
@@ -20,9 +20,17 @@ export const savedViewSchema = z.object({
 export const completionSnoozeSchema = z.object({
   agentId: z.string().min(1).max(256), completionAt: iso, until: iso,
 });
+/** Host-wide settings, shared by every page and the sidebar badge. */
+export const observatorySettingsSchema = z.object({
+  /** 「子 Agent 完成计入需要处理」: off by default, the parent has the result already. */
+  childCompletions: z.boolean(),
+});
+export const defaultObservatorySettings: ObservatorySettings = { childCompletions: false };
 export const preferencesSnapshotSchema = z.object({
   revision: z.number().int().nonnegative(), view: viewPreferencesSchema,
   savedViews: z.array(savedViewSchema).max(12), snoozes: z.array(completionSnoozeSchema).max(2000), error: z.string().nullable(),
+  // Optional so a reply from an older server still parses.
+  settings: observatorySettingsSchema.optional(),
 });
 export const getPreferences = defineRpc({
   name: "observatory.preferences.get", input: z.object({ viewKey }), output: preferencesSnapshotSchema,
@@ -35,11 +43,13 @@ export const updatePreferences = defineRpc({
     deleteSavedViewId: z.string().min(1).max(128).optional(),
     snooze: completionSnoozeSchema.optional(),
     unsnooze: z.object({ agentId: z.string().min(1).max(256), completionAt: iso }).optional(),
+    settings: observatorySettingsSchema.partial().optional(),
   }),
   output: preferencesSnapshotSchema.extend({ status: z.enum(["updated", "conflict"]) }),
 });
 
 export type ViewPreferences = z.infer<typeof viewPreferencesSchema>;
+export type ObservatorySettings = z.infer<typeof observatorySettingsSchema>;
 export type SavedView = z.infer<typeof savedViewSchema>;
 export type CompletionSnooze = z.infer<typeof completionSnoozeSchema>;
 export type PreferencesSnapshot = z.infer<typeof preferencesSnapshotSchema>;
@@ -52,9 +62,24 @@ export function defaultViewPreferences(key = "overview"): ViewPreferences {
     range: "7d", sessionScope: "all", view: archived ? "list" : "tree", sort: archived ? "recent" : "attention", expanded: [], scrollOffset: 0 };
 }
 
+/**
+ * What a snooze is tied to: the completion, or for 待回复 the host's attention stamp of the reply that asks you (opus-F1).
+ * A newer result or question has a newer token and is shown again.
+ */
+export function snoozeToken(agent: AgentRecord): string | null {
+  if (agent.status === "idle" && !agent.archivedAt && agent.requiresAttention === true && agent.attentionReason === "finished") {
+    // The host's stamp stays at the first reply nobody read (edge-triggered): after a newer prompt, that prompt names the turn.
+    // A heartbeat (any system notification) moves neither, so a turn this plugin saw start after both is named by that start:
+    // known while the turn ran, the same on the page and for the badge, and new each round (codex-obs-attn-F1).
+    const stamp = timestamp(agent.attentionTimestamp), prompt = timestamp(agent.lastUserMessageAt), started = timestamp(agent.observedTurnStartedAt);
+    if (stamp !== null && started !== null && started > stamp && (prompt === null || started > prompt)) return agent.observedTurnStartedAt ?? null;
+    return prompt !== null && (stamp === null || prompt > stamp) ? agent.lastUserMessageAt : agent.attentionTimestamp ?? null;
+  }
+  return knownCompletionAt(agent);
+}
 /** Snoozing affects only one completion token; it never changes native read state. */
 export function isCompletionSnoozed(agent: AgentRecord, snoozes: readonly CompletionSnooze[], now = Date.now()): boolean {
-  const completionAt = knownCompletionAt(agent);
+  const completionAt = snoozeToken(agent);
   if (!completionAt) return false;
   const token = Date.parse(completionAt);
   return snoozes.some(snooze => snooze.agentId === agent.id && Date.parse(snooze.completionAt) === token && Date.parse(snooze.until) > now);

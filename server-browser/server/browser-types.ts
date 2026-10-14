@@ -1,16 +1,18 @@
 /** Narrow runtime contract: Playwright's optional Electron types must not enter the plugin bundle. */
-export interface BrowserFrame { url():string }
+export interface BrowserFrame { url():string; isDetached?():boolean }
 export interface BrowserRequest {
   isNavigationRequest():boolean;
   frame():BrowserFrame;
   failure():{errorText:string}|null;
 }
 export interface BrowserResponse { status():number; request():BrowserRequest; frame():BrowserFrame }
-export interface BrowserCDPSession { send<T=any>(method:string,params?:Record<string,unknown>):Promise<T>; detach():Promise<void> }
+export interface BrowserDialog {type(): 'alert'|'confirm'|'prompt'|'beforeunload';message():string;defaultValue():string;accept(promptText?:string):Promise<void>;dismiss():Promise<void>}
+export interface BrowserCDPSession { on?(event:string,listener:(value:any)=>void):unknown; send<T=any>(method:string,params?:Record<string,unknown>):Promise<T>; detach():Promise<void> }
 export interface BrowserPage {
   on(event:'close',listener:()=>void):unknown;
-  on(event:'dialog',listener:(dialog:{dismiss():Promise<void>})=>void):unknown;
+  on(event:'dialog',listener:(dialog:BrowserDialog)=>void):unknown;
   on(event:'framenavigated',listener:(frame:BrowserFrame)=>void):unknown;
+  on(event:'framedetached',listener:(frame:BrowserFrame)=>void):unknown;
   on(event:'response',listener:(response:BrowserResponse)=>void):unknown;
   on(event:'requestfailed',listener:(request:BrowserRequest)=>void):unknown;
   mainFrame():BrowserFrame;
@@ -35,9 +37,10 @@ export interface BrowserPage {
 export interface BrowserContext {
   pages():BrowserPage[];
   newPage():Promise<BrowserPage>;
-  newCDPSession(page:BrowserPage):Promise<BrowserCDPSession>;
+  /** A frame works only when it runs in its own renderer process (site isolation); otherwise this throws. */
+  newCDPSession(page:BrowserPage|BrowserFrame):Promise<BrowserCDPSession>;
   setDefaultTimeout(timeout:number):void;
   setDefaultNavigationTimeout(timeout:number):void;
   on(event:'page',listener:(page:BrowserPage)=>void):unknown;
 }
-export interface BrowserConnection { contexts():BrowserContext[]; close():Promise<void> }
+export interface BrowserConnection { contexts():BrowserContext[]; close():Promise<void>; version?():string }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { needsAttention } from "../shared/dashboard-model";
-import { applyArchiveReadOrigin, applyReadReceipt, applyTelemetry, buildAgentForest, classifyAgentStatus, completionReadState, filterAgentForest, flattenAgentForest, formatDuration, formatRelativeTime, formatTokens, isUnreadCompletion, knownCompletionAt, normalizeAgent, preserveCompletionEvidence } from "../shared/model";
+import { buildDashboardRows, needsAttention } from "../shared/dashboard-model";
+import { acknowledgement, applyArchiveReadOrigin, applyReadReceipt, applyTelemetry, buildAgentForest, classifyAgentStatus, completionReadState, filterAgentForest, flattenAgentForest, formatDuration, formatRelativeTime, formatTokens, heldBySnooze, isUnreadCompletion, knownCompletionAt, normalizeAgent, observedRound, preserveCompletionEvidence, resultSource, sameResultSource, stopUnseen, type AgentRecord, type LifecycleOutcome } from "../shared/model";
+import { isCompletionSnoozed } from "../shared/preferences";
 
 const time = "2026-09-16T12:00:00.000Z";
 const later = "2026-09-16T12:05:00.000Z";
@@ -343,4 +344,204 @@ test("formatters handle unknown values, clock skew and units", () => {
   assert.equal(formatTokens(null), "—");
   assert.equal(formatTokens(0), "0");
   assert.equal(formatTokens(1_250), "1.3k");
+});
+
+test("a second completion after another prompt is unread while native attention still holds the first (edge-triggered)", () => {
+  // T1: a turn finished, nobody looked (attention set at T1). T2: a heartbeat prompts again. T3: that turn finishes too.
+  const t1 = "2026-10-10T10:00:00.000Z", t2 = "2026-10-10T11:00:00.000Z", t3 = "2026-10-10T11:05:00.000Z";
+  const agent = applyTelemetry(normalizeAgent({ id: "beat", status: "idle", requiresAttention: true, attentionReason: "finished", attentionTimestamp: t1,
+    lastUserMessageAt: t2, updatedAt: t3 }), { outcome: "completed", turnStartedAt: t2, turnEndedAt: t3 });
+  assert.equal(agent.status, "completed");
+  assert.equal(knownCompletionAt(agent), t3, "the observed end is the token");
+  assert.equal(completionReadState(agent), "unread");
+  assert.equal(needsAttention(agent), true);
+  // Once the user opens it, native attention clears: read.
+  assert.equal(completionReadState({ ...agent, requiresAttention: false }), "read");
+  // Without native attention evidence it stays unknown, as before.
+  assert.equal(completionReadState({ ...agent, attentionTimestamp: null }), "unknown");
+});
+
+test("pending requests are summarised by kind: questions with choices, plans by title, tools by command", () => {
+  const agent = normalizeAgent({ id: "w", status: "running", pendingPermissions: [
+    { id: "q", kind: "question", name: "AskUserQuestion", input: { questions: [{ question: "要合并到 main 吗？", header: "合并", options: [{ label: "合并" }, { label: "先不合" }] }] } },
+  ] });
+  assert.deepEqual(agent.pending, [{ kind: "question", title: "要合并到 main 吗？", detail: "合并", options: ["合并", "先不合"] }]);
+  const plan = normalizeAgent({ id: "p", status: "running", pendingPermissions: [{ id: "p", kind: "plan", name: "ExitPlanMode", input: { plan: "## 重构存储层\n\n1. …" } }] });
+  assert.equal(plan.pending?.[0]?.title, "重构存储层");
+  const tool = normalizeAgent({ id: "t", status: "running", pendingPermissions: [{ id: "t", kind: "tool", name: "Bash", title: "Run command", detail: { type: "shell", command: "npm test" } }] });
+  assert.deepEqual(tool.pending?.[0], { kind: "tool", title: "Run command", detail: "npm test", options: [] });
+});
+
+test("a turn's stop reason enriches its record until the next prompt", () => {
+  const ended = "2026-10-10T12:00:00.000Z", stop = { kind: "quota" as const, resetAt: "2026-10-10T17:00:00.000Z", at: ended };
+  const base = normalizeAgent({ id: "q", status: "idle", requiresAttention: true, attentionReason: "finished", attentionTimestamp: ended, lastUserMessageAt: "2026-10-10T11:50:00.000Z", updatedAt: ended });
+  assert.deepEqual(applyTelemetry(base, { outcome: "completed", turnStartedAt: "2026-10-10T11:50:00.000Z", turnEndedAt: ended, stop }).stop, stop);
+  const prompted = normalizeAgent({ id: "q", status: "idle", lastUserMessageAt: "2026-10-10T12:30:00.000Z", updatedAt: "2026-10-10T12:31:00.000Z" });
+  assert.equal(applyTelemetry(prompted, { outcome: "completed", turnStartedAt: "2026-10-10T11:50:00.000Z", turnEndedAt: ended, stop }).stop ?? null, null, "a newer prompt started another turn");
+});
+
+test("the reply's 快捷回复 category and a guessed reset reach the record only for the current turn (opus-B26, grok-F2)", () => {
+  const prompt = "2026-10-12T03:50:00.000Z", ended = "2026-10-12T04:00:00.000Z";
+  const lifecycle = { outcome: "completed" as const, turnStartedAt: prompt, turnEndedAt: ended, replyAt: ended, replyAsks: false, replyNudge: "keep-going" as const,
+    stop: { kind: "quota" as const, resetAt: "2026-10-12T09:00:00.000Z", resetGuessed: true, at: ended } };
+  const source = { id: "n", status: "idle", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "finished", attentionTimestamp: ended };
+  const record = applyTelemetry(normalizeAgent(source), lifecycle);
+  assert.equal(record.replyNudge, "keep-going");
+  assert.equal(record.stop?.resetGuessed, true);
+  // The user wrote since: neither belongs to the turn now running or waiting.
+  const answered = applyTelemetry(normalizeAgent({ ...source, lastUserMessageAt: "2026-10-12T04:10:00.000Z", requiresAttention: false }), lifecycle);
+  assert.equal(answered.replyNudge ?? null, null);
+  assert.equal(answered.stop ?? null, null);
+  assert.equal(applyTelemetry(normalizeAgent({ ...source, status: "running", activeTurn: { startedAt: "2026-10-12T04:10:00.000Z" } }), lifecycle).replyNudge, undefined, "live work shows none");
+  // A stale category on a record is cleared when the lifecycle no longer has one.
+  assert.equal(applyTelemetry({ ...record }, { ...lifecycle, replyNudge: null }).replyNudge, null);
+});
+
+// P2-3: an Agent the host has not loaded keeps a failed turn's error attention after 知道了 (clearing would load it). The stop
+// that turn ended on decides, as it does for 需要处理: seen, nothing is left to acknowledge.
+test("知道了 on a failed turn's limit is the last word on that turn, even while its error attention stays raised (P2-3)", () => {
+  const ended = "2026-10-12T04:00:00.000Z", prompt = "2026-10-12T03:50:00.000Z";
+  const failed = applyTelemetry(normalizeAgent({ id: "f", status: "closed", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "error", attentionTimestamp: ended }),
+    { outcome: "failed", turnStartedAt: prompt, turnEndedAt: ended, stop: { kind: "quota", resetAt: null, at: ended } });
+  assert.deepEqual([failed.status, stopUnseen(failed), acknowledgement(failed), needsAttention(failed)], ["error", true, "problem", true]);
+  const seen = { ...failed, stop: { ...failed.stop!, seenAt: "2026-10-12T04:05:00.000Z" } };
+  assert.deepEqual([stopUnseen(seen), acknowledgement(seen), needsAttention(seen)], [false, null, false], "before: 知道了 again, for the same turn");
+  // A failure without a stop still waits for 知道了 while its attention is raised.
+  const plain = { ...failed, stop: null };
+  assert.equal(acknowledgement(plain), "problem");
+  assert.equal(acknowledgement({ ...plain, requiresAttention: false }), null);
+});
+
+test("a receipt the server kept for an unloaded Agent's raised token reads as read; for 待回复 as opened, for a failure as seen (P2-4)", () => {
+  const prompt = "2026-10-12T03:50:00.000Z", ended = "2026-10-12T04:00:00.000Z", readAt = "2026-10-12T04:10:00.000Z";
+  const receipt = { agentId: "q", completionAt: ended, lastUserMessageAt: prompt, readAt };
+  // 待回复 on a closed session, never opened: the receipt names exactly its token and prompt.
+  const asking = applyTelemetry(normalizeAgent({ id: "q", status: "closed", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "finished", attentionTimestamp: ended }),
+    { outcome: "completed", turnStartedAt: prompt, turnEndedAt: ended, replyAt: ended, replyAsks: true });
+  assert.deepEqual([asking.status, acknowledgement(asking), needsAttention(asking)], ["idle", "question", true]);
+  const opened = applyReadReceipt(asking, receipt);
+  assert.deepEqual([opened.status, opened.requiresAttention, acknowledgement(opened), needsAttention(opened)], ["idle", false, null, false]);
+  // Any other token, prompt or a later turn: not this question, left as it is.
+  for (const other of [{ ...receipt, completionAt: "2026-10-12T03:59:00.000Z" }, { ...receipt, lastUserMessageAt: "2026-10-12T03:40:00.000Z" }, { ...receipt, readAt: "2026-10-12T03:59:59.000Z" }])
+    assert.equal(applyReadReceipt(asking, other), asking, JSON.stringify(other));
+  assert.equal(applyReadReceipt({ ...asking, lastExecutionAt: "2026-10-12T04:20:00.000Z" }, receipt).requiresAttention, true, "activity after the read");
+  assert.equal(applyReadReceipt({ ...asking, pendingPermissionCount: 1 }, receipt).requiresAttention, true);
+  // A failure acknowledged the same way (知道了): seen, still 异常.
+  const failed = applyTelemetry(normalizeAgent({ id: "q", status: "closed", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "error", attentionTimestamp: ended }),
+    { outcome: "failed", turnStartedAt: prompt, turnEndedAt: ended });
+  assert.deepEqual([failed.status, acknowledgement(failed), needsAttention(failed)], ["error", "problem", true]);
+  const seen = applyReadReceipt(failed, receipt);
+  assert.deepEqual([seen.status, acknowledgement(seen), needsAttention(seen)], ["error", null, false]);
+  assert.equal(applyReadReceipt(failed, { ...receipt, lastUserMessageAt: "2026-10-12T03:40:00.000Z" }), failed, "another prompt's");
+  // A result with an edge-triggered token older than the prompt: the receipt for the newer completion settles both.
+  const t1 = "2026-10-12T03:00:00.000Z";
+  const result = applyTelemetry(normalizeAgent({ id: "r", status: "closed", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "finished", attentionTimestamp: t1 }),
+    { outcome: "completed", turnStartedAt: prompt, turnEndedAt: ended });
+  assert.deepEqual([completionReadState(result), knownCompletionAt(result)], ["unread", ended]);
+  const read = applyReadReceipt(result, { agentId: "r", completionAt: ended, lastUserMessageAt: prompt, readAt });
+  assert.deepEqual([read.completionReadFor, completionReadState(read), isUnreadCompletion(read), needsAttention(read)], [ended, "read", false, false]);
+  assert.equal(completionReadState(applyReadReceipt(result, { agentId: "r", completionAt: t1, lastUserMessageAt: prompt, readAt })), "unread", "the old token's own receipt predates the prompt");
+});
+
+test("稍后处理 holds a result back from 未读 by one rule for the chip and its list: never while its stop is unseen (P3-1)", () => {
+  const ended = "2026-10-12T04:00:00.000Z", prompt = "2026-10-12T03:50:00.000Z";
+  const result = applyTelemetry(normalizeAgent({ id: "s", status: "idle", lastUserMessageAt: prompt, requiresAttention: true, attentionReason: "finished", attentionTimestamp: ended }),
+    { outcome: "completed", turnStartedAt: prompt, turnEndedAt: ended });
+  const limited = { ...result, stop: { kind: "quota" as const, resetAt: null, at: ended } };
+  assert.equal(isUnreadCompletion(limited), true); assert.equal(stopUnseen(limited), true);
+  // r1 snooze-chip: both snoozed, one with its stop unseen. The chip counted that one 未读 while the list it opens left it out.
+  const agents = [limited, { ...result, id: "plain" }], snoozed = () => true;
+  const chip = agents.filter(agent => isUnreadCompletion(agent) && !heldBySnooze(agent, snoozed())).length;
+  // client/dashboard.tsx: the 未读 list keeps what the chip counts (tests/attention-wiring.test.ts checks it uses this rule).
+  const listed = buildDashboardRows(agents.filter(agent => !heldBySnooze(agent, snoozed())), { query: "", status: "all", view: "list", sort: "attention", expanded: new Set(), readFilter: "unread" }).rows.map(row => row.node.agent.id);
+  assert.deepEqual([chip, listed], [1, ["s"]]);
+  assert.equal(heldBySnooze(limited, true), false, "the stop shows");
+  assert.equal(heldBySnooze(result, true), true);
+  assert.equal(heldBySnooze(result, false), false);
+  assert.equal(heldBySnooze({ ...limited, stop: { ...limited.stop, seenAt: "2026-10-12T04:05:00.000Z" } }, true), true, "a seen stop no longer outranks the snooze");
+});
+
+// codex-obs-attn-F1: Paseo 0.11.1 starts a heartbeat's turn with a system notification (schedule/service.js), which records no
+// user message: `lastUserMessageAt` stays T0. While the first result is unread, the host's attention is edge-triggered and
+// keeps T1 (agent-manager.js `checkAndSetAttention`). Only the turn the plugin saw start at T2 and end at T3 tells the rounds apart.
+const [h0, h1, h2, h3, h4, h5] = [0, 1, 2, 3, 4, 5].map(hour => `2026-10-12T0${hour}:00:00.000Z`);
+const heartbeatHost = { id: "beat", status: "idle", createdAt: "2026-10-11T23:00:00.000Z", lastUserMessageAt: h0, updatedAt: h3, requiresAttention: true, attentionReason: "finished", attentionTimestamp: h1 };
+const heartbeat = (turnStartedAt: string | null, turnEndedAt: string | null, extra: Partial<LifecycleOutcome> = {}, host: Record<string, unknown> = {}) =>
+  applyTelemetry(normalizeAgent({ ...heartbeatHost, ...host }), { outcome: turnEndedAt ? "completed" : null, turnStartedAt, turnEndedAt, ...extra });
+const hostTokens = (agent: AgentRecord) => [agent.lastUserMessageAt, agent.attentionTimestamp];
+
+test("heartbeat rounds keep the prompt and the host's first stamp: the turn observed after it is the completion, unread, and its own round (codex-obs-attn-F1)", () => {
+  // Round 1, the user's: the host's stamp T1 is its completion (the hook stamps start and end a moment later).
+  const first = heartbeat("2026-10-12T00:00:00.020Z", "2026-10-12T01:00:00.005Z");
+  assert.deepEqual([first.status, knownCompletionAt(first), observedRound(first), completionReadState(first), acknowledgement(first)], ["completed", h1, null, "unread", "result"]);
+  // Round 2, a heartbeat: before, the completion stayed T1 (the receipt named it, the result cache and its check did not change).
+  const second = heartbeat(h2, h3);
+  assert.deepEqual(hostTokens(second), hostTokens(first), "the host's tokens cannot tell the rounds apart");
+  assert.deepEqual([second.status, knownCompletionAt(second), observedRound(second), completionReadState(second), acknowledgement(second), needsAttention(second)], ["completed", h3, h3, "unread", "result", true]);
+  // Round 3: its own again.
+  const third = heartbeat(h4, h5, {}, { updatedAt: h5 });
+  assert.deepEqual([knownCompletionAt(third), observedRound(third), completionReadState(third)], [h5, h5, "unread"]);
+  // Identity (codex cache-key.mts): the detail's result key and a result's source differ per round; an earlier round's result
+  // fails the later round's check, the round's own passes.
+  const key = (agent: AgentRecord) => ["observatory-result", agent.id, agent.lastUserMessageAt, knownCompletionAt(agent), observedRound(agent)];
+  assert.notDeepEqual(key(first), key(second)); assert.notDeepEqual(key(second), key(third));
+  assert.deepEqual(resultSource(second), { lastUserMessageAt: h0, attentionTimestamp: h1, completionAt: h3, roundEndedAt: h3 });
+  assert.equal(sameResultSource(second, resultSource(first)), false, "round 1's result cannot confirm round 2");
+  assert.equal(sameResultSource(third, resultSource(second)), false);
+  for (const agent of [first, second, third]) assert.equal(sameResultSource(agent, resultSource(agent)), true);
+  assert.equal(sameResultSource(second, null), false);
+  // A heartbeat's turn still running, or whose end was not observed: no completion and no round yet.
+  const open = heartbeat(h4, null);
+  assert.deepEqual([open.status, knownCompletionAt(open), observedRound(open), acknowledgement(open)], ["quiet", null, null, null]);
+});
+
+test("heartbeat rounds: a receipt settles its own round only, and 稍后处理 holds back only the round it was set on (codex-obs-attn-F1)", () => {
+  const second = heartbeat(h2, h3), third = heartbeat(h4, h5, {}, { updatedAt: h5 }), readAt = "2026-10-12T03:10:00.000Z";
+  // The server keeps the receipt for T3 on an Agent the host has not loaded: its flag (T1) stays raised.
+  const receipt = { agentId: "beat", completionAt: h3, lastUserMessageAt: h0, readAt };
+  const read = applyReadReceipt(second, receipt);
+  assert.deepEqual([read.completionReadFor, completionReadState(read), isUnreadCompletion(read), needsAttention(read), acknowledgement(read)], [h3, "read", false, false, null]);
+  assert.equal(completionReadState(applyReadReceipt(third, receipt)), "unread", "the next round is a new result");
+  // What the server stored before for round 2 (the host's stamp): it does not prove round 2 was read.
+  assert.equal(completionReadState(applyReadReceipt(second, { ...receipt, completionAt: h1 })), "unread");
+  // 稍后处理 is tied to the completion: round 3 shows again.
+  const snoozes = [{ agentId: "beat", completionAt: knownCompletionAt(second)!, until: "2026-10-12T09:00:00.000Z" }];
+  assert.deepEqual([isCompletionSnoozed(second, snoozes, Date.parse(h4)), isCompletionSnoozed(third, snoozes, Date.parse(h5))], [true, false]);
+});
+
+test("heartbeat rounds that end asking you (待回复): the result's round tells them apart too (codex-obs-attn-F1)", () => {
+  const asked = (start: string, end: string) => heartbeat(start, end, { replyAt: end, replyAsks: true }, { updatedAt: end });
+  const second = asked(h2, h3), third = asked(h4, h5);
+  assert.deepEqual([second.status, acknowledgement(second), knownCompletionAt(second), observedRound(second)], ["idle", "question", null, h3]);
+  assert.deepEqual(hostTokens(second), hostTokens(third));
+  assert.equal(sameResultSource(third, resultSource(second)), false, "the earlier question's result cannot mark the later one read");
+  assert.equal(sameResultSource(third, resultSource(third)), true);
+});
+
+test("one turn: the host's stamp names it, so the observed turn changes nothing, however late the page's telemetry is (codex-obs-attn-F1)", () => {
+  const host = { id: "one", status: "idle", createdAt: h0, lastUserMessageAt: h2, updatedAt: h3, requiresAttention: true, attentionReason: "finished", attentionTimestamp: h3 };
+  const fresh = applyTelemetry(normalizeAgent(host), { outcome: "completed", turnStartedAt: "2026-10-12T02:00:00.040Z", turnEndedAt: "2026-10-12T03:00:00.006Z" });
+  const lagging = applyTelemetry(normalizeAgent(host), { outcome: "completed", turnStartedAt: "2026-10-12T00:00:00.040Z", turnEndedAt: "2026-10-12T01:00:00.006Z" });
+  const none = normalizeAgent(host);
+  for (const agent of [fresh, lagging, none]) {
+    assert.deepEqual([knownCompletionAt(agent), observedRound(agent), completionReadState(agent), acknowledgement(agent)], [h3, null, "unread", "result"]);
+    assert.deepEqual(resultSource(agent), { lastUserMessageAt: h2, attentionTimestamp: h3, completionAt: h3, roundEndedAt: null });
+  }
+  assert.equal(sameResultSource(lagging, resultSource(fresh)), true, "a page whose telemetry has not caught up still accepts the result");
+  // A source from an older server (or the preview) carries only the host's tokens: judged by them, as before.
+  assert.equal(sameResultSource(fresh, { lastUserMessageAt: h2, attentionTimestamp: h3 }), true);
+  assert.equal(sameResultSource(fresh, { lastUserMessageAt: h2, attentionTimestamp: h1 }), false);
+  // The original codex-F5 shape (a newer prompt at T2 while T1 is unread) is unchanged: the observed end T3.
+  const prompted = applyTelemetry(normalizeAgent({ ...heartbeatHost, lastUserMessageAt: h2 }), { outcome: "completed", turnStartedAt: h2, turnEndedAt: h3 });
+  assert.deepEqual([knownCompletionAt(prompted), completionReadState(prompted)], [h3, "unread"]);
+});
+
+test("a fast turn whose start hook is stamped after the host's stamp stays consistent: unread, then read by the receipt for its observed end (codex-obs-attn-F1)", () => {
+  // The hooks wait for a label lookup; a turn shorter than that lookup is stamped after the host's own attention.
+  const native = "2026-10-12T02:00:00.100Z", started = "2026-10-12T02:00:00.140Z", ended = "2026-10-12T02:00:00.150Z";
+  const agent = applyTelemetry(normalizeAgent({ id: "fast", status: "closed", createdAt: h0, lastUserMessageAt: h2, requiresAttention: true, attentionReason: "finished", attentionTimestamp: native }),
+    { outcome: "completed", turnStartedAt: started, turnEndedAt: ended });
+  assert.deepEqual([completionReadState(agent), knownCompletionAt(agent)], ["unread", ended]);
+  const read = applyReadReceipt(agent, { agentId: "fast", completionAt: ended, lastUserMessageAt: h2, readAt: "2026-10-12T02:01:00.000Z" });
+  assert.deepEqual([completionReadState(read), needsAttention(read)], ["read", false], "never stuck unread while the host keeps its flag");
 });

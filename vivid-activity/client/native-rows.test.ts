@@ -1,0 +1,331 @@
+import * as esbuild from "esbuild";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+/**
+ * 0.6.0 (opus-F49): on the iOS and Android apps a Text inside a row does not shrink unless told to (React Native's
+ * flexShrink default is 0), so a long line runs past the row and the card clips it. These tests render the real
+ * components once, statically (React, react-native and the host SDK replaced by stand-ins, no effects), and check the
+ * texts that share a row with something else. The Yoga 3 measurements behind it are in the 2026-10-12 fix report.
+ */
+const here = path.dirname(fileURLToPath(import.meta.url));
+const STANDINS: Record<string, string> = {
+  react: `export const Fragment = Symbol.for("standin.fragment");
+export const createElement = (type, props, ...children) => ({ type, props: { ...(props ?? {}), ...(children.length ? { children: children.length === 1 ? children[0] : children } : {}) } });
+export const useState = (value) => [typeof value === "function" ? value() : value, () => {}];
+export const useMemo = (factory) => factory();
+export const useCallback = (callback) => callback;
+export const useRef = (value) => ({ current: value });
+export const useEffect = () => {};
+export const useLayoutEffect = () => {};
+export const useSyncExternalStore = (_subscribe, snapshot) => snapshot();
+export const createContext = (value) => ({ Provider: "ContextProvider", _value: value });
+export const useContext = (context) => context._value;
+export default { Fragment, createElement, useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useSyncExternalStore, createContext, useContext };`,
+  "react/jsx-runtime": `export const Fragment = Symbol.for("standin.fragment");
+export const jsx = (type, props) => ({ type, props: props ?? {} });
+export const jsxs = jsx;`,
+  "react-native": `export const View = "View", Text = "Text", Pressable = "View", ScrollView = "ScrollView", Image = "Image", ActivityIndicator = "ActivityIndicator", TextInput = "View";
+export const Platform = { OS: "android", select: (spec) => spec.android ?? spec.default };
+export const StyleSheet = { create: (styles) => styles, hairlineWidth: 0.5, absoluteFillObject: {} };
+class Value { constructor(value) { this.value = value; } interpolate() { return this; } }
+const animation = () => ({ start() {}, stop() {} });
+export const Animated = { Value, View: "View", timing: animation, spring: animation, loop: animation, sequence: animation, parallel: animation, delay: animation };
+const curve = (t) => t;
+export const Easing = { linear: curve, ease: curve, quad: curve, cubic: curve, sin: curve, in: () => curve, out: () => curve, inOut: () => curve, bezier: () => curve };
+export const AppState = { currentState: "active", addEventListener: () => ({ remove() {} }) };
+export const AccessibilityInfo = { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove() {} }) };`,
+  host: `export const Icon = "Icon", ScrollView = "ScrollView", Modal = "View", TextInput = "View";
+export const useRevealedText = (text) => text;
+export const copyText = async () => {};
+export const useToast = () => ({ error() {} });
+export const useAgent = () => undefined;
+export const usePaseo = () => ({ agents: { ref: () => ({}) } });
+export const useRpc = () => async () => ({});
+export const useSettings = () => globalThis.__vividSettings ?? ({ status: "loading" });
+export const defineRpc = (contract) => contract;
+export const defineSettings = (definition) => definition;
+export const settingsRpc = () => ({ read: {} });`,
+};
+const HOST_SPECIFIERS = ["@getpaseo/plugin", "@getpaseo/plugin/client", "@getpaseo/plugin/client/react-native", "@getpaseo/plugin/client/ui"];
+
+type HostNode = { type: string; props: Record<string, unknown>; children: Host[] };
+type Host = HostNode | { text: string };
+type Element = { type: unknown; props: Record<string, unknown> } | string | number | boolean | null | undefined | Element[];
+
+function render(element: Element): Host[] {
+  if (element === null || element === undefined || typeof element === "boolean") return [];
+  if (typeof element === "string" || typeof element === "number") return [{ text: String(element) }];
+  if (Array.isArray(element)) return element.flatMap(render);
+  if (typeof element.type === "function") return render((element.type as (props: unknown) => Element)(element.props));
+  if (typeof element.type === "symbol") return render(element.props.children as Element);
+  return [{ type: element.type as string, props: element.props, children: render(element.props.children as Element) }];
+}
+const flatten = (style: unknown): Record<string, unknown> => (Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean).map(flatten)) : ((style as Record<string, unknown>) ?? {}));
+const textOf = (node: Host): string => ("text" in node ? node.text : node.children.map(textOf).join(""));
+/** Every [row, child] pair where the row lays out horizontally. */
+function rowChildren(nodes: Host[]): Array<{ row: HostNode; child: HostNode }> {
+  const out: Array<{ row: HostNode; child: HostNode }> = [];
+  const visit = (node: Host) => {
+    if ("text" in node) return;
+    if (flatten(node.props.style).flexDirection === "row") for (const child of node.children) if (!("text" in child)) out.push({ row: node, child });
+    node.children.forEach(visit);
+  };
+  nodes.forEach(visit);
+  return out;
+}
+
+let dir: string;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ui: any;
+const theme = { colors: { surface0: "#101114", surface1: "#17181c", surface2: "#1f2026", surface3: "#2a2b31", foreground: "#ececf1", foregroundMuted: "#9a9aa5", border: "#2c2d33", accent: "#20744a" } };
+
+beforeAll(async () => {
+  dir = mkdtempSync(path.join(os.tmpdir(), "vivid-native-rows-"));
+  const entry = path.join(dir, "entry.ts");
+  writeFileSync(entry, [
+    // 0.6.0-local.5: the reasoning body lives in the lazy details chunk, the styles stay with the resident rows.
+    `export { useActivityStyles } from ${JSON.stringify(path.join(here, "activity.tsx"))};`,
+    `export { ReasoningMarkdown } from ${JSON.stringify(path.join(here, "activity-details.tsx"))};`,
+    `export { VividHeader, resolveVividPalette, useVividText } from ${JSON.stringify(path.join(here, "vivid.tsx"))};`,
+    `export { PiSubagentLifecycleSummary } from ${JSON.stringify(path.join(here, "pi-subagent-summary.tsx"))};`,
+    `export { densityMetrics } from ${JSON.stringify(path.join(here, "density.ts"))};`,
+    `export { PinnedPromptView } from ${JSON.stringify(path.join(here, "prompt-pin.tsx"))};`,
+    // 0.6.0-local.5 (codex-vivid-merge-F2): a whole tool row, and the Pi notice data it draws.
+    `export { ColorfulToolCall, PiReaderRetry } from ${JSON.stringify(path.join(here, "activity.tsx"))};`,
+    `export { retryPiNotices } from ${JSON.stringify(path.join(here, "transform.ts"))};`,
+    `export { createToolCallData, setPiNoticePhase, setPiNoticeReader } from ${JSON.stringify(path.join(here, "../shared/timeline.ts"))};`,
+    `export { readPiNotice } from ${JSON.stringify(path.join(here, "../shared/pi-notice.ts"))};`,
+  ].join("\n"));
+  const result = await esbuild.build({
+    entryPoints: [entry], bundle: true, format: "esm", platform: "node", write: false, jsx: "automatic", logLevel: "silent",
+    nodePaths: [path.join(here, "../node_modules")],
+    plugins: [{
+      name: "standins",
+      setup(build) {
+        build.onResolve({ filter: /.*/ }, (args) => {
+          if (args.path in STANDINS) return { path: args.path, namespace: "standin" };
+          if (HOST_SPECIFIERS.includes(args.path)) return { path: "host", namespace: "standin" };
+          return undefined;
+        });
+        build.onLoad({ filter: /.*/, namespace: "standin" }, (args) => ({ contents: STANDINS[args.path], loader: "js" }));
+      },
+    }],
+  });
+  const file = path.join(dir, "bundle.mjs");
+  writeFileSync(file, result.outputFiles[0]!.text);
+  ui = await import(pathToFileURL(file).href);
+}, 60_000);
+
+afterAll(() => {
+  if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("rows on the phone apps: long text shrinks instead of running off the row (opus-F49)", () => {
+  const styles = () => ui.useActivityStyles(theme, ui.resolveVividPalette(theme), ui.densityMetrics("compact", true, true));
+
+  it("lets a reasoning list item shrink next to its marker, and the marker grow for 「10.」", () => {
+    const text = `- ${"很长的一条说明".repeat(20)}\n10. 第十条`;
+    const rows = rowChildren(render({ type: ui.ReasoningMarkdown, props: { text, theme, styles: styles() } }));
+    const items = rows.filter(({ child }) => child.type === "Text" && textOf(child).startsWith("很长") || textOf(child) === "第十条");
+    expect(items).toHaveLength(2);
+    for (const { child } of items) expect(flatten(child.props.style)).toMatchObject({ flexShrink: 1, flexGrow: 1, minWidth: 0 });
+    const markers = rows.filter(({ child }) => textOf(child) === "•" || textOf(child) === "10.");
+    expect(markers).toHaveLength(2);
+    for (const { child } of markers) {
+      const style = flatten(child.props.style);
+      expect(style).toMatchObject({ flexShrink: 0, minWidth: 14 });
+      expect(style.width).toBeUndefined();
+    }
+  });
+
+  it("lets Pi's usage line wrap beside its state pill", () => {
+    const output = "Agent: c1060d595b3f\nType: worker | Status: completed | Tool uses: 135 | 169.4k token | Context: 16% | Duration: 453.8s\nDescription: x\n\nbody";
+    const rows = rowChildren(render({ type: ui.PiSubagentLifecycleSummary, props: { toolName: "subagent", input: undefined, output, theme, palette: ui.resolveVividPalette(theme), styles: styles() } }));
+    const usage = rows.find(({ child }) => textOf(child).includes("次工具调用"));
+    expect(usage).toBeDefined();
+    expect(flatten(usage!.child.props.style).flexShrink).toBe(1);
+  });
+
+  it("keeps a row header's title from pushing the row off the screen, and shrinks the summary before it", () => {
+    const text = ui.useVividText(theme);
+    // codex-vivid-F3: the title gives way too, last; a long one stops at 240 px so the summary keeps room on wide rows.
+    expect(text.label).toMatchObject({ flexShrink: 1, minWidth: 0, maxWidth: 240 });
+    expect(text.fileBase).toMatchObject({ maxWidth: "100%" });
+    expect(text.summary.flexShrink).toBeGreaterThanOrEqual(100 * text.label.flexShrink);
+    expect(text.metaText.flexShrink).toBeGreaterThan(text.label.flexShrink);
+    expect(text.meta.flexShrink).toBe(0);
+    const all = styles();
+    expect(all.title).toMatchObject({ flexShrink: 0, maxWidth: "50%" });
+    expect(all.fileName).toMatchObject({ maxWidth: "100%" });
+  });
+
+  it("lets raw tool names, list metadata and long field names shrink in their rows", () => {
+    const all = styles();
+    expect(all.subAgentActionLabel).toMatchObject({ flexShrink: 1, maxWidth: "60%" });
+    expect(all.childTimelineItemTitle).toMatchObject({ flexShrink: 1, maxWidth: "60%" });
+    expect(all.paseoListItemMeta.flexShrink).toBe(1);
+    expect(all.paseoKey).toMatchObject({ flexShrink: 1, maxWidth: "45%" });
+  });
+});
+
+/** Every node inside `node` (itself included). */
+function nodesOf(node: Host): HostNode[] {
+  if ("text" in node) return [];
+  return [node, ...node.children.flatMap(nodesOf)];
+}
+
+/**
+ * Natural width of a part that keeps its size, with the fonts of the Yoga run in the 2026-10-12 fix report (a CJK
+ * character 1 em, any other 0.55 em, 0.6 em in monospace): explicit widths, text, icons, and rows of those with their gaps.
+ */
+function naturalWidth(node: Host): number {
+  if ("text" in node) return 0;
+  const style = flatten(node.props.style);
+  if (typeof style.width === "number") return style.width;
+  if (node.type === "Icon") return Number(node.props.size ?? 12);
+  const padding = Number(style.paddingHorizontal ?? 0) * 2 + Number(style.paddingLeft ?? 0) + Number(style.paddingRight ?? 0);
+  if (node.type === "Text") {
+    const size = Number(style.fontSize ?? 14);
+    const em = style.fontFamily === "monospace" ? 0.6 : 0.55;
+    return padding + Array.from(textOf(node)).reduce((sum, ch) => sum + (/[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? size : size * em), 0);
+  }
+  const parts = node.children.filter((child) => !("text" in child) && flatten((child as HostNode).props.style).position !== "absolute");
+  const widths = parts.map(naturalWidth);
+  const across = style.flexDirection === "row";
+  return padding + (across ? widths.reduce((sum, width) => sum + width, 0) + Number(style.gap ?? 0) * Math.max(0, parts.length - 1) : Math.max(0, ...widths));
+}
+
+describe("a narrow phone row keeps its state on screen (codex-vivid-F3)", () => {
+  // The review's case: a 320 px row, title 「Summarize changelog」 (a real ACP tool title), timing formatDuration(80 000).
+  const WIDTH = 320;
+  const metrics = () => ui.densityMetrics("compact", true, true);
+  const header = (status: string, extra: Record<string, unknown> = {}) =>
+    render({
+      type: ui.VividHeader,
+      props: {
+        theme, compact: true, look: "other", title: "Summarize changelog", summary: "query: build the index", status, timing: "1 分 20 秒",
+        expanded: false, expandable: true, chevronColor: "#888", onPress() {}, dirText: (dir: string) => dir, metrics: metrics(),
+        Pressable: ({ children, style }: { children: unknown; style: unknown }) => ({ type: "View", props: { style, children } }),
+        ...extra,
+      },
+    });
+
+  for (const [status, extra] of [["waiting", {}], ["failed", {}], ["failed", { look: "shell", statusText: "退出码 127", stats: { additions: 12, deletions: 3 } }]] as const) {
+    it(`${status}${"statusText" in extra ? "（退出码与改动）" : ""}: only the words give way; the pill, timing, state and chevron keep their width and fit`, () => {
+      const [frame] = header(status, extra) as HostNode[];
+      const row = frame!.children.find((child): child is HostNode => !("text" in child) && flatten(child.props.style).flexDirection === "row")!;
+      const parts = row.children.filter((child): child is HostNode => !("text" in child));
+      const words = parts.find((part) => textOf(part).startsWith("Summarize changelog"))!;
+      expect(flatten(words.props.style)).toMatchObject({ flexDirection: "row", flexGrow: 1, flexShrink: 1, minWidth: 0 });
+      expect(textOf(words)).toBe("Summarize changelogquery: build the index");
+      for (const text of words.children.filter((child): child is HostNode => !("text" in child))) {
+        const style = flatten(text.props.style);
+        expect(style.minWidth).toBe(0);
+        expect(Number(style.flexShrink)).toBeGreaterThanOrEqual(1);
+      }
+      // Everything else in the row keeps its width (React Native's flexShrink default is 0).
+      const fixed = parts.filter((part) => part !== words);
+      for (const part of fixed) expect(Number(flatten(part.props.style).flexShrink ?? 0)).toBe(0);
+      expect(fixed.some((part) => textOf(part) === "1 分 20 秒")).toBe(true);
+      expect(fixed.some((part) => textOf(part) === ("statusText" in extra ? "退出码 127" : status === "waiting" ? "等你批准" : "失败"))).toBe(true);
+      expect(fixed.at(-1)!.type).toBe("Icon");
+      // And they fit in 320 px with room left for the words: tile, pill, timing, state mark, chevron, gaps and paddings.
+      const rowStyle = flatten(row.props.style);
+      const frameStyle = flatten(frame!.props.style);
+      const used = fixed.reduce((sum, part) => sum + naturalWidth(part), 0) + Number(rowStyle.gap) * (parts.length - 1) + Number(rowStyle.paddingRight ?? 0) + Number(frameStyle.paddingLeft ?? 0);
+      expect(used).toBeLessThan(WIDTH - 40);
+    });
+  }
+});
+
+describe("the pinned question on the phone apps (grok-B2)", () => {
+  const view = (text: string) => render({ type: ui.PinnedPromptView, props: { title: "本轮提问", text, truncated: false, theme, mode: "vivid", metrics: ui.densityMetrics("compact", true, true) } });
+
+  it("shows three lines of a long question behind a 「展开全部」 button, with the copy button beside it, not inside", () => {
+    const tree = view(["第一行：先把失败的测试修好", "第二行：然后跑一遍全部测试", "第三行：最后更新 CHANGELOG", "第四行：不要改依赖"].join("\n"));
+    const all = tree.flatMap(nodesOf);
+    const buttons = all.filter((node) => node.props.accessibilityRole === "button");
+    expect(buttons.map((node) => textOf(node))).toEqual(["复制", expect.stringContaining("展开全部")]);
+    // No button holds another one (react-native-web draws each as a <button>).
+    for (const button of buttons) expect(button.children.flatMap(nodesOf).some((inner) => inner !== button && inner.props.accessibilityRole === "button")).toBe(false);
+    const body = all.find((node) => node.type === "Text" && textOf(node).startsWith("第一行"));
+    expect(body?.props.numberOfLines).toBe(3);
+    expect(buttons[1]!.props["aria-expanded"]).toBe(false);
+    // The title shares its row with the copy button: it may shrink, the button may not.
+    const title = rowChildren(tree).find(({ child }) => textOf(child) === "本轮提问");
+    expect(flatten(title!.child.props.style)).toMatchObject({ flexShrink: 1, minWidth: 0 });
+    expect(flatten(buttons[0]!.props.style).flexShrink).toBe(0);
+  });
+
+  it("shows a short question as it is, selectable, without a toggle", () => {
+    const all = view("把 README 翻成英文").flatMap(nodesOf);
+    expect(all.filter((node) => node.props.accessibilityRole === "button").map((node) => textOf(node))).toEqual(["复制"]);
+    const body = all.find((node) => node.type === "Text" && textOf(node) === "把 README 翻成英文");
+    expect(body?.props).toMatchObject({ selectable: true });
+    expect(body?.props.numberOfLines).toBeUndefined();
+  });
+});
+
+describe("a Pi notice drawn without its reader (0.6.0-local.5, codex-vivid-merge-F2)", () => {
+  // Rows the 0.11.1 host builds from Pi extension messages; Paseo marks every one of them completed.
+  const fixtures = JSON.parse(readFileSync(path.resolve(here, "../test-fixtures/pi-notices-0.11.1.json"), "utf8")) as { rows: Array<{ name: string; row: Record<string, unknown> }> };
+  const rowOf = (name: string) => structuredClone(fixtures.rows.find((entry) => entry.name === name)!.row);
+  const MARKS = ["Check", "X", "CircleCheck", "CircleX", "CircleSlash2", "LoaderCircle", "Hand"];
+  const PALETTES = [undefined, { status: "ready", values: { palette: "soft", expansion: {}, density: "compact", pinPrompt: false } }];
+  const icons = (nodes: Host[]): string[] => nodes.flatMap((node) => ("text" in node ? [] : [...(node.type === "Icon" ? [String(node.props.name)] : []), ...icons(node.children)]));
+  function draw(row: Record<string, unknown>, settings: unknown) {
+    (globalThis as { __vividSettings?: unknown }).__vividSettings = settings;
+    try {
+      const data = ui.createToolCallData(row);
+      // The other palettes read the status colours of the host theme too.
+      const full = { colors: { ...theme.colors, accentForeground: "#ffffff", statusSuccess: "#3fb950", statusWarning: "#d29922", statusDanger: "#f85149" } };
+      const props = { agentId: "agent-pi", item: { kind: "vivid-tool-call", data }, theme: full, timestamp: new Date(0), layout: { compact: false, platform: "web" } };
+      const nodes = render({ type: ui.ColorfulToolCall, props });
+      return { text: nodes.map(textOf).join(" "), marks: icons(nodes).filter((name) => MARKS.includes(name)) };
+    } finally {
+      (globalThis as { __vividSettings?: unknown }).__vividSettings = undefined;
+    }
+  }
+
+  it.each(["bg-failed", "bg-killed"])("shows a real %s notice neutral after the download failed, in the vivid and the other palettes", (name) => {
+    ui.setPiNoticePhase("failed");
+    try {
+      for (const settings of PALETTES) {
+        const row = draw(rowOf(name), settings);
+        expect(row.text).toContain("Pi 通知");
+        expect(row.text).toContain("没能读取，点开看原文");
+        expect(row.text).not.toMatch(/完成|失败|已停止|background-task-notification/);
+        expect(row.marks).toEqual([]);
+      }
+    } finally {
+      ui.setPiNoticePhase("idle");
+    }
+  });
+
+  it("would show the host's completed mark on an ordinary tool row, and the notice's own state once the reader is here", () => {
+    // The check above is not vacuous: the same message as an ordinary tool row carries the host's completed mark…
+    const ordinary = { ...rowOf("bg-failed"), metadata: undefined };
+    for (const settings of PALETTES) expect(draw(ordinary, settings).marks.length).toBeGreaterThan(0);
+    // …and with the reader the failed task carries its own (failed) mark.
+    ui.setPiNoticeReader(ui.readPiNotice);
+    try {
+      expect(draw(rowOf("bg-failed"), undefined).marks).toEqual(["X"]);
+    } finally {
+      ui.setPiNoticeReader(null);
+    }
+  });
+
+  it("offers 「重新读取」, which tries the download again", () => {
+    const button = render({ type: ui.PiReaderRetry, props: { theme } }).flatMap(function find(node: Host): HostNode[] {
+      return "text" in node ? [] : [...(node.props.accessibilityRole === "button" ? [node] : []), ...node.children.flatMap(find)];
+    });
+    expect(button).toHaveLength(1);
+    expect(button[0]!.props.accessibilityLabel).toBe("重新读取 Pi 通知");
+    expect(button[0]!.props.onPress).toBe(ui.retryPiNotices);
+    expect(textOf(button[0]!)).toBe("重新读取");
+  });
+});

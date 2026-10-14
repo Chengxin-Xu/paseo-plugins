@@ -5,11 +5,17 @@ import { contentRevision } from "./revision";
 import { excerptText } from "../shared/evidence";
 import { normalizeTimelinePage, object, projectTimelineRows, string, type TimelineRow } from "../shared/timeline";
 import type { AgentTelemetry } from "../shared/telemetry";
-import { finalReplyAfter, replyAsksUser } from "../shared/reply";
+import { finalReplyAfter, replyAsksUser, replyNudge, type ReplyNudge } from "../shared/reply";
+import { findChangeRequest } from "../shared/change-request";
+import type { ChangeRequestLink } from "../shared/telemetry";
+import { applyTelemetry, knownCompletionAt, normalizeAgent, observedRound, type AgentSource } from "../shared/model";
 
 /** The final reply of a stopped Agent, reduced to what 待回复 needs; no text leaves the result reader this way. */
-export type ReplyObservation = { userAt: string; at: string; asks: boolean };
+export type ReplyObservation = { userAt: string; at: string; asks: boolean; link?: ChangeRequestLink | null; nudge?: ReplyNudge | null };
+/** Only the link to a merge or pull request leaves the reply (opus-B16), and only when there is one. */
+const linkIn = (text: string) => { const link = findChangeRequest(text); return link ? { link } : {}; };
 
+const PROMPT_STAMP_SKEW_MS = 1000;
 const finiteTime = (value: unknown) => typeof value === "string" && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 const reference = (agentId: string, row: TimelineRow) => `${agentId}:${row.epoch}:${row.seqStart}-${row.seqEnd}`;
 type ExpectedSource = { expectedLastUserMessageAt?: string | null; expectedAttentionTimestamp?: string | null };
@@ -115,7 +121,9 @@ export async function fetchAgentResult(paseo: PaseoApi, agentId: string, observe
   const isRunning = source.status === "running" || source.status === "initializing" || !!source.activeTurn;
   const latestUser = [...tailRows].reverse().find(row => row.item.type === "user_message");
   const userAt = finiteTime(source.lastUserMessageAt);
-  const staleTurn = !!latestUser && userAt !== null && finiteTime(latestUser.timestamp) !== null && finiteTime(latestUser.timestamp)! < userAt;
+  // The host stamps the prompt row and the Agent's lastUserMessageAt separately, a millisecond or two apart; only a prompt
+  // clearly older than the latest one means the tail has not caught up with a newer turn yet.
+  const staleTurn = !!latestUser && userAt !== null && finiteTime(latestUser.timestamp) !== null && finiteTime(latestUser.timestamp)! < userAt - PROMPT_STAMP_SKEW_MS;
   const replies = tailRows.filter(row => !staleTurn && row.item.type === "assistant_message" && !!(string(row.item.text).trim() || string(row.item.message).trim()) && (latestUser ? row.seqStart > latestUser.seqEnd
     : userAt === null || finiteTime(row.timestamp) !== null && finiteTime(row.timestamp)! >= userAt));
   const reply = replies.at(-1);
@@ -150,12 +158,16 @@ export async function fetchAgentResult(paseo: PaseoApi, agentId: string, observe
   if (onReply && !isRunning && source.status === "idle" && userAt !== null) {
     // Opening a session reads its tail anyway: record whether its final reply asks the user (the backfill never loads idle sessions).
     const final = finalReplyAfter(tailRows, userAt), updated = finiteTime(source.updatedAt);
-    if (final) onReply({ userAt: new Date(userAt).toISOString(), at: new Date(Math.min(Date.parse(final.at), updated !== null && updated >= userAt ? updated : Infinity)).toISOString(), asks: replyAsksUser(final.text) });
+    if (final) onReply({ userAt: new Date(userAt).toISOString(), at: new Date(Math.min(Date.parse(final.at), updated !== null && updated >= userAt ? updated : Infinity)).toISOString(), asks: replyAsksUser(final.text), nudge: replyNudge(final.text), ...linkIn(final.text) });
   }
   const firstInput = first ? { ...excerpt(agentId, first), completeOrigin: firstInputConfirmed } : null;
   const latestReply = reply ? excerpt(agentId, reply) : null;
   const truncated = !!tail.hasOlder || !!head.gap || !!tail.gap || !firstInputConfirmed || !!firstInput?.truncated || !!latestReply?.truncated;
-  return { agentId, capturedAt: new Date().toISOString(), epoch: tail.epoch, source: { lastUserMessageAt: string(source.lastUserMessageAt) || null, attentionTimestamp: string(source.attentionTimestamp) || null }, firstInput,
+  // Which turn this was read for, from the host's record and the plugin's observation as the page derives it: the completion
+  // it shows and a heartbeat round the host's tokens cannot name (shared/model.ts `resultSource`, codex-obs-attn-F1).
+  const turn = applyTelemetry(normalizeAgent({ ...source as unknown as AgentSource, id: agentId }), observed);
+  return { agentId, capturedAt: new Date().toISOString(), epoch: tail.epoch, source: { lastUserMessageAt: string(source.lastUserMessageAt) || null, attentionTimestamp: string(source.attentionTimestamp) || null,
+    completionAt: knownCompletionAt(turn), roundEndedAt: observedRound(turn) }, firstInput,
     latestUserInput: latestUser && !staleTurn ? excerpt(agentId, latestUser) : null, latestReply, isRunning, isFinal, artifacts, testEvidence,
     metrics: { tools: tools.length, failedTools: tools.filter(row => row.item.status === "failed").length,
       changedFiles: artifacts.filter(item => item.kind === "file").length, userTurns: tailRows.filter(row => row.item.type === "user_message").length },
@@ -169,13 +181,17 @@ export function registerResults(server: PluginServerContext, telemetry?: (agentI
   const invalidate = (agentId: string) => { for (const [key, value] of cache) if (value.agentId === agentId) cache.delete(key); };
   const removers = [server.on("agent.turn_started", ({ agent }) => { invalidate(agent.id); }),
     server.on("agent.turn_ended", ({ agent }) => { invalidate(agent.id); })];
-  const read = (input: { agentId: string; expectedLastUserMessageAt?: string | null; expectedAttentionTimestamp?: string | null }, paseo: PaseoApi) => {
+  const read = async (input: { agentId: string; expectedLastUserMessageAt?: string | null; expectedAttentionTimestamp?: string | null }, paseo: PaseoApi) => {
     if (closed) throw new Error("结果读取通道已关闭");
     const { agentId } = input;
-    const key = JSON.stringify(input);
+    const observed = await (telemetry?.(agentId) ?? null);
+    if (closed) throw new Error("结果读取通道已关闭");
+    // The latest turn the plugin observed is part of what a result is read for: a heartbeat's turn leaves the host's tokens (this
+    // request) as they were, so a result read for the turn before is never served for it (codex-obs-attn-F1).
+    const key = JSON.stringify([input, observed?.turnStartedAt ?? null, observed?.turnEndedAt ?? null]);
     const previous = cache.get(key);
     if (previous && previous.until > Date.now()) return previous.value;
-    const value = Promise.resolve(telemetry?.(agentId) ?? null).then(observed => fetchAgentResult(paseo, agentId, observed, input, onReply && (reply => onReply(agentId, reply)))).catch(error => { if (cache.get(key)?.value === value) cache.delete(key); throw error; });
+    const value = fetchAgentResult(paseo, agentId, observed, input, onReply && (reply => onReply(agentId, reply))).catch(error => { if (cache.get(key)?.value === value) cache.delete(key); throw error; });
     cache.delete(key); cache.set(key, { agentId, until: Date.now() + 5000, value });
     while (cache.size > 40) cache.delete(cache.keys().next().value!);
     return value;

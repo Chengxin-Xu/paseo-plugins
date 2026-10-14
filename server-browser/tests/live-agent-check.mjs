@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
-import { dataRoot, daemonUrl, testValue, testWorkspace } from './live-config.mjs';
+import { invokeBrowserRpc, dataRoot, daemonUrl, testValue, testWorkspace } from './live-config.mjs';
 
 const workspaceId=testWorkspace({aliases:['BROWSER_AGENT_WORKSPACE']});
 const resuming=process.env.BROWSER_AGENT_RESUME==='1';
@@ -14,7 +14,7 @@ const resumeAgentId=resuming?testValue('BROWSER_AGENT_ID'):undefined;
 const output=path.resolve('artifacts');await mkdir(output,{recursive:true});
 const daemon=new DaemonClient({url:daemonUrl,clientId:'shared-browser-agent-acceptance',clientType:'cli'});
 const paseo=createPaseoApi(daemon);
-const rpc=(method,input)=>daemon.invokePluginRpc('server-browser',method,input);
+const rpc=(method,input)=>invokeBrowserRpc(daemon,method,input);
 const report=resuming?JSON.parse(await readFile(path.join(output,'live-agent-report.json'),'utf8')):{startedAt:new Date().toISOString(),workspaceId,approvedTestCalls:[]};
 if(resuming){assert.equal(report.workspaceId,workspaceId,'Saved report workspace differs from explicit BROWSER_TEST_WORKSPACE');assert.equal(report.agentId,resumeAgentId,'Saved report Agent differs from explicit BROWSER_AGENT_ID');}
 delete report.error;
@@ -69,7 +69,7 @@ try{
  const history=await agent.timeline.refetch({limit:160});await writeFile(path.join(output,'shared-agent-history.json'),JSON.stringify(history,null,2));
  // Test the actual Agent's normal tool path against the manual takeover guard.
  await rpc('browser.action',{workspaceId,action:{kind:'mode',mode:'manual'}});
- const blocked=await waitRun(agent,await agent.run('现在面板处于手动接管模式。请用 server_browser 的browser_snapshot读取「计数 +1」按钮引用，然后实际调用一次browser_click进行接管保护验收：预期工具拒绝，网页计数仍为2。不要切换模式、不要换用其他工具、不要重试点击。请报告实际错误。',{timeoutMs:600000}));
+ const blocked=await waitRun(agent,await agent.run('现在面板处于手动接管模式。请先调用一次 server_browser 的browser_snapshot：预期被拒绝，并提示改用截图。再用前面读到的「计数 +1」按钮引用实际调用一次browser_click进行接管保护验收：预期同样被拒绝，网页计数仍为2。不要切换模式、不要换用其他工具、不要重试。请报告两次的实际错误。',{timeoutMs:600000}));
  report.takeoverMessage=blocked.lastMessage;assert.equal((await oracle.read()).count,'2');
  assert(/手动|拒绝|阻止|接管/.test(blocked.lastMessage||''));
  report.passed=true;report.finishedAt=new Date().toISOString();

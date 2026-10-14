@@ -1,6 +1,7 @@
 import { planFolds, roleSignature, SHOW, type FoldPlan, type FoldRole, type IndexRow, type StepStatus } from "../shared/fold";
 import { estimateStarts } from "../shared/timing";
 import { indexRowFromWire, type FoldIndexInput, type FoldIndexOutput, type WireTurn } from "../shared/fold-index";
+import { promptPin, samePin, type PromptPin } from "../shared/prompt-pin";
 import type { TakeoverScope } from "../shared/settings";
 
 /**
@@ -34,7 +35,7 @@ export const FOLD_TIMING = {
   tailLimit: 160,
   pageLimit: 200,
   maxPages: 5,
-  pokeDelay: 350,
+  pokeDelay: 2_000,
   rowDelay: 200,
   pollMs: 15_000,
   releaseGraceMs: 30_000,
@@ -50,6 +51,32 @@ export const FOLD_TIMING = {
   delay: { now: 0, soon: 120, auto: 250 } as Record<NudgePriority, number>,
   seenLimit: 60_000,
 } as const;
+
+/**
+ * 0.5.0: caps on what the runtime keeps per Agent beyond its index rows, for a session left open for days. Each drops its
+ * older half once full, like `seen`. A tail read that starts the index over also drops turn starts and running rows the
+ * index no longer has, and a new history (epoch) the folds opened in the old one; forgetting an Agent drops all of it.
+ */
+export const FOLD_MEMORY = {
+  witnessed: 4_000,
+  turnStarts: 2_000,
+  expanded: 500,
+  misses: 1_000,
+  contested: 10_000,
+  /** Agents the rows' 「最新一行」 times are kept for (client/latest-rows.ts); a forgotten Agent drops its own. */
+  latestAgents: 1_000,
+} as const;
+
+/** Drops the older half (insertion order) of a set or map holding more than `limit` entries; true when it did. */
+export function trimOldest(entries: Set<unknown> | Map<unknown, unknown>, limit: number): boolean {
+  if (entries.size <= limit) return false;
+  let drop = Math.floor(entries.size / 2);
+  for (const key of entries.keys()) {
+    if (drop-- <= 0) break;
+    entries.delete(key);
+  }
+  return true;
+}
 
 interface AgentFolds {
   readonly agentId: string;
@@ -68,6 +95,8 @@ interface AgentFolds {
   timerDue: number;
   inflight: boolean;
   failures: number;
+  retryAt: number;
+  lastReadAt: number;
   poll: unknown;
   releaseTimer: unknown;
   misses: Map<string, number>;
@@ -89,6 +118,11 @@ interface AgentFolds {
   witnessed: Set<string>;
   /** The daemon has no such Agent (a provider subagent's view): never ask again. */
   missing: boolean;
+  /** 0.6.0: where the latest question is pinned (shared/prompt-pin.ts), and the rows listening for it. */
+  pin: PromptPin | null;
+  pinListeners: Set<() => void>;
+  /** When the pin last moved from one row to another (a live run went on), for the strip's entrance; 0: it appeared. */
+  pinMovedAt: number;
 }
 
 /** When a row ran, on the daemon's clock. `start` is an estimate (see shared/timing.ts); null when unknown. */
@@ -118,6 +152,8 @@ function newAgent(agentId: string): AgentFolds {
     timerDue: Infinity,
     inflight: false,
     failures: 0,
+    retryAt: 0,
+    lastReadAt: -Infinity,
     poll: null,
     releaseTimer: null,
     misses: new Map(),
@@ -130,7 +166,10 @@ function newAgent(agentId: string): AgentFolds {
     turnStarts: new Map(),
     activeTurn: undefined,
     witnessed: new Set(),
-    missing: false,
+    missing: agentId.startsWith("provider:"),
+    pin: null,
+    pinListeners: new Set(),
+    pinMovedAt: 0,
   };
 }
 
@@ -145,6 +184,8 @@ export interface FoldRuntime {
   /** Transformer side (synchronous, runs while Paseo projects). */
   roleFor(key: string): FoldRole;
   hasSeen(key: string): boolean;
+  /** 0.6.0-local.3: whether the transformer folded a repeat notice into its row; the plan follows it (shared/fold.ts). */
+  noteNotice(key: string, merged: boolean): void;
   markProjected(key: string, role: FoldRole): void;
   poke(): void;
   /** Renderer side. */
@@ -160,10 +201,21 @@ export interface FoldRuntime {
   /** Start estimate for a live row the index does not know yet. */
   tailStart(agentId: string): number | null;
   subscribeTimings(agentId: string, listener: () => void): () => void;
+  /** 0.5.0: runs when the runtime forgets an Agent, so what other modules keep per Agent goes with it. */
+  onForget(listener: (agentId: string) => void): () => void;
+  /** 0.6.0: where the Agent's latest question is pinned; null for nowhere. The same object until it moves. */
+  pin(agentId: string): PromptPin | null;
+  subscribePin(agentId: string, listener: () => void): () => void;
+  /** When the pin last moved to another row (local clock); 0 when it has not moved since it appeared. */
+  pinMovedAt(agentId: string): number;
+  /** The Agent's timeline epoch, as its index last read it. */
+  epoch(agentId: string): string | null;
   /** Now on the daemon's clock (the local clock corrected by the last answer's `now`). */
   serverNow(): number;
   /** For tests and diagnostics. */
   debugAgent(agentId: string): { rows: IndexRow[]; plan: FoldPlan | null; running: boolean | null; refs: number; loaded: boolean } | null;
+  /** For tests: how much the runtime keeps (0.5.0). */
+  debugMemory(agentId?: string): { agents: number; seen: number; contested: number; expandedAgents: number; expanded: number; witnessed: number; turnStarts: number; misses: number };
 }
 
 // Hermes (the phone app) rejects `class` syntax in plugin bundles (client/bundle.test.ts): closures and plain objects only.
@@ -178,9 +230,13 @@ export function createFoldRuntime(): FoldRuntime {
   /** Role signature each key was last projected with. */
   const applied = new Map<string, string>();
   const seen = new Set<string>();
+  /** 0.6.0-local.3: the transformer's decision for each repeat notice it projected (true: folded into its row). */
+  const noticeMerged = new Map<string, boolean>();
   /** Keys two Agents claim with different roles; planned as ambiguous from then on. */
   const contested = new Set<string>();
-  const expandedState = new Map<string, boolean>();
+  /** agentId → `${epoch}|${segment}` → the user's choice (0.5.0: per Agent, so forgetting an Agent drops them). */
+  const expandedState = new Map<string, Map<string, boolean>>();
+  const forgetListeners = new Set<(agentId: string) => void>();
   let nudgeTimer: unknown = null;
   let nudgeDue = Infinity;
   let lastNudge = -Infinity;
@@ -199,14 +255,29 @@ export function createFoldRuntime(): FoldRuntime {
     if (deps?.clearTimer) deps.clearTimer(handle);
     else clearTimeout(handle as ReturnType<typeof setTimeout>);
   };
-  const expandKey = (agent: AgentFolds | undefined, agentId: string, segment: string) => `${agentId}|${agent?.epoch ?? ""}|${segment}`;
+  const expandKey = (agent: AgentFolds | undefined, segment: string) => `${agent?.epoch ?? ""}|${segment}`;
+  const readExpanded = (agentId: string, segment: string) => {
+    const agent = agents.get(agentId);
+    return expandedState.get(agentId)?.get(expandKey(agent, segment));
+  };
+  function writeExpanded(agent: AgentFolds, segment: string, expanded: boolean): void {
+    let entries = expandedState.get(agent.agentId);
+    if (!entries) {
+      entries = new Map();
+      expandedState.set(agent.agentId, entries);
+    }
+    const key = expandKey(agent, segment);
+    entries.delete(key);
+    entries.set(key, expanded);
+    trimOldest(entries, FOLD_MEMORY.expanded);
+  }
 
   // ---- index reads ----
 
   function request(agent: AgentFolds, kind: "tail" | "after" | "before", delay: number): void {
     if (agent.missing) return;
     agent.want[kind] = true;
-    const due = now() + delay;
+    const due = Math.max(now() + delay, agent.retryAt, agent.loaded && agent.running !== false ? agent.lastReadAt + FOLD_TIMING.pokeDelay : 0);
     if (agent.inflight || agent.timerDue <= due) return;
     clearTimer(agent.timer);
     agent.timerDue = due;
@@ -214,7 +285,7 @@ export function createFoldRuntime(): FoldRuntime {
       agent.timer = null;
       agent.timerDue = Infinity;
       void run(agent);
-    }, delay);
+    }, Math.max(0, due - now()));
   }
 
   function syncPoll(agent: AgentFolds): void {
@@ -239,6 +310,7 @@ export function createFoldRuntime(): FoldRuntime {
       agent.turnStarts.set(turn.id, turn.at);
       changed = true;
     }
+    if (changed) trimOldest(agent.turnStarts, FOLD_MEMORY.turnStarts);
     return changed;
   }
 
@@ -260,11 +332,37 @@ export function createFoldRuntime(): FoldRuntime {
 
   function witness(agent: AgentFolds, rows: readonly IndexRow[]): void {
     for (const row of rows) if (row.kind === "tool" && row.status === "running" && row.key) agent.witnessed.add(row.key);
+    trimOldest(agent.witnessed, FOLD_MEMORY.witnessed);
+  }
+
+  /**
+   * 0.5.0: the index starts over from a tail page. Turn starts and rows seen running that no row of it needs any more go
+   * (older rows read again later bring their turns along); a new history (epoch) also drops its old turn ids, which a
+   * reopened session counts from the start again, and the folds the user opened in it.
+   */
+  function startOver(agent: AgentFolds, page: FoldIndexOutput): void {
+    const epochChanged = agent.epoch !== null && page.epoch !== "" && page.epoch !== agent.epoch;
+    if (epochChanged) agent.turnStarts.clear();
+    noteTurns(agent, page);
+    agent.rows = sortRows(rowsOf(page));
+    const turns = new Set<string>();
+    const keys = new Set<string>();
+    for (const row of agent.rows) {
+      if (row.turn !== undefined) turns.add(row.turn);
+      if (row.key) keys.add(row.key);
+    }
+    if (agent.activeTurn) turns.add(agent.activeTurn.id);
+    for (const id of agent.turnStarts.keys()) if (!turns.has(id)) agent.turnStarts.delete(id);
+    for (const key of agent.witnessed) if (!keys.has(key)) agent.witnessed.delete(key);
+    if (epochChanged) {
+      const entries = expandedState.get(agent.agentId);
+      const prefix = `${page.epoch}|`;
+      if (entries) for (const key of entries.keys()) if (!key.startsWith(prefix)) entries.delete(key);
+    }
   }
 
   function replace(agent: AgentFolds, page: FoldIndexOutput): void {
-    noteTurns(agent, page);
-    agent.rows = sortRows(rowsOf(page));
+    startOver(agent, page);
     witness(agent, agent.rows);
     agent.bySeq = new Map(agent.rows.map((row) => [row.seq, row]));
     agent.byKey = new Map(agent.rows.filter((row) => row.key).map((row) => [row.key!, row]));
@@ -307,9 +405,10 @@ export function createFoldRuntime(): FoldRuntime {
    * cycle (at most one every `pokeDelay`), so streaming text cannot turn into back-to-back reads.
    */
   async function run(agent: AgentFolds): Promise<void> {
-    if (agent.inflight || !deps) return;
+    if (agent.inflight || agent.missing || !deps) return;
     const rpc = deps.rpc;
     agent.inflight = true;
+    agent.lastReadAt = now();
     const want = agent.want;
     agent.want = { tail: false, after: false, before: false };
     let changed = false;
@@ -362,6 +461,7 @@ export function createFoldRuntime(): FoldRuntime {
         if (reset) await readTail();
       }
       agent.failures = 0;
+      agent.retryAt = 0;
     } catch (error) {
       agent.inflight = false;
       if (error instanceof Error && error.message === "missing") {
@@ -376,6 +476,7 @@ export function createFoldRuntime(): FoldRuntime {
       agent.want = { tail: agent.want.tail || want.tail || !agent.loaded, after: true, before: agent.want.before || want.before };
       if (agent.refs > 0) {
         const wait = FOLD_TIMING.retryMs[Math.min(agent.failures - 1, FOLD_TIMING.retryMs.length - 1)]!;
+        agent.retryAt = now() + wait;
         request(agent, agent.loaded ? "after" : "tail", wait);
       }
       return;
@@ -482,8 +583,9 @@ export function createFoldRuntime(): FoldRuntime {
           scope: planScope,
           enabled,
           agentRunning: agent.running ?? true,
-          expanded: (segment) => expandedState.get(expandKey(agent, agent.agentId, segment)),
+          expanded: (segment) => expandedState.get(agent.agentId)?.get(expandKey(agent, segment)),
           present: (key) => seen.has(key),
+          noticeMerged: (key) => noticeMerged.get(key),
           contested: (key) => contested.has(key),
           turnStart: (turn) => agent.turnStarts.get(turn) ?? null,
           witnessed: (key) => agent.witnessed.has(key),
@@ -491,6 +593,13 @@ export function createFoldRuntime(): FoldRuntime {
       : { roles: new Map<string, FoldRole>(), segments: [] };
     agent.plan = plan;
     publishRoles(agent, plan.roles, priority);
+    // 0.6.0: the latest question goes above the newest segment's first drawn row; rows hear when it moves.
+    const pin = planScope ? promptPin(agent.rows, plan, { drawn: (key) => seen.has(key), hasOlder: agent.hasOlder }) : null;
+    if (!samePin(agent.pin, pin)) {
+      agent.pinMovedAt = agent.pin && pin && agent.pin.key !== pin.key ? now() : 0;
+      agent.pin = pin;
+      for (const listener of agent.pinListeners) listener();
+    }
   }
 
   /** `quiet`: none of the agent's rows is on screen, so a changed role needs no re-projection. */
@@ -520,6 +629,7 @@ export function createFoldRuntime(): FoldRuntime {
       const agreed = all.length > 0 && all.every((claim) => claim.sig === all[0]!.sig) ? all[0]! : null;
       if (!agreed && all.length > 1 && !contested.has(key)) {
         contested.add(key);
+        trimOldest(contested, FOLD_MEMORY.contested);
         for (const agentId of claims.keys()) {
           const other = agents.get(agentId);
           if (other) queueRecompute(other);
@@ -543,7 +653,7 @@ export function createFoldRuntime(): FoldRuntime {
    */
   function forget(agent: AgentFolds): void {
     if (agent.refs > 0 || agents.get(agent.agentId) !== agent) return;
-    if (agent.inflight || agent.timingListeners.size > 0) {
+    if (agent.inflight || agent.timingListeners.size > 0 || agent.pinListeners.size > 0) {
       agent.releaseTimer = setTimer(() => {
         agent.releaseTimer = null;
         forget(agent);
@@ -557,6 +667,21 @@ export function createFoldRuntime(): FoldRuntime {
     recomputeQueue.delete(agent);
     publishRoles(agent, new Map(), "auto", true);
     agents.delete(agent.agentId);
+    // 0.5.0: the folds the user opened in it, and the keys only its index made contested.
+    expandedState.delete(agent.agentId);
+    for (const key of contested) {
+      if (!agent.byKey.has(key)) continue;
+      let shared = false;
+      for (const other of agents.values()) if (other.byKey.has(key)) shared = true;
+      if (!shared) contested.delete(key);
+    }
+    for (const listener of forgetListeners) {
+      try {
+        listener(agent.agentId);
+      } catch {
+        // A listener's failure must not keep the others' memory.
+      }
+    }
   }
 
   const runtime: FoldRuntime = {
@@ -580,6 +705,18 @@ export function createFoldRuntime(): FoldRuntime {
     hasSeen(key) {
       return seen.has(key);
     },
+    noteNotice(key, merged) {
+      if (noticeMerged.get(key) === merged) return;
+      noticeMerged.set(key, merged);
+      if (noticeMerged.size > FOLD_TIMING.seenLimit) {
+        let drop = Math.floor(noticeMerged.size / 2);
+        for (const old of noticeMerged.keys()) {
+          if (drop-- <= 0) break;
+          noticeMerged.delete(old);
+        }
+      }
+      for (const agent of agents.values()) if (agent.loaded && agent.byKey.has(key)) queueRecompute(agent);
+    },
     markProjected(key, role) {
       applied.set(key, roleSignature(role));
       if (seen.has(key)) return;
@@ -591,11 +728,14 @@ export function createFoldRuntime(): FoldRuntime {
           seen.delete(old);
           applied.delete(old);
         }
+        // 0.5.0: rows still on screen may have lost their key; Paseo projecting again records them anew, before a plan
+        // takes a drawn row for one another plugin drew (shared/fold.ts splitAtForeign).
+        runtime.scheduleNudge("auto");
       }
       for (const agent of agents.values()) if (agent.loaded && agent.byKey.has(key)) queueRecompute(agent);
     },
     poke() {
-      for (const agent of agents.values()) if (agent.refs > 0 && agent.loaded) request(agent, "after", FOLD_TIMING.pokeDelay);
+      for (const agent of agents.values()) if (agent.refs > 0 && agent.loaded && now() >= agent.retryAt) request(agent, "after", FOLD_TIMING.pokeDelay);
     },
     acquire(agentId) {
       let agent = agents.get(agentId);
@@ -647,6 +787,7 @@ export function createFoldRuntime(): FoldRuntime {
       const misses = agent.misses.get(key) ?? 0;
       if (misses >= 2) return;
       agent.misses.set(key, misses + 1);
+      trimOldest(agent.misses, FOLD_MEMORY.misses);
       const oldest = agent.rows[0];
       const older = agent.hasOlder && oldest !== undefined && at > 0 && oldest.at > 0 && at < oldest.at;
       request(agent, older ? "before" : "after", FOLD_TIMING.rowDelay);
@@ -662,12 +803,14 @@ export function createFoldRuntime(): FoldRuntime {
       }
     },
     isExpanded(agentId, segment) {
-      return expandedState.get(expandKey(agents.get(agentId), agentId, segment));
+      return readExpanded(agentId, segment);
     },
     toggle(agentId, segment, expanded) {
+      // A summary row keeps its Agent acquired, so the Agent is known; there is nothing to plan without one.
       const agent = agents.get(agentId);
-      expandedState.set(expandKey(agent, agentId, segment), expanded);
-      if (agent?.loaded) recompute(agent, "now");
+      if (!agent) return;
+      writeExpanded(agent, segment, expanded);
+      if (agent.loaded) recompute(agent, "now");
     },
     scheduleNudge(priority) {
       const at = now();
@@ -701,9 +844,47 @@ export function createFoldRuntime(): FoldRuntime {
     serverNow() {
       return now() + clockOffset;
     },
+    onForget(listener) {
+      forgetListeners.add(listener);
+      return () => {
+        forgetListeners.delete(listener);
+      };
+    },
+    pin(agentId) {
+      return agents.get(agentId)?.pin ?? null;
+    },
+    subscribePin(agentId, listener) {
+      let agent = agents.get(agentId);
+      if (!agent) {
+        agent = newAgent(agentId);
+        agents.set(agentId, agent);
+      }
+      const target = agent;
+      target.pinListeners.add(listener);
+      return () => void target.pinListeners.delete(listener);
+    },
+    pinMovedAt(agentId) {
+      return agents.get(agentId)?.pinMovedAt ?? 0;
+    },
+    epoch(agentId) {
+      return agents.get(agentId)?.epoch ?? null;
+    },
     debugAgent(agentId) {
       const agent = agents.get(agentId);
       return agent ? { rows: agent.rows, plan: agent.plan, running: agent.running, refs: agent.refs, loaded: agent.loaded } : null;
+    },
+    debugMemory(agentId) {
+      const agent = agentId ? agents.get(agentId) : undefined;
+      return {
+        agents: agents.size,
+        seen: seen.size,
+        contested: contested.size,
+        expandedAgents: expandedState.size,
+        expanded: agentId ? expandedState.get(agentId)?.size ?? 0 : 0,
+        witnessed: agent?.witnessed.size ?? 0,
+        turnStarts: agent?.turnStarts.size ?? 0,
+        misses: agent?.misses.size ?? 0,
+      };
     },
   };
   return runtime;

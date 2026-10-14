@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { spawn } from 'node:child_process';
+import { after, test } from 'node:test';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { bridgeScript } from '../server/bridge-source';
 
-// A stand-in for the Playwright MCP CLI: it only answers JSON-RPC requests, no browser involved.
-const fakeMcp=`import {createInterface} from 'node:readline';
+// A stand-in for the Playwright MCP CLI: it notes that it started and only answers JSON-RPC requests, no browser involved.
+const fakeMcp=`import {appendFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+appendFileSync(new URL('started.log',import.meta.url),'started\\n');
 createInterface({input:process.stdin}).on('line',line=>{const message=JSON.parse(line);if(message.id===undefined)return;
 process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:message.id,result:message.method==='initialize'?{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fake',version:'1'},instructions:'fake child'}:{}})+'\\n');});`;
+
+// The bridge trusts session.json only while the Chromium it names runs with that workspace's Profile: stand-in processes.
+const chromiums:ChildProcess[]=[];
+after(()=>{for(const child of chromiums)child.kill('SIGKILL');});
+const chromium=(profile:string)=>{const child=spawn(process.execPath,['-e','setInterval(()=>{},1<<30)','--',`--user-data-dir=${profile}`,'--remote-debugging-address=127.0.0.1'],{stdio:'ignore'});chromiums.push(child);return child;};
 
 // The bridge only starts node_modules/@playwright/mcp/cli.js from its runtime directory, so the stand-in lives there.
 async function fixture(state:Record<string,unknown>|null,mcpCli?:(root:string)=>string){
@@ -20,9 +27,9 @@ async function fixture(state:Record<string,unknown>|null,mcpCli?:(root:string)=>
   await mkdir(workspace);await mkdir(path.dirname(cli),{recursive:true});
   await writeFile(path.join(root,'bridge.mjs'),bridgeScript(runtime));await writeFile(cli,fakeMcp);await writeFile(path.join(root,'elsewhere.mjs'),fakeMcp);
   if(state)await writeFile(path.join(workspace,'state.json'),JSON.stringify(state));
-  const metadata=path.join(workspace,'session.json');
-  const connect=()=>writeFile(metadata,JSON.stringify({version:2,workspaceId:'workspace',endpoint:'http://127.0.0.1:9',token:'test',cdpEndpoint:'http://127.0.0.1:9',mcpCli:mcpCli?mcpCli(root):cli,artifactDir:root,epoch:1}));
-  return {root,metadata,connect};
+  const metadata=path.join(workspace,'session.json'),profile=path.join(workspace,'profile'),browserPid=chromium(profile).pid;
+  const connect=(pid=browserPid)=>writeFile(metadata,JSON.stringify({version:2,workspaceId:'workspace',endpoint:'http://127.0.0.1:9',token:'test',cdpEndpoint:'http://127.0.0.1:9',mcpCli:mcpCli?mcpCli(root):cli,artifactDir:root,browserPid:pid,epoch:1}));
+  return {root,metadata,connect,started:path.join(path.dirname(cli),'started.log')};
 }
 async function initialize(root:string,metadata:string,env:Record<string,string>={}){
   const child=spawn(process.execPath,[path.join(root,'bridge.mjs'),metadata],{stdio:['pipe','pipe','pipe'],env:{...process.env,...env}});
@@ -73,4 +80,26 @@ test('MCP startup refuses a Playwright MCP script outside the runtime directory'
       assert.match(reply.error?.message??'',/只能启动运行时目录里的 node_modules\/@playwright\/mcp\/cli\.js/);
     }finally{await rm(root,{recursive:true,force:true});}
   }
+});
+
+test('a session.json whose Chromium is gone, or is not this workspace\'s, reads as not started and starts no MCP',{timeout:30000},async()=>{
+  const exited=spawn(process.execPath,['-e',''],{stdio:'ignore'});await once(exited,'exit');
+  // A crash or reboot left the file: its Chromium exited; or the recorded id now belongs to another process (this test runner).
+  for(const pid of [exited.pid!,process.pid]){
+    const {root,metadata,connect,started}=await fixture({version:2,desiredRunning:false});
+    try{
+      await connect(pid);
+      const reply=await initialize(root,metadata);
+      assert.match(reply.error?.message??'',/服务器浏览器尚未启动或正在恢复/,String(pid));
+      await assert.rejects(access(started),'Playwright MCP was never started');
+    }finally{await rm(root,{recursive:true,force:true});}
+  }
+  // While the browser is being restored the bridge waits for the fresh file instead of using the stale one.
+  const {root,metadata,connect,started}=await fixture({version:2,desiredRunning:true,recoveryAttempts:[]});
+  try{
+    await connect(exited.pid!);
+    const restored=new Promise<void>(resolve=>setTimeout(()=>{void connect().then(resolve);},600));
+    const reply=await initialize(root,metadata);await restored;
+    assert.equal(reply.error,undefined);await access(started);
+  }finally{await rm(root,{recursive:true,force:true});}
 });

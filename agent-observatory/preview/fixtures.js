@@ -50,6 +50,50 @@ export const rawAgents = [
     archivedAt: ago(86_400), updatedAt: ago(86_400) }),
 ];
 
+/**
+ * ?scenario=attention-states: what needs you, each with its own look — a question with choices, a plan to approve, a usage
+ * limit with its reset, a turn that stopped after a tool call, a running turn's todo progress and a full context window,
+ * a merge request a reply linked and a heartbeat that will wake an Agent. The other scenarios are unchanged.
+ */
+export function applyAttentionScenario() {
+  const set = (id, changes) => Object.assign(rawAgents.find(agent => agent.id === id), changes);
+  set("migration-review", { pendingPermissions: [{ id: "question-1", kind: "question", title: "确认迁移目标环境",
+    input: { questions: [{ question: "迁移先在哪个环境执行？", header: "环境", options: [{ label: "预发布" }, { label: "生产" }, { label: "两边都跑" }] }] } }] });
+  rawAgents.splice(5, 0, source("orders-split", "拆分订单服务", "running", { provider: "claude", model: "opus", activeTurn: { startedAt: ago(300) }, updatedAt: ago(30),
+    pendingPermissions: [{ id: "plan-1", kind: "plan", title: "批准计划", input: { plan: "# 订单服务拆成读写两层\n1. 抽出查询接口\n2. 迁移写路径" } }] }));
+  set("payment-root", { lastUsage: { inputTokens: 176_000, outputTokens: 9_400, cachedInputTokens: 150_000, totalCostUsd: 2.41, contextWindowUsedTokens: 176_000, contextWindowMaxTokens: 200_000 } });
+  // Its last turn's end was missed (read back later from the timeline): the host's attention is still from the turn before.
+  set("renamed-project-check", { attentionReason: "finished", requiresAttention: true, attentionTimestamp: ago(900) });
+  const reset = new Date(base + 6 * 3_600_000); reset.setMinutes(0, 0, 0);
+  const records = new Map(fixtureTelemetry.agents.map(record => [record.agentId, record]));
+  fixtureTelemetry.agents.push({ ...records.get("payment-root"), agentId: "orders-split" });
+  Object.assign(records.get("performance-baseline"), { stop: { kind: "quota", resetAt: reset.toISOString(), at: ago(196) } });
+  Object.assign(records.get("renamed-project-check"), { turnStartedAt: ago(700), turnEndedAt: null, outcome: null, stop: { kind: "unfinished", resetAt: null, at: ago(240) } });
+  // Stops as a real host leaves them: a turn that ends on a limit notice, an empty turn or a tool call still ends "completed"
+  // (the host's attention is set, unread), for a top-level Agent and for a subagent, which counts as well (gemini-F7).
+  const stopped = (id, title, extra, turn) => {
+    rawAgents.push(source(id, title, "idle", { attentionReason: "finished", requiresAttention: true, ...extra }));
+    fixtureTelemetry.agents.push({ ...records.get("performance-baseline"), agentId: id, stop: null, turnStartedAt: extra.lastUserMessageAt, turnEndedAt: extra.updatedAt, outcome: "completed", ...turn });
+  };
+  stopped("contract-sync", "同步接口契约", { provider: "claude", model: "sonnet", lastUserMessageAt: ago(1_020), updatedAt: ago(380) }, { stop: { kind: "silent", resetAt: null, at: ago(380) } });
+  // The notice gave a clock time without a zone: the reset is read in the device's zone, a guess (grok-F2).
+  stopped("payment-refund-limit", "核对退款限额", { parentAgentId: "payment-root", provider: "claude", model: "opus", lastUserMessageAt: ago(610), updatedAt: ago(130) },
+    { stop: { kind: "quota", resetAt: new Date(reset.getTime() - 3_600_000).toISOString(), resetGuessed: true, at: ago(130) } });
+  // The host closed (unloaded) this one mid-turn, e.g. on a daemon restart: no attention of its own, only 知道了 here (opus-F34).
+  rawAgents.push(source("nightly-index", "重建搜索索引", "closed", { projectId: "delivery-systems", projectName: "Delivery Systems", projectRootPath: "/workspace/delivery", workspaceId: "delivery", workspaceName: "Release checks", cwd: "/workspace/delivery",
+    lastUserMessageAt: ago(1_500), updatedAt: ago(1_200), requiresAttention: false }));
+  fixtureTelemetry.agents.push({ ...records.get("payment-root"), agentId: "nightly-index", turnStartedAt: ago(1_500), turnEndedAt: null, outcome: null, stop: { kind: "unfinished", resetAt: null, at: ago(1_200), closedMidTurn: true } });
+  Object.assign(records.get("iteration-plan"), { link: { url: "https://git.example.com/mobile/app/-/merge_requests/128", label: "!128", kind: "mr" } });
+  fixtureLiveExtras.push({ agentId: "payment-root", todo: { done: 3, total: 7, current: "补充幂等测试", at: ago(20) }, note: null, noteAt: null },
+    { agentId: "iteration-plan", todo: null, note: "要不要先把登录改版排进这一轮？", noteAt: ago(500) });
+  const wake = new Date(base + 86_400_000); wake.setHours(9, 0, 0, 0);
+  fixtureHeartbeats.push({ scheduleId: "hb-iteration", agentId: "iteration-plan", name: "每天早上跟进迭代", status: "active", cadence: "每天 09:00", timezone: null,
+    expression: "0 9 * * *", maxRuns: null, once: false, nextRunAt: wake.toISOString(), onceAt: null, runs: 3, lastRun: { status: "succeeded", startedAt: ago(86_400), endedAt: ago(86_100), error: null } });
+}
+/** Live extras and heartbeats the attention-states scenario fills in; empty otherwise. */
+export const fixtureLiveExtras = [];
+export const fixtureHeartbeats = [];
+
 /** ?scenario=background: 整理性能基线 finished its turn while a subagent still works (后台执行中). */
 export const fixtureBackground = { available: true, revision: "fixture-background", agents: [{ agentId: "performance-baseline", running: 1,
   since: ago(95), updatedAt: new Date(Math.floor(base / 60_000) * 60_000).toISOString(), labels: ["整理压测脚本"] }] };
@@ -72,6 +116,20 @@ export function updateFixtureAgent(agentId, changes) {
   for (const listener of agentListeners) listener({ kind: "upsert", agent: { ...agent } });
   for (const listener of fixtureListeners) listener();
   return agent;
+}
+/**
+ * 知道了 on a stop, as the server records it (opus-F34): on the observed stop itself, only while `stopAt` is that stop. The
+ * preview's mark handler calls it with `input.stopAt`; a stop the host raised no attention for is seen only this way.
+ */
+export function ackFixtureStop(agentId, stopAt) {
+  const record = fixtureTelemetry.agents.find(item => item.agentId === agentId);
+  if (!record?.stop || record.stop.at !== stopAt) return false;
+  if (!record.stop.seenAt) {
+    record.stop = { ...record.stop, seenAt: new Date().toISOString() };
+    fixtureRevision++;
+    for (const listener of fixtureListeners) listener();
+  }
+  return true;
 }
 export function readFixtureInNative(agentId) {
   const agent = rawAgents.find(candidate => candidate.id === agentId);
@@ -138,6 +196,8 @@ export const fixtureAnalytics = {
   startedAt: new Date(fixtureDay - 27 * 86_400_000).toISOString(), updatedAt: new Date(base).toISOString(), persistenceError: null,
   usageBasis: "provider_reported_snapshot", usageAggregation: "peak_per_bucket", agentsTruncated: false,
   coverageResolutionMs: 60_000,
+  // The browser's own clock, as a server laying 明细 → 观测 out in the device's zone would send it (opus-F40).
+  zone: { name: (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })(), offsets: [[0, -new Date().getTimezoneOffset()]] },
   coverageIntervals: [
     { start: new Date(fixtureDay - 27 * 86_400_000).toISOString(), end: new Date(fixtureDay - 2 * 86_400_000 + 3 * 3_600_000).toISOString() },
     { start: new Date(fixtureDay - 2 * 86_400_000 + 5 * 3_600_000).toISOString(), end: new Date(base).toISOString() },
@@ -189,6 +249,10 @@ export function fixtureInsight(agentId) {
 }
 
 const row = (seq, item) => ({ seqStart: seq, seqEnd: seq, timestamp: ago(500 - seq * 25), item });
+/** 检查发布流水线's verbose rerun: one output with two connection resets 211 lines apart (查找 steps from one to the other inside it). */
+const verboseIntegrationRun = ["> delivery@3.2.0 test:integration --verbose", "[db] ECONNRESET staging-database:5432 (retry 1/3)",
+  ...Array.from({ length: 210 }, (_, index) => `  ✓ release check ${String(index + 1).padStart(3, "0")} passed (${12 + index % 40} ms)`),
+  "[db] ECONNRESET staging-database:5432 (retry 3/3), giving up", "Tests: 1 failed, 210 passed, 211 total"].join("\n");
 const page = (rows, agentId, older = false) => ({ epoch: `fixture-${agentId}`, rows,
   startCursor: { epoch: `fixture-${agentId}`, seq: rows[0]?.seqStart ?? 0 },
   endCursor: { epoch: `fixture-${agentId}`, seq: rows.at(-1)?.seqEnd ?? 0 },
@@ -211,7 +275,8 @@ export function fixtureTimeline(agentId, direction = "tail") {
   if (agentId === "release-check") return page([
     row(1, { type: "user_message", text: "检查本次发布的测试与数据库连接。" }),
     row(2, { type: "tool_call", callId: "failure-command", name: "exec_command", status: "failed", detail: { type: "shell", command: "npm run test:integration", output: "Connection timed out: staging-database:5432", exitCode: 1 } }),
-    row(3, { type: "error", message: "集成测试未通过：数据库连接超时。" }),
+    row(3, { type: "tool_call", callId: "verbose-command", name: "exec_command", status: "failed", detail: { type: "shell", command: "npm run test:integration -- --verbose", output: verboseIntegrationRun, exitCode: 1 } }),
+    row(4, { type: "error", message: "集成测试未通过：数据库连接超时。" }),
   ], agentId);
   const items = [
     row(1, { type: "user_message", text: "为支付接口增加幂等保障，补充回归测试，并确认移动端重试不会产生重复订单。" }),

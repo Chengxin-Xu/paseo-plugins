@@ -7,9 +7,9 @@ import type { PaseoApi, PaseoAgentListResult } from "@getpaseo/client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { StatsDirectory } from "../server/stats-directory";
 import { StatsStore, type StatsStoreOptions } from "../server/stats-store";
-import type { StatsAgentRecord, StatsAttribution, StatsHour, StatsToolDay } from "../server/stats-types";
+import type { StatsAgentRecord, StatsHour, StatsToolHour } from "../server/stats-types";
 import { analyticsSnapshotSchema, emptyActivityMetrics, type AnalyticsSnapshot } from "../shared/analytics";
-import { statsResponseSchema, statsSnapshotSchema, type StatsResponse } from "../shared/stats";
+import { statsResponseSchema, statsSnapshotSchema, type StatsMetrics, type StatsResponse } from "../shared/stats";
 import { telemetrySnapshotSchema, type TelemetrySnapshot } from "../shared/telemetry";
 
 const HOUR = 3_600_000, DAY = 24 * HOUR, NOW = Date.parse("2026-09-23T12:00:00.000Z");
@@ -17,8 +17,11 @@ const input = { range: "7d", utcOffsetMinutes: 0 } as const;
 type Entry = PaseoAgentListResult["entries"][number];
 type Full = Extract<StatsResponse, { mode: "full" }>;
 interface Saved {
-  backfilled: boolean; observedSince: string | null; contentSince: string;
-  hours: StatsHour[]; attributions: StatsAttribution[]; toolDays: StatsToolDay[]; records: StatsAgentRecord[];
+  version: number; backfilled: boolean; observedSince: string | null; contentSince: string;
+  /** Agent-hours are written sparsely: zero metrics are absent. */
+  hours: StatsHour[]; agentHours: Array<Partial<StatsMetrics> & { agentId: string; hour: string; lastActiveAt: string }>; toolHours: StatsToolHour[];
+  /** Per-UTC-day lists of 2.12.0, always written empty. */
+  attributions: unknown[]; toolDays: unknown[]; records: StatsAgentRecord[];
   running: Array<[string, number]>; permissions: Array<{ agentId: string; requests: Array<[string, number]> }>;
 }
 const iso = (at: number) => new Date(at).toISOString();
@@ -63,17 +66,19 @@ test("synchronous hooks put duration, permissions and content into hourly and ag
     clock.now += 100; store.record({ type: "permission_requested", agentId: "a", requestId: "secret-request" });
     clock.now += 100; store.record({ type: "permission_resolved", agentId: "a", requestId: "secret-request" });
     clock.now += 200; store.record({ type: "turn_ended", agentId: "a", outcome: "completed", timeline: content() });
-    const state = await saved(store, directory), hour = state.hours[0], attribution = state.attributions[0];
+    const state = await saved(store, directory), hour = state.hours[0], attribution = state.agentHours[0];
     for (const row of [hour, attribution]) {
       assert.equal(row.turns, 1); assert.equal(row.completed, 1); assert.equal(row.runMs, 500); assert.equal(row.runSamples, 1);
       assert.equal(row.busyMs, 500); assert.equal(row.peakParallel, 1); assert.equal(row.approvals, 1); assert.equal(row.waitMs, 200);
       assert.equal(row.userMessages, 1); assert.equal(row.assistantMessages, 1); assert.equal(row.toolCalls, 1);
       assert.equal(row.edits, 1); assert.equal(row.linesAdded, 2); assert.equal(row.linesRemoved, 1); assert.equal(row.filesChanged, 1);
     }
-    assert.equal(hour.hour, "2026-09-23T12:00:00.000Z"); assert.equal(attribution.agentId, "a"); assert.equal(attribution.day, "2026-09-23");
+    assert.equal(hour.hour, "2026-09-23T12:00:00.000Z"); assert.equal(attribution.agentId, "a"); assert.equal(attribution.hour, "2026-09-23T12:00:00.000Z");
+    assert.equal(attribution.lastActiveAt, iso(clock.now)); assert.ok(!("sessions" in attribution), "zero metrics are not written");
+    assert.deepEqual([state.attributions, state.toolDays], [[], []]);
     assert.equal(state.records[0].maxTurnMs, 500); assert.equal(state.records[0].maxTurnAt, iso(clock.now));
     assert.equal(state.records[0].lastKey, "msg:a-one"); assert.deepEqual(state.running, []); assert.deepEqual(state.permissions, []);
-    assert.deepEqual(state.toolDays[0].tools, [{ name: "edit", kind: "edit", calls: 1, failures: 0 }]);
+    assert.deepEqual(state.toolHours, [{ hour: "2026-09-23T12:00:00.000Z", tools: [{ name: "edit", kind: "edit", calls: 1, failures: 0 }], kinds: [{ name: "edit", kind: "edit", calls: 1, failures: 0 }] }]);
     const serialized = await readFile(join(directory, "stats.json"), "utf8");
     for (const secret of ["private prompt", "private response", "private/path.ts", "secret-request"]) assert.ok(!serialized.includes(secret));
     const snapshot = full(await store.read(input, api(async () => page([entry("a")]))));
@@ -94,10 +99,12 @@ test("overlapping turns share wall time and split busy/peak accounting at UTC ho
       ["2026-09-22T23:00:00.000Z", 10_000, 2], ["2026-09-23T00:00:00.000Z", 10_000, 2],
     ]);
     assert.equal(state.hours.reduce((sum, row) => sum + row.runMs, 0), 30_000);
-    assert.equal(state.attributions.reduce((sum, row) => sum + row.busyMs, 0), 20_000);
-    assert.equal(state.attributions.filter(row => row.agentId === "a").reduce((sum, row) => sum + row.busyMs, 0), 10_000);
-    assert.equal(state.attributions.filter(row => row.agentId === "b").reduce((sum, row) => sum + row.busyMs, 0), 10_000);
-    assert.ok(state.attributions.every(row => row.peakParallel === 2));
+    assert.equal(state.agentHours.reduce((sum, row) => sum + (row.busyMs ?? 0), 0), 20_000);
+    assert.equal(state.agentHours.filter(row => row.agentId === "a").reduce((sum, row) => sum + (row.busyMs ?? 0), 0), 10_000);
+    assert.equal(state.agentHours.filter(row => row.agentId === "b").reduce((sum, row) => sum + (row.busyMs ?? 0), 0), 10_000);
+    assert.ok(state.agentHours.every(row => row.peakParallel === 2));
+    // Each Agent has its own bucket on both sides of the UTC hour (and day) boundary.
+    assert.deepEqual(state.agentHours.map(row => [row.agentId, row.hour]).sort(), [["a", "2026-09-22T23:00:00.000Z"], ["a", "2026-09-23T00:00:00.000Z"], ["b", "2026-09-22T23:00:00.000Z"], ["b", "2026-09-23T00:00:00.000Z"]]);
   }, start);
 });
 
@@ -160,12 +167,13 @@ test("backfill uses hours once, uncovered days at noon and agent totals at their
     assert.equal(reads, 2); assert.equal(first.observedSince, analytics.startedAt); assert.equal(first.contentSince, iso(NOW));
     assert.equal(first.hours.reduce((sum, row) => sum + row.turns, 0), 5);
     assert.deepEqual(first.hours.map(row => row.hour).sort(), ["2026-09-21T12:00:00.000Z", "2026-09-22T10:00:00.000Z"]);
-    assert.equal(first.attributions.find(row => row.agentId === "a")?.day, "2026-09-20");
-    assert.equal(first.attributions.find(row => row.agentId === "b")?.day, "2026-09-23");
+    // Each Agent's history lands on the hour of its last known activity (b has none: the analytics update time).
+    assert.equal(first.agentHours.find(row => row.agentId === "a")?.hour, "2026-09-20T03:00:00.000Z");
+    assert.equal(first.agentHours.find(row => row.agentId === "b")?.hour, "2026-09-23T12:00:00.000Z");
     assert.ok(first.hours.every(row => row.userMessages === 0 && row.toolCalls === 0));
     await store.close(); store = new StatsStore({ directory, now: () => NOW + 1_000, telemetry: source }); await store.ready;
     const restored = await saved(store, directory); assert.equal(reads, 2); assert.equal(restored.backfilled, true);
-    assert.deepEqual(restored.hours, first.hours); assert.deepEqual(restored.attributions, first.attributions); assert.equal(restored.contentSince, first.contentSince);
+    assert.deepEqual(restored.hours, first.hours); assert.deepEqual(restored.agentHours, first.agentHours); assert.equal(restored.contentSince, first.contentSince);
   } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -361,18 +369,39 @@ test("local day rollover changes only the affected timezone revision and UTC+8 r
   }, start);
 });
 
-test("record LRU and agent-day attribution bounds evict the least recent data", async () => {
+test("record LRU and the Agent-hour bound evict the least recent data, whole hours first", async () => {
   await withStore(async (store, clock, directory) => {
     for (let i = 0; i < 2_000; i++) store.record({ type: "turn_ended", agentId: `lru-${i}`, outcome: "completed", timeline: [] });
     clock.now++; store.record({ type: "turn_ended", agentId: "lru-0", outcome: "completed", timeline: [] });
     clock.now++; store.record({ type: "turn_ended", agentId: "lru-2000", outcome: "completed", timeline: [] });
     const lru = (await saved(store, directory)).records; assert.equal(lru.length, 2_000); assert.ok(lru.some(row => row.agentId === "lru-0")); assert.ok(!lru.some(row => row.agentId === "lru-1"));
-    for (let day = 1; day <= 21; day++) {
-      clock.now = NOW + day * DAY;
+    // 2,001 Agent-hours at NOW, then 30 hours × 1,000 Agents: the 30,000 cap drops the whole oldest hour.
+    for (let hour = 1; hour <= 30; hour++) {
+      clock.now = NOW + hour * HOUR;
       for (let agent = 0; agent < 1_000; agent++) store.record({ type: "turn_ended", agentId: `bounded-${agent}`, outcome: "completed", timeline: [] });
     }
-    const state = await saved(store, directory); assert.equal(state.attributions.length, 20_000); assert.ok(state.records.length <= 2_000);
-    assert.ok(state.attributions.every(row => row.day >= iso(NOW + 2 * DAY).slice(0, 10)));
+    let state = await saved(store, directory); assert.equal(state.agentHours.length, 30_000); assert.ok(state.records.length <= 2_000);
+    assert.ok(state.agentHours.every(row => row.hour >= iso(NOW + HOUR)));
+    clock.now = NOW + 31 * HOUR; store.record({ type: "turn_ended", agentId: "bounded-0", outcome: "completed", timeline: [] });
+    state = await saved(store, directory); assert.equal(state.agentHours.length, 29_001);
+    assert.ok(state.agentHours.every(row => row.hour >= iso(NOW + 2 * HOUR))); assert.equal(state.agentHours.at(-1)?.hour, iso(NOW + 31 * HOUR));
+    // The 看板 hours are not affected by the Agent-hour bound.
+    assert.equal(state.hours.reduce((sum, row) => sum + row.completed, 0), 32_003);
+  });
+});
+
+test("tool names stay within sixty an hour and thirty thousand in all while per-kind totals survive", async () => {
+  await withStore(async (store, clock, directory) => {
+    const timeline = (hour: number): AgentTimelineItem[] => [{ type: "user_message", messageId: `u-${hour}`, text: "work" },
+      ...Array.from({ length: 61 }, (_, index): AgentTimelineItem => ({ type: "tool_call", callId: `t-${hour}-${index}`,
+        name: `tool-${index}`, status: "completed", error: null, detail: { type: "read", filePath: "private/path.ts" } }))];
+    for (let hour = 0; hour <= 500; hour++) { clock.now = NOW + hour * HOUR; store.record({ type: "turn_ended", agentId: "a", outcome: "completed", timeline: timeline(hour) }); }
+    const state = await saved(store, directory), named = state.toolHours.filter(hour => hour.tools.length);
+    // 501 hours × 60 names exceed 30,000 by one hour: the oldest hour keeps only its totals.
+    assert.equal(state.toolHours.length, 501); assert.equal(named.length, 500); assert.equal(named.reduce((sum, hour) => sum + hour.tools.length, 0), 30_000);
+    assert.deepEqual(state.toolHours[0], { hour: iso(NOW), tools: [], kinds: [{ name: "read", kind: "read", calls: 61, failures: 0 }] });
+    assert.ok(named.every(hour => hour.kinds?.[0].calls === 61 && !hour.tools.some(tool => tool.name === "tool-60")));
+    assert.ok(!JSON.stringify(state).includes("private/path.ts"));
   });
 });
 
@@ -386,8 +415,10 @@ test("hourly and tool-day retention stay within 92 days while tool-kind totals s
           status: "completed", error: null, detail: { type: "shell", command: "true", exitCode: index === 64 ? 1 : 0 } }))] : [];
       store.record({ type: "turn_ended", agentId: "a", outcome: "completed", timeline });
     }
-    const state = await saved(store, directory); assert.equal(state.hours.length, 92 * 24); assert.equal(state.toolDays.length, 92);
-    assert.ok(state.toolDays.every(day => day.tools.length === 60 && day.kinds?.[0].calls === 65 && day.kinds[0].failures === 1));
+    const state = await saved(store, directory); assert.equal(state.hours.length, 92 * 24); assert.equal(state.toolHours.length, 92);
+    assert.ok(state.toolHours.every(hour => hour.tools.length === 60 && hour.kinds?.[0].calls === 65 && hour.kinds[0].failures === 1));
+    // Agent-hours share the same 92-day window (a busy Agent's 93rd day is gone).
+    assert.equal(state.agentHours.length, 92 * 24); assert.ok(state.agentHours.every(row => Date.parse(row.hour) >= start + 24 * HOUR));
     const snapshot = full(await store.read({ range: "90d", utcOffsetMinutes: 0 }, api()));
     assert.equal(snapshot.toolKinds.find(row => row.kind === "shell")?.calls, 90 * 65);
     assert.equal(snapshot.toolKinds.find(row => row.kind === "shell")?.failures, 90);
@@ -402,7 +433,7 @@ test("cursor LRU eviction does not discard an active turn or permission clock", 
     clock.now += 500;
     store.record({ type: "permission_resolved", agentId: "active", requestId: "pending" });
     store.record({ type: "turn_ended", agentId: "active", outcome: "completed", timeline: [] });
-    const state = await saved(store, directory), row = state.attributions.find(item => item.agentId === "active")!;
+    const state = await saved(store, directory), row = state.agentHours.find(item => item.agentId === "active")!;
     assert.equal(row.runMs, 500); assert.equal(row.runSamples, 1); assert.equal(row.waitMs, 500); assert.equal(row.busyMs, 500);
     assert.equal(state.records.length, 2_000); assert.deepEqual(state.running, []); assert.deepEqual(state.permissions, []);
   });

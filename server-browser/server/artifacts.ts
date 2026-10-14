@@ -3,14 +3,16 @@ import path from 'node:path';
 import type { BrowserSettings } from '../shared/browser';
 
 export type ArtifactStats={bytes:number;count:number;cleaned:number};
-/** Only recognisable auto-generated MCP artifacts in the dedicated directory are owned here. */
-const managedName=/^(?:page|screenshot|snapshot|console|network)-\d{4}-\d{2}-\d{2}T[\w.:-]+\.(?:png|jpg|jpeg|webp|yml|yaml|log|txt)$/i;
+/**
+ * Every regular file directly in the browser's own artifacts/ directory is managed here: what Agent tools save there
+ * (screenshots, snapshots, console logs, request and response parts) and what pages download while Playwright MCP is
+ * attached, saved under the site's own file name. Links and subdirectories are never followed.
+ */
 export async function maintainArtifacts(directory:string,settings:BrowserSettings,cleanup=true,now=Date.now()):Promise<ArtifactStats>{
   const files:{file:string;size:number;mtime:number}[]=[];
   try{
     const root=await lstat(directory);if(!root.isDirectory()||root.isSymbolicLink())return {bytes:0,count:0,cleaned:0};
     for(const name of await readdir(directory)){
-      if(!managedName.test(name))continue;
       const file=path.join(directory,name),info=await lstat(file).catch(()=>null);
       if(info?.isFile()&&!info.isSymbolicLink())files.push({file,size:info.size,mtime:info.mtimeMs});
     }

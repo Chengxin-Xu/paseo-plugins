@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { BrowserPage } from './browser-types';
 import { BUDGETS, withTimeout } from './budgets';
+import { withoutCredentials } from './navigation';
 import { defaultRuntimeRoot } from './runtime';
 import type { BrowserReading, BrowserReadInput } from '../shared/browser';
 
@@ -70,5 +71,5 @@ export async function readPageContent(page:BrowserPage,tabId:string,input:Readin
   }
   const maxChars=Math.max(500,Math.min(60000,input.maxChars??16000));
   const characters=content.length;
-  return {tabId,title,url:captured.url,content:content.slice(0,maxChars),format,method,truncated:captured.sourceTruncated||characters>maxChars,characters};
+  return {tabId,title,url:withoutCredentials(captured.url),content:content.slice(0,maxChars),format,method,truncated:captured.sourceTruncated||characters>maxChars,characters};
 }

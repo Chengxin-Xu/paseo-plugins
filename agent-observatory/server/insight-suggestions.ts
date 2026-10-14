@@ -1,7 +1,10 @@
 import { FINDING_CATEGORIES, suggestionReportSchema, type FindingCategory, type FindingSeverity, type OverviewDays, type SuggestionEvidence, type SuggestionJob, type SuggestionReport } from "../shared/insight-overview";
 import type { FindingFeedback, InsightJob } from "../shared/insights";
 import { excerptText } from "../shared/evidence";
-import { InsightReportError, parseInsightOutput, redactSecrets } from "./insight-analysis";
+import { InsightReportError, parseInsightOutput, redactSecrets, redactStrings } from "./insight-analysis";
+import { deviceZone } from "./analytics";
+import { localDayStart } from "./insight-overview";
+import { statsLocalDay, type StatsZone } from "./stats-types";
 
 export const MAX_SUGGESTION_REPORTS = 60;
 export const MAX_SUGGESTION_PROMPT_CHARACTERS = 120000;
@@ -35,9 +38,26 @@ export interface SuggestionContext {
   reason: string;
 }
 
-/** Suggest has no timezone input: its window is UTC calendar days, inclusive of today through now. */
-export function collectSuggestionContext(jobs: readonly InsightJob[], days: OverviewDays, now: number): SuggestionContext {
-  const from = Math.floor(now / DAY) * DAY - (days - 1) * DAY;
+/**
+ * The device's clock for a suggestion window: the requesting client's (manual), else the zone a client reported last
+ * (automatic work, DeviceZone). Either may be missing.
+ */
+export interface SuggestionClock { timeZone?: string | null; utcOffsetMinutes?: number | null }
+/** The zone a clock resolves to (deviceZone); null: none usable, the window is UTC days. */
+export const suggestionZone = (clock: SuggestionClock | null | undefined, now: number): StatsZone | null => deviceZone(clock?.timeZone, clock?.utcOffsetMinutes, now);
+/** What a window records of its clock (shared/insight-overview: `timeZone` null and no offset is UTC days). */
+export function windowClock(zone: StatsZone | null, now: number): Pick<SuggestionJob["window"], "timeZone" | "utcOffsetMinutes"> {
+  return zone ? { timeZone: zone.name, utcOffsetMinutes: Math.round(zone.offsetAt(now) / 60_000) } : { timeZone: null };
+}
+
+/**
+ * The window is `days` local days of the device's clock, inclusive of today through now (grok-F3): from local midnight
+ * `days − 1` days back, each day by its own offset, so a US evening is still today and the start moves with daylight
+ * saving. Without any device clock it is UTC calendar days, and the window says so (`timeZone` null, no offset).
+ */
+export function collectSuggestionContext(jobs: readonly InsightJob[], days: OverviewDays, now: number, clock?: SuggestionClock | null): SuggestionContext {
+  const zone = suggestionZone(clock, now);
+  const from = zone ? localDayStart(statsLocalDay(now, zone) - (days - 1), zone) : Math.floor(now / DAY) * DAY - (days - 1) * DAY;
   const latest = new Map<string, InsightJob>();
   for (const job of jobs) {
     const at = Date.parse(job.updatedAt);
@@ -90,7 +110,7 @@ export function collectSuggestionContext(jobs: readonly InsightJob[], days: Over
   }
   const eligible = reports.length >= 2;
   return { window: { days, from: new Date(from).toISOString(), to: new Date(now).toISOString(), reports: reports.length,
-    findings: reports.reduce((sum, report) => sum + report.findings.length, 0), agents: new Set(reports.map(report => report.agentId)).size },
+    findings: reports.reduce((sum, report) => sum + report.findings.length, 0), agents: new Set(reports.map(report => report.agentId)).size, ...windowClock(zone, now) },
     basis: reports.map(report => report.jobId), parentJob: newest[0] ?? null, reports, references, aggregates,
     truncated: trimmed || reports.length < newest.length, eligible,
     reason: eligible ? `已收集 ${reports.length} 份报告，覆盖 ${new Set(reports.map(report => report.agentId)).size} 个 Agent。` : `近 ${days} 天至少需要 2 份已完成的分析报告，当前可用 ${reports.length} 份。` };
@@ -105,7 +125,7 @@ export function buildSuggestionPrompt(context: SuggestionContext, options: { com
     "结合报告日期和 open/resolved/false_positive 反馈判断趋势：首次出现且无更早依据为 new；跨报告反复出现且仍开放为 recurring；已有 resolved 或后续更健康报告支持改善为 improving。false_positive 代表用户认为误判，不能将其直接当成现存问题；证据不足就在 watch 说明。相同 Agent 的旧报告可以用于比较，不要把历史阻塞直接算作当前阻塞。",
     "每个 action 写出 why、具体 steps、scope(instructions/workflow/profile/project/code/tooling)、impact(high/medium/low)、effort(small/medium/large) 与 projects（报告中的项目名；通用改进填空数组）。规则类改进给可直接粘贴到 AGENTS.md、CLAUDE.md 或 profile notes 的 instruction；实际改造工作给自包含 task，明确项目、目标、范围、步骤与验收标准；不适用的字段填 null。不要替用户执行。",
     "themes 字段为 id/title/detail/category(failure/loop/efficiency/coordination/quality)/severity(high/medium/low)/trend(new/recurring/improving)/evidence。actions 字段为 id/title/why/steps/scope/impact/effort/projects/evidence/instruction/task。theme/action 的 id 各自唯一。wins 列已见成效，watch 列仍需关注或证据不足之处。只输出 JSON 对象，不要 Markdown 围栏。",
-    "aggregates 是整个 UTC 日期窗口的确定性统计，reports 是按开放高/中风险发现优先、组内从新到旧选取的有界样本。window 计数仅描述实际提供的 reports；truncated=true 时部分报告或文字被压缩，不能声称读过未提供的报告。",
+    "aggregates 是整个日期窗口（window.from 到 window.to，按 window.timeZone 的本地日；timeZone 为空时按 UTC 日期）的确定性统计，reports 是按开放高/中风险发现优先、组内从新到旧选取的有界样本。window 计数仅描述实际提供的 reports；truncated=true 时部分报告或文字被压缩，不能声称读过未提供的报告。",
     options.compact ? "上次输出未通过结构或引用检查。本次证据进一步压缩，请直接输出符合 schema 且每条 action 都有真实引用的完整 JSON；不要要求更多数据。" : "",
   ].filter(Boolean).join("\n\n");
   const compactText = (value: string, maximum: number) => safeText(value, Math.min(maximum, Math.ceil(value.length * 0.55)));
@@ -119,7 +139,7 @@ export function buildSuggestionPrompt(context: SuggestionContext, options: { com
 
 export function parseSuggestionText(output: string, references: Readonly<Record<string, SuggestionEvidence>>): { report: SuggestionReport; evidence: Record<string, SuggestionEvidence>; usage: InsightJob["usage"] } {
   const { data, usage } = parseInsightOutput(output, value => suggestionReportSchema.safeParse(value).success);
-  const parsed = suggestionReportSchema.safeParse(data);
+  const parsed = suggestionReportSchema.safeParse(redactStrings(data));
   if (!parsed.success) throw new InsightReportError("建议报告字段不完整或超出限制，可以重试生成。", usage);
   const known = (refs: string[]) => [...new Set(refs.filter(ref => Object.prototype.hasOwnProperty.call(references, ref)))];
   const report = parsed.data;

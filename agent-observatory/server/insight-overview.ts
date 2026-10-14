@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { FINDING_CATEGORIES, type InsightOverview, type InsightOverviewResponse, type OverviewDays, type SuggestionJob, type SuggestionSummary } from "../shared/insight-overview";
 import type { InsightJob } from "../shared/insights";
+import { statsDayText, statsLocalDay, statsZone, type StatsZone } from "./stats-types";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000, QUARTER_MS = 15 * 60_000;
 export const AUTO_SUGGESTION_COOLDOWN_MS = 20 * 60 * 60 * 1000;
 export const MAX_OVERVIEW_BYTES = 30_000;
 const ACTIVE = new Set(["queued", "collecting", "analyzing"]);
@@ -24,17 +25,34 @@ function clip(value: string, maximum: number): string {
 }
 const boundedDate = (value: string) => { const at = Date.parse(value); return Number.isFinite(at) ? new Date(at).toISOString() : clip(value, 40); };
 
-export interface InsightWindowOptions { now: number; days: OverviewDays; utcOffsetMinutes: number }
+/**
+ * The device's clock (grok-F3): `utcOffsetMinutes` now, and its IANA `timeZone` when the client knows it. A known zone
+ * that agrees with the offset gives every instant its own offset (statsZone); otherwise the fixed offset.
+ */
+export interface InsightWindowOptions { now: number; days: OverviewDays; utcOffsetMinutes: number; timeZone?: string | null }
 export interface InsightWindow {
   /** Inclusive local dates, and their UTC interval [startAt, endAt). */
   from: string; to: string; startAt: number; endAt: number; dayKeys: string[];
+  /** The zone the days follow; `timeZone` null: the fixed offset. */
+  zone: StatsZone; timeZone: string | null;
 }
-export function getInsightWindow({ now, days, utcOffsetMinutes }: InsightWindowOptions): InsightWindow {
+/**
+ * The first instant of local day `day` (days since 1970-01-01 in the zone's wall time). Offsets and the instants they
+ * change at are whole quarter hours, so stepping by 15 minutes from the UTC midnight's guess lands on it exactly, also
+ * on a day that starts at 01:00 because the clocks skipped midnight.
+ */
+export function localDayStart(day: number, zone: StatsZone): number {
+  let at = day * DAY_MS - zone.offsetAt(day * DAY_MS);
+  while (statsLocalDay(at - QUARTER_MS, zone) >= day) at -= QUARTER_MS;
+  while (statsLocalDay(at, zone) < day) at += QUARTER_MS;
+  return at;
+}
+/** Today and the `days − 1` local days before it, from local midnight to the next one, each day by its own offset. */
+export function getInsightWindow({ now, days, utcOffsetMinutes, timeZone }: InsightWindowOptions): InsightWindow {
   if (!Number.isFinite(now) || (days !== 7 && days !== 30) || !Number.isInteger(utcOffsetMinutes) || Math.abs(utcOffsetMinutes) > 840) throw new Error("总览时间范围无效");
-  const offset = utcOffsetMinutes * 60_000, today = Math.floor((now + offset) / DAY_MS) * DAY_MS;
-  const first = today - (days - 1) * DAY_MS;
-  const dayKeys = Array.from({ length: days }, (_, index) => new Date(first + index * DAY_MS).toISOString().slice(0, 10));
-  return { from: dayKeys[0], to: dayKeys[days - 1], startAt: first - offset, endAt: today + DAY_MS - offset, dayKeys };
+  const zone = statsZone(utcOffsetMinutes, timeZone, now), today = statsLocalDay(now, zone), first = today - (days - 1);
+  const dayKeys = Array.from({ length: days }, (_, index) => statsDayText(first + index));
+  return { from: dayKeys[0], to: dayKeys[days - 1], startAt: localDayStart(first, zone), endAt: localDayStart(today + 1, zone), dayKeys, zone, timeZone: zone.name };
 }
 
 /** A bounded list projection; full suggestion text and evidence remain in the detail RPC. */
@@ -103,7 +121,7 @@ function fitOverview(data: InsightOverview): void {
 /** Historical distributions cover every report; outstanding work uses only each Agent's latest report. */
 export function buildInsightOverview(options: BuildInsightOverviewOptions): InsightOverviewResponse {
   const { jobs, suggestionJobs, autoEnabled, runnerLabel, now, days, utcOffsetMinutes } = options;
-  const range = getInsightWindow(options), offset = utcOffsetMinutes * 60_000;
+  const range = getInsightWindow(options);
   const inWindow = (job: InsightJob) => { const at = Date.parse(job.updatedAt); return at >= range.startAt && at < range.endAt && at <= now; };
   // Feedback changes updatedAt, so report creation order chooses each Agent's current analysis. The requested
   // window and daily history still use updatedAt; ties use updatedAt then id for deterministic snapshots.
@@ -122,7 +140,10 @@ export function buildInsightOverview(options: BuildInsightOverviewOptions): Insi
   for (const job of reports) {
     const report = job.report!;
     totals[job.trigger]++; health[report.health]++;
-    dailyByDay.get(new Date(timestamp(job.updatedAt) + offset).toISOString().slice(0, 10))![report.health]++;
+    // The local day it finished on, with the offset in force then (a report from before a daylight-saving change too).
+    // A zone that falls back across midnight can put the window's first hour on the day before: it counts in the totals only.
+    const day = dailyByDay.get(statsDayText(statsLocalDay(timestamp(job.updatedAt), range.zone)));
+    if (day) day[report.health]++;
     let project = projectByName.get(job.projectName);
     if (!project) { project = { name: clip(job.projectName, 240), reports: 0, openFindings: 0, highOpen: 0, blocked: 0, lastAt: boundedDate(job.updatedAt) }; projectByName.set(job.projectName, project); }
     if (timestamp(job.updatedAt) > timestamp(project.lastAt)) project.lastAt = boundedDate(job.updatedAt);
@@ -166,7 +187,7 @@ export function buildInsightOverview(options: BuildInsightOverviewOptions): Insi
   const completed = suggestionOrder.find(job => job.status === "completed" && job.report);
   const activeOrLatest = suggestionOrder.find(job => ACTIVE.has(job.status)) ?? suggestionOrder[0];
   const timing = getSuggestionTiming({ jobs, suggestionJobs, autoEnabled, now });
-  const data: InsightOverview = { generatedAt: new Date(now).toISOString(), days, utcOffsetMinutes, from: range.from, to: range.to,
+  const data: InsightOverview = { generatedAt: new Date(now).toISOString(), days, utcOffsetMinutes, timeZone: range.timeZone, from: range.from, to: range.to,
     autoEnabled, runnerLabel: clip(runnerLabel, 160), totals, health, daily, categories, projects, agents, findings: findings.slice(0, 16),
     suggestions: completed ? summarizeSuggestion(completed) : null,
     suggestionJob: activeOrLatest && activeOrLatest.id !== completed?.id ? summarizeSuggestion(activeOrLatest) : null,

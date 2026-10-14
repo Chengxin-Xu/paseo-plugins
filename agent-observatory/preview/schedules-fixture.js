@@ -149,7 +149,7 @@ export function fixtureScheduleList(window = "recent", scenario = null) {
   return { mode: "full", unchanged: false, revision: `fixture-schedules-${window}`, generatedAt: new Date().toISOString(), window, schedules: empty ? [] : summaries(), runs: kept.map(row),
     older: all.length - allHeartbeats - (kept.length - keptHeartbeats), olderHeartbeats: allHeartbeats - keptHeartbeats, truncated: kept.length < all.length, week,
     reconstructed: empty ? 0 : runs.filter(run => run.source === "agent").length, error: null,
-    notice: scenario === "schedules-notice" ? "定时运行账本损坏，已另存为 schedule-ledger.corrupt-2026-10-09T08-00-00.000Z.json 并重新记录；已删除任务的旧运行会从 Agent 记录还原。" : null };
+    notice: scenario === "schedules-notice" ? "定时运行账本损坏，已另存为 schedule-ledger.corrupt.json 并重新记录；已删除任务的旧运行会从 Agent 记录还原。" : null };
 }
 
 /** observatory.schedules.run: the recorded reply only exists while the schedule file does. */
@@ -161,4 +161,16 @@ export function fixtureScheduleRun(runId) {
     note: run?.source === "ledger" ? "这个定时任务已被删除，回复没有保留；可以读取会话记录查看最后回复。" : "定时任务记录已不存在，可以读取会话记录查看最后回复。" };
   return { runId, output: run.output, outputTruncated: false, prompt, row: row(run), schedule,
     note: run.output ? null : run.status === "running" ? "还在运行，结束后会记录最终回复。" : "这次运行没有记录最终回复，可以读取会话记录。" };
+}
+
+/**
+ * observatory.schedules.heartbeats as the server answers it: the listed heartbeats plus what 归档已读完成 needs (codex-F16), every Agent a
+ * live heartbeat wakes and whether the scan read every schedule file. `?scenario=heartbeats-error` shows a schedules directory that
+ * cannot be read, `?scenario=heartbeats-partial` a scan cut short by its budget: both keep 归档已读完成 disabled with the reason.
+ */
+export function fixtureHeartbeatsResponse(heartbeats, scenario = null) {
+  const error = scenario === "heartbeats-error" ? "定时任务目录读不出来，无法确认哪些会话还有心跳。" : null;
+  const complete = scenario !== "heartbeats-error" && scenario !== "heartbeats-partial";
+  const targets = [...new Set(heartbeats.filter(item => item.status !== "completed").map(item => item.agentId))].sort();
+  return { mode: "full", unchanged: false, revision: `heartbeats-${heartbeats.length}-${scenario ?? "all"}`, generatedAt: new Date().toISOString(), heartbeats, truncated: false, error, complete, targets };
 }

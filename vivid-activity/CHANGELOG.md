@@ -1,5 +1,191 @@
 # Changelog
 
+## 0.6.2 (2026-10-14)
+
+Documentation only; the code is unchanged.
+
+- The fold index also holds tool call and turn ids, text lengths and a short hash of thinking text, besides each row's position, end time, kind, status and category. It never holds text or tool output.
+- The plugin reads no credentials; of the environment it uses only `TMPDIR` and `HOME`, to check the temp directory for image previews.
+
+## 0.6.1 (2026-10-14)
+
+- The server now splits the UI chunks on their first request instead of at startup, and slices the source text instead of building strings character by character. This cuts startup CPU and resident memory; the RPC part budget and the interface stay the same.
+
+## 0.6.0 (2026-10-12)
+
+Fixes after a review of 0.5.0, two additions, and lighter loading on phones.
+
+**Notices and questions**
+
+- Claude Code 2.1 writes background agent notices as `Agent "<description>" finished`, `… failed: <error>`,
+  `… was stopped by user` and `… stopped at its N-turn limit`, and monitor events as `Monitor event: "…"`. These
+  were taken for repeats of a foreground call and hidden. They now show as rows such as 后台 Agent「审查登录模块」已完成
+  (green), …失败：Unknown error (red) or …被你停止 (gray); a monitor event carries no state. Repeats of a foreground
+  call (`The Bash call finished; …`) still merge into that call's row, and failed notices count as failures in a
+  fold summary.
+- A failed, killed or stopped notice keeps that state even when its error quotes words such as `finished`
+  (`Agent "审查" failed: Hook "validate" finished with exit code 1`); only a completed one is read for a stop such
+  as the turn limit. Claude Code leaves quotes in a description unescaped, so the name ends where one of its own
+  endings, read from the end and picked by the state the host reports, says: `Agent "Investigate why "job" finished
+  early" stopped at its 30-turn limit (…)` is the turn limit, not a finished agent. A description of any length is
+  read this way and shortened only for display; when none of these endings is found, the state the host reports
+  stands, whatever words the description holds. An empty description (the Agent tool accepts one) is read the same
+  way and shows as 后台 Agent ("background agent") with its ending.
+- In non-interactive sessions Claude Code moves a foreground call that is still running to the background; its row
+  keeps a placeholder and the real result arrives in a notice. Such a notice now gets its own row
+  (前台调用「Bash」结果已送达, "result delivered") that expands to the result, instead of being merged away. When the
+  call's row already shows the same result (both say `built in 4.2s`; color codes, line endings, spaces at line ends
+  and blank lines at either end aside), the notice still merges, so it is not shown twice. A row that holds only the
+  placeholder, or says anything more or different, keeps the notice; so does a result over 200,000 characters.
+- Claude's AskUserQuestion, Codex's request_user_input and every request of kind `question` now turn their row amber
+  with 等你回答 ("waiting for your answer") and a question mark icon, apart from 等你批准 (approval, hand icon).
+  Expanding the row lists the questions, the options and what you picked.
+- Codex approvals and questions carry only `metadata.itemId`, which is the row's call id; such rows now turn amber too.
+
+**Sub-agent card**
+
+- The card shows three short activity rows that the plugin's server reads for it (see Mobile loading and traffic
+  below). The server reads only an agent whose record shows it is loaded (the daemon adds `activeTurn` only to loaded
+  agents), so a status of "running" saved before the daemon went down no longer counts. When the status check fails
+  it reads nothing; the card says it could not confirm the agent is loaded and asks again on the next update. The
+  show activity button still reads at once.
+
+**Layout on phones**
+
+- In the iOS and Android apps, text that shares a line with something else no longer runs past the card's edge and
+  gets clipped (React Native text does not shrink by default): list items in thinking details, the Pi sub-agent usage
+  line, long tool and file names, server names in the code mode catalog, raw tool names in sub-agent activity, field
+  names and browser log sources in Paseo tool views. Measured with Yoga 3 and React Native's defaults: 7 to 142 px
+  past the edge before, none after.
+- On a narrow phone row the title and summary now share one area that gives way, the summary first; the state pill,
+  timing, state icon and chevron keep their width. A 320 px row waiting for approval or showing a failure ran 32 px
+  and 10 px past the card before, none after.
+
+**Details**
+
+- Times in Paseo tool views (a schedule's next run, last run, expiry, and other ISO times with a zone) show in the
+  device's time zone, such as 明天 05:00（9 小时后） ("tomorrow 05:00, in 9 hours"); tap one to see the original. The
+  schedule list always shows the next run.
+- Plain-text results show the first 20 lines (4,000 characters) and a show all button, so the newest row of an
+  ACP agent no longer fills a phone screen.
+
+**New: pinned question**
+
+- In a long turn, the question you asked is pinned above the newest stretch of activity: three lines, tap to read it
+  all, with a copy button. A turn the agent started by itself shows your latest question instead. Nothing is pinned
+  while the question is still within about a screen. Drawn with React Native, so it works the same on iOS, Android
+  and the web; a setting turns it off. The idea comes from [chat-view](https://github.com/lyhu/paseo-plugin-chat-view)
+  by lyhu; the code is our own. The server gives up looking for the question after 10 seconds and the app asks again
+  later. While the agent runs, the pin moves with the fold index, so about two seconds after the activity does.
+
+**New: Pi extension notices**
+
+- Notices from Pi extensions (background tasks, sub-agents, sub-agent requests and supervisor warnings, web search,
+  goals) used to show as a gray row holding the XML written for the model. They now read like
+  后台任务「构建」失败（退出码 1） and expand to fields in Chinese (task, state, exit code, error, output file…) and the
+  result text; instructions meant for the model are left out. Unknown types show as Pi 通知. The list of message
+  formats follows paseo-pi-kit in [springkill/paseo-plugins](https://github.com/springkill/paseo-plugins); the parser
+  is our own.
+- A notice is bounded before it is parsed (the first 64 KiB of text; in the details, 8 KiB per string and 64 KiB in
+  all, 200 entries per list or object, 4,000 values, 8 levels) and parsed in linear time, also when it is tens of
+  thousands of blank lines, so a crafted notice cannot stall the timeline or the daemon.
+
+**Hostile input**
+
+- Every regular expression that runs on what agents send (output, commands, paths, notices) was tried against
+  inputs crafted to make it backtrack. 31 of them took quadratic time (seconds on tens of kilobytes) and are now
+  linear scans or patterns without overlapping repeats, with the same results, checked against the old ones on
+  random input. One difference is on purpose: in a shell command, a quote escaped with a backslash no longer opens a
+  string, while strings right next to each other (`"one""two"`) are each colored.
+- Some of Prism's own grammar patterns backtrack the same way. Code over 4,000 characters is now highlighted in
+  chunks of whole lines for about 100 ms at most; the rest, and any single line over 4,000 characters, shows plain.
+
+**Mobile loading and traffic**
+
+- Timeline transforms, row headers and fold state are ready at once; tool details, thinking text, syntax highlighting
+  and settings load the first time they are needed, and the first expansion shows plain text meanwhile. Prism comes
+  from its official `.min.js` files.
+- The parser for Pi extension notices is a second chunk of its own (about 48 KB), loaded when the first such notice
+  appears. Until it arrives, such rows read Pi 通知 正在读取… ("reading") without a state, so a failed task does not
+  look done for that moment; they are redrawn once the parser is there. If the load fails they stay without a state
+  (Paseo marks every Pi custom message completed, so a failed task would otherwise show as done) and read
+  没能读取，点开看原文 ("could not read, open for the original"); expanded, they show the message as sent and a
+  重新读取 ("read again") button. The load is also tried again after 30 seconds, 1, 2 and then every 5 minutes. Fold
+  summaries are not affected: the server reads these notices itself.
+- Loaded code is cached by content hash for the app session, so reconnecting does not download it again; each
+  registration evaluates it afresh, and settings reach the resident part through a callback. Chunks come in
+  sequential replies under 128 KB; a failed load can be retried, and an incompatible version asks you to reconnect.
+- The sub-agent card gets three short rows (about 500 bytes) instead of subscribing to the agent's timeline: at most
+  every five seconds while the agent keeps changing, and at once when its state changes. Paseo reports a running
+  agent's progress only with some events (a model call's usage, a state change), and an ACP agent that reports no
+  usage sends none until its turn ends, so a running agent the card has heard nothing about for ten seconds is read
+  once more. That read is no news about the agent: an answer still on its way, such as a slow "not loaded", still
+  counts, and it adds nothing while a read is on its way.
+- Fold indexes are read again only when a boundary first appears or finishes, at most every two seconds while the
+  agent runs and not during a retry backoff; virtual `provider:` agents send no requests.
+
+## 0.5.0 (2026-10-11)
+
+Fixes and additions after a review of 0.4.1.
+
+**Terminal output**
+
+- ANSI escape sequences in command output, terminal captures, plain-text results and errors (colors, cursor moves,
+  line clearing, window titles, OSC 8 links) no longer show up as `[0m`, `[2K` or `]8;;https://…`; colored output is
+  still colored. The preview and "show all" both come from the whole cleaned output, and the line and character counts
+  are of the cleaned text. Copy copies the cleaned text; when the output does contain escape sequences, a second
+  button copies the original. User messages are left as they are.
+- The stripping is a single linear pass with no regular expressions to backtrack. A sequence cut off at the end of the
+  output is dropped; an unterminated OSC string ends at the line break, so one broken sequence cannot swallow the
+  following lines. The approach follows the `stripAnsi` of [Tidy Timeline](https://github.com/jegork/paseo-tidy-timeline)
+  by Jegor Kitskerkin (MIT); the code is our own.
+
+**Sub-agent card**
+
+- Expanding a row for Paseo's create agent tool shows the new agent's latest activity. The card now reads the last
+  8 timeline entries instead of 100, and only while the app is in the foreground and the card is on screen (on the web
+  it watches the card's position; the iOS and Android apps go by foreground only). Changes it may have missed while
+  paused are read once when it resumes, and a burst of live events makes one read.
+- Reading the timeline of an agent that is not loaded (status "closed" since Paseo 0.11) makes the daemon load it.
+  Before every read it starts by itself, the card asks the daemon for the agent's stored status, which loads nothing.
+  For an agent that is closed, archived or no longer in the agent list, the card says so and reads only when you
+  press its 查看动态 ("show activity") button. Before, the card of an archived sub-agent kept showing it as running
+  and read it again on its last events.
+
+**Approval state**
+
+- A row turns amber the moment the agent asks for your approval. Before, a request that arrived after the chat was
+  opened left the row blue until the chat was opened again, because Paseo's SDK forwards agent updates to a plugin
+  only once that plugin subscribes to the agent list. While a running row is on screen and the app is in the
+  foreground, the plugin now keeps one agent list subscription per host, shared by all rows, limited to running and
+  starting agents and with a one-entry snapshot. It is released when no running row needs it or the app goes to the
+  background. After a reconnect or a return to the foreground, each watched agent's state is read again, without
+  loading any agent. On an isolated daemon the row turned amber 0.1 to 0.2 s after the request and back to blue
+  about 0.1 s after approval.
+
+**Folding**
+
+- Bots proposal cards (`propose_skill`, `propose_routine`, `propose_changes`) and app sign-in cards (Composio) now
+  end a run of steps in the server's fold index as well, using the same rules as Bots 0.2 and every spelling of the
+  tool names (Claude, Codex and others). Before, the tool rows above and below such a card could be folded into one
+  summary above it. Without Bots installed, Paseo draws these calls.
+- A tool row that another plugin draws between rows of this plugin ends the run too, and a running run's "two most
+  recent steps" count only rows this plugin drew.
+
+**Other**
+
+- Pi sub-agent rows are fully in Chinese: titles, statuses and the plugin's own notes. Pi's error texts stay as sent.
+- The vivid palette's sub-agent tint is magenta like its icon (it was green). Added diff lines use the "finished"
+  green in every palette; they borrowed the sub-agent tint before, which was gray in the soft and high contrast
+  palettes. A command's exit code badge, error output and error details, and Pi sub-agent errors use the palette's
+  state colors: the vivid palette's red and green instead of the theme's duller ones; other palettes are unchanged.
+- Expand and collapse buttons (prompts, show all, image zoom, the code mode catalog, row headers) report
+  `aria-expanded`.
+- Memory stays bounded in sessions left open for days: what the app keeps per agent beyond its fold index (rows seen
+  running, turn starts, expanded folds, keys it could not find, the time of its newest rows) and the keys two agents disagree on are capped, drop
+  their older half when full, and are dropped with the agent. Streaming reasoning no longer records a key per chunk.
+  The server forgets an agent's turn starts when Paseo closes the agent (archive, delete, restore, daemon shutdown).
+
 ## 0.4.1 (2026-10-10)
 
 Security hardening after an outside review of 0.4.0. Image previews, folding and timing work as before.

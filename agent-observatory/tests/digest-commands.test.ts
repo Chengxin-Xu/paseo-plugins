@@ -38,7 +38,7 @@ test("command extraction unwraps environments, launchers and shell scripts", () 
 
 test("check classification covers the contract's executable and package-script tables", () => {
   const cases: [string, CheckKind][] = [
-    ...["test -f file", "pytest -q", "jest", "vitest run", "mocha", "playwright test", "go test ./...", "cargo test", "cargo +nightly test", "tsx --test file.test.ts", "node --test", "node --test=path", "rspec", "ctest", "python3 -m pytest", "npm test", "npm run test:unit", "pnpm --filter app test", "yarn test", "bun test"].map(command => [command, "test"] as [string, CheckKind]),
+    ...["pytest -q", "jest", "vitest run", "mocha", "playwright test", "go test ./...", "cargo test", "cargo +nightly test", "tsx --test file.test.ts", "node --test", "node --test=path", "rspec", "ctest", "python3 -m pytest", "npm test", "npm run test:unit", "pnpm --filter app test", "yarn test", "bun test"].map(command => [command, "test"] as [string, CheckKind]),
     ...["tsc --noEmit", "typecheck", "mypy .", "pyright", "npm run typecheck", "pnpm typecheck", "yarn run type-check", "npx tsc --noEmit"].map(command => [command, "typecheck"] as [string, CheckKind]),
     ...["lint", "eslint .", "ruff check .", "flake8", "pylint .", "golangci-lint run", "clippy", "cargo clippy", "prettier --check .", "biome check .", "npm run lint", "pnpm lint:fix", "python -m ruff check ."].map(command => [command, "lint"] as [string, CheckKind]),
     ...["build", "make", "cmake --build .", "cargo build", "go build", "vite build", "webpack", "esbuild app.ts", "tsc -b", "tsc --build", "gradle assemble", "./gradlew build", "mvn package", "npm run build", "pnpm build"].map(command => [command, "build"] as [string, CheckKind]),
@@ -56,7 +56,47 @@ test("compound commands select the first CHECK_KINDS category", () => {
   assert.equal(analyzeCommand("npm run build | tee output").program, "npm");
   assert.equal(analyzeCommand("echo ready && npm test").check, "test");
   assert.equal(analyzeCommand("(npm test) && npm run build").check, "test");
-  assert.equal(analyzeCommand("if test -f package.json; then npm run build; fi").check, "test");
+  // The `test` builtin only guards the real step.
+  assert.equal(analyzeCommand("if test -f package.json; then npm run build; fi").check, "build");
+});
+
+test("the shell's test builtin is a condition, like [, never a test run (opus-F75)", () => {
+  for (const command of ["test -f package.json && cat package.json", 'test -n "$CI" && echo ci', "test -e dist/index.js; echo $?", "test -d node_modules",
+    "/usr/bin/test -f x", "! test -f x", "[ -f package.json ] && cat package.json"]) assert.equal(analyzeCommand(command).check, null, command);
+  assert.equal(analyzeCommand("test -f x || npm ci").check, "install");
+  assert.equal(analyzeCommand("test -d node_modules || npm ci").check, "install");
+  assert.equal(analyzeCommand("if test -f tsconfig.json; then npx tsc --noEmit; fi").check, "typecheck");
+  assert.equal(analyzeCommand("test -f pytest.ini && pytest -q").check, "test");
+});
+
+test("make counts by its targets: test/check, lint, the default build; help, clean, install and dry runs are no check (opus-F75)", () => {
+  const cases: [string, CheckKind | null][] = [
+    ["make", "build"], ["make all", "build"], ["make build", "build"], ["gmake", "build"], ["/usr/bin/make -f Makefile.ci", "build"],
+    ["make test", "test"], ["make check", "test"], ["make tests", "test"], ["make test-unit", "test"], ["make -C sub check", "test"], ["make --directory=sub test", "test"],
+    ["make lint", "lint"], ["make lint_go", "lint"], ["make typecheck", "typecheck"], ["make build-image", "build"],
+    ["make help", null], ["make clean", null], ["make install", null], ["make dist", null], ["make check-format", null],
+    // Option values and variable assignments are not targets.
+    ["make -j 8", "build"], ["make -j8 test", "test"], ["make -sj 4 check", "test"], ["make --jobs 4 lint", "lint"], ["make -Oline test", "test"], ["make V=1 test", "test"], ["make -f test.mk", "build"],
+    ["make -C test", "build"], ["make -I test help", null],
+    // Several targets: the fixed category order, as for a compound command.
+    ["make clean test", "test"], ["make clean all", "build"], ["make help clean", null],
+    // Dry runs, queries, touch-only runs, help and version execute nothing; GNU make reads options after targets too.
+    ["make -n test", null], ["make test -n", null], ["make --dry-run", null], ["make --just-print build", null], ["make -q all", null], ["make --question", null],
+    ["make -t", null], ["make -kn", null], ["make -h", null], ["make --help", null], ["make -v", null], ["make --version", null],
+    ["cd sub && make test", "test"], ["make clean && make test", "test"], ["make help || true", null],
+  ];
+  for (const [command, check] of cases) assert.equal(analyzeCommand(command).check, check, command);
+});
+
+test("project runners and workspaces unwrap to the command they run (opus-F75)", () => {
+  const cases: [string, CheckKind | null, string][] = [
+    ["uv run pytest -q", "test", "pytest"], ["uv run --with pytest-cov --python 3.12 pytest", "test", "pytest"], ["uv --directory sub run pytest", "test", "pytest"],
+    ["uv run python -m pytest", "test", "python"], ["uv run -- mypy .", "typecheck", "mypy"], ["uv run ruff check .", "lint", "ruff"],
+    ["poetry run pytest", "test", "pytest"], ["poetry -C sub run mypy src", "typecheck", "mypy"], ["pipenv run pytest", "test", "pytest"], ["pipenv run python -m pytest", "test", "python"],
+    ["yarn workspace app test", "test", "yarn"], ["yarn workspace app run build", "build", "yarn"], ["yarn workspace app add lodash", "install", "yarn"], ["yarn workspace app lint", "lint", "yarn"],
+    ["uv sync", "install", "uv"], ["uv run app.py", null, "app.py"], ["poetry show", null, "poetry"], ["yarn workspace app", null, "yarn"], ["yarn workspaces list", null, "yarn"],
+  ];
+  for (const [command, check, program] of cases) assert.deepEqual([analyzeCommand(command).check, analyzeCommand(command).program], [check, program], command);
 });
 
 test("non-runs, quoted data, comments, substitutions and heredocs do not become checks", () => {

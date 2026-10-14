@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { SessionTrajectory } from "../shared/trajectory";
 import { GROK_EFFORTS, insightRunnerSchema, insightSettingsSchema, type InsightReport } from "../shared/insights";
-import { BUILTIN_INSIGHT_RUNNER, InsightRunnerRegistry } from "../server/insight-runner";
+import { BUILTIN_INSIGHT_RUNNER, GROK_RUNNER_DETAIL, InsightRunnerRegistry } from "../server/insight-runner";
 import { InsightManager } from "../server/insights";
 import { runGrokAnalysis, type GrokRunOptions } from "../server/grok-runner";
 
@@ -63,6 +63,8 @@ test("the analysis passes the saved Grok model and effort to the CLI, and the se
     assert.equal((await manager.list()).runnerLabel, "Grok 4.6 · medium");
     const runners = await manager.runners({ config: { get: async () => ({ config: { providers: {}, agentProfiles: [] } }) }, providers: { snapshot: async () => ({ entries: [] }) } } as unknown as PaseoApi);
     assert.deepEqual([runners.builtin.runner, runners.builtin.label, runners.builtin.modelLabel, runners.builtin.thinkingLabel], [{ kind: "grok", model: "grok-4.6", effort: "medium" }, "Grok 4.6 · medium", "Grok 4.6", "medium"]);
+    // Says what really happens (opus-F71, opus-F72): Grok does keep a session per run, which the observatory deletes.
+    assert.equal(runners.builtin.detail, GROK_RUNNER_DETAIL); assert.match(runners.builtin.detail ?? "", /拒绝/); assert.match(runners.builtin.detail ?? "", /删除/);
     const second = await manager.start(paseo, "agent-b");
     for (let index = 0; index < 200 && (await manager.state()).jobs.find(job => job.id === second.id)?.status !== "completed"; index++) await new Promise(resolve => setTimeout(resolve, 2));
     assert.deepEqual([calls[1].model, calls[1].effort], ["grok-4.6", "medium"]);
@@ -76,9 +78,11 @@ test("the Grok CLI gets the configured model and reasoning effort, xhigh by defa
   await writeFile(executable, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({args:process.argv.slice(2)}));\n', { mode: 0o700 });
   try {
     const value = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
-    const defaults = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000 })).args as string[];
+    // A scratch GROK_HOME and temp root keep the run's session cleanup away from the real ~/.grok.
+    const scratch = { grokHome: join(directory, "grok-home"), tmp: directory };
+    const defaults = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000, ...scratch })).args as string[];
     assert.deepEqual([value(defaults, "--model"), value(defaults, "--reasoning-effort")], ["grok-4.7", "xhigh"]);
-    const chosen = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000, model: "grok-4.6", effort: "low" })).args as string[];
+    const chosen = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000, model: "grok-4.6", effort: "low", ...scratch })).args as string[];
     assert.deepEqual([value(chosen, "--model"), value(chosen, "--reasoning-effort")], ["grok-4.6", "low"]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -50,6 +50,8 @@ test("the per-Agent list is only asked of loaded Agents: the host loads an unloa
   let now = T0; const asked: string[] = [];
   const answers: Record<string, ListedSubagent[]> = { lead: [listed("task-1", "running", T0 - 86_400_000, T0, "实现折叠")], fresh: [listed("task-2", "running", T0 + 1_000)] };
   const tracker = new BackgroundTracker(async id => { asked.push(id); return answers[id] ?? []; }, () => now), h = host();
+  // Loaded means seen live by this process (a lifecycle hook); the directory's status alone is not proof.
+  for (const id of ["lead", "fresh", "unloaded", "archived", "busy"]) tracker.markLive(id);
   await tracker.sync([parent("lead")], T0);
   assert.deepEqual(asked, [], "nothing is asked before the stream is live, so no change can fall between list and stream");
   const opened = tracker.attach(h.paseo); h.open(); await opened;
@@ -76,6 +78,7 @@ test("list answers never overrule newer stream reports, and parents that unloade
   const gate = new Promise<void>(resolve => { release = resolve; });
   const tracker = new BackgroundTracker(async () => { await gate; return [listed("task-1", "running", T0)]; }, () => now), h = host();
   const opened = tracker.attach(h.paseo); h.open(); await opened;
+  tracker.markLive("lead");
   const pending = tracker.sync([parent("lead")], T0);
   now += 1_000; h.emit(upsert("lead", "task-1", "completed", now));
   release(); await pending;
@@ -91,6 +94,7 @@ test("list answers never overrule newer stream reports, and parents that unloade
 test("a subagent first seen live is dated by its creation only when created after the parent's latest message", async () => {
   let now = T0; const tracker = new BackgroundTracker(async id => id === "lead" && now > T0 ? [listed("new", "running", T0 - 5_000, now)] : [], () => now), h = host();
   const opened = tracker.attach(h.paseo); h.open(); await opened;
+  tracker.markLive("lead"); tracker.markLive("other");
   await tracker.sync([parent("lead", { lastUserMessageAt: iso(T0 - 60_000) }), parent("other")], T0);
   h.emit(upsert("lead", "resumed", "running", T0, { createdAt: iso(T0 - 86_400_000) }));
   h.emit(upsert("lead", "new", "running", T0, { createdAt: iso(T0 - 5_000) }));
@@ -108,6 +112,7 @@ test("a reconnect asks every loaded Agent again; a failed stream reports unavail
   const tracker = new BackgroundTracker(async id => { asked.push(id); return []; }, () => now), h = host();
   const initial = tracker.read(); assert.equal(initial.mode === "full" && initial.available, false);
   const opened = tracker.attach(h.paseo); h.open(); await opened;
+  tracker.markLive("a");
   await tracker.sync([parent("a")], T0); assert.deepEqual(asked, ["a"]);
   now += 1_000; h.open();
   await tracker.sync([parent("a")], now); assert.deepEqual(asked, ["a", "a"]);
@@ -115,6 +120,22 @@ test("a reconnect asks every loaded Agent again; a failed stream reports unavail
   const response = tracker.read(); assert.equal(response.mode === "full" && response.available, false);
   void tracker.attach(h.paseo); assert.equal(h.subscribed.length, 2, "a later call reopens the stream");
   await tracker.close(); assert.ok(h.released >= 1);
+});
+
+test("a stale record is never asked: after a killed daemon an unloaded Agent still reports running or idle", async () => {
+  let now = T0; const asked: string[] = [];
+  const tracker = new BackgroundTracker(async id => { asked.push(id); return []; }, () => now), h = host();
+  const opened = tracker.attach(h.paseo); h.open(); await opened;
+  const directory = [parent("stale-running", { status: "running" }), parent("stale-idle"), parent("live")];
+  tracker.markLive("live");
+  await tracker.sync(directory, T0);
+  assert.deepEqual(asked, ["live"], "only the Agent that reported a hook is asked");
+  // A subagent event proves its parent is loaded; agent.closed takes that back.
+  h.emit(upsert("stale-idle", "task", "running", T0));
+  assert.equal(tracker.isLive("stale-idle"), true);
+  tracker.markClosed("live"); tracker.markClosed("stale-idle");
+  asked.length = 0; now += 10 * 60_000 + 1; await tracker.sync(directory, now);
+  assert.deepEqual(asked, [], "closed Agents are not asked again");
 });
 
 test("revisions only change with visible content", async () => {

@@ -15,7 +15,7 @@ export function bridgeScript(runtimeRoot:string):string{
 
 export const bridgeSource = String.raw`import {spawn} from 'node:child_process';
 import {constants} from 'node:fs';
-import {lstat,open,realpath,stat} from 'node:fs/promises';
+import {lstat,open,readFile,realpath,stat} from 'node:fs/promises';
 import {dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {createInterface} from 'node:readline';
 import {randomUUID} from 'node:crypto';
@@ -25,6 +25,9 @@ const budgets=__SERVER_BROWSER_BUDGETS__;
 const mcpEnvironment=__SERVER_BROWSER_MCP_ENVIRONMENT__;
 const metadataPath=process.argv[2];
 if(!metadataPath) throw new Error('Browser session metadata is required.');
+// What Playwright MCP writes (screenshots, request and console files, downloads) is for the daemon user alone, whatever
+// umask the Agent was started with.
+process.umask(0o077);
 const owner=randomUUID();
 let metadata;
 let child;
@@ -46,11 +49,25 @@ async function readJson(file,maxBytes){
   return JSON.parse(buffer.subarray(0,bytesRead).toString('utf8'));
  }finally{await handle.close();}
 }
+function notRunning(){const missing=new Error('服务器浏览器尚未启动或正在恢复，请在 Paseo「服务器浏览器」面板查看状态后重试。');missing.code='ENOENT';return missing;}
+// A session.json left by a crash, a kill or a reboot names ports anyone may hold now. It counts only while the Chromium it
+// records still runs as this user with this workspace's Profile (the plugin's own check); Chromium may rewrite its argv to
+// one space-separated process title.
+async function browserRunning(value){
+ const pid=value.browserPid;if(!Number.isInteger(pid)||pid<1)return false;
+ try{
+  process.kill(pid,0);
+  const info=await lstat('/proc/'+pid);if(process.getuid&&info.uid!==process.getuid())return false;
+  const command=await readFile('/proc/'+pid+'/cmdline','utf8'),args=command.split('\0'),spaced=' '+command.replace(/\0/g,' ')+' ';
+  return ['--user-data-dir='+join(dirname(metadataPath),'profile'),'--remote-debugging-address=127.0.0.1'].every(argument=>args.includes(argument)||spaced.includes(' '+argument+' '));
+ }catch{return false;}
+}
 async function readMetadata(){
  let value;
  try{value=await readJson(metadataPath,65536);}
- catch(error){if(error&&error.code==='ENOENT'){const missing=new Error('服务器浏览器尚未启动或正在恢复，请在 Paseo「服务器浏览器」面板查看状态后重试。');missing.code='ENOENT';throw missing;}throw error;}
+ catch(error){if(error&&error.code==='ENOENT')throw notRunning();throw error;}
  for(const key of ['endpoint','cdpEndpoint']){const url=new URL(value[key]);if(url.protocol!=='http:'||url.hostname!=='127.0.0.1')throw new Error('Browser endpoints must be loopback.');}
+ if(!await browserRunning(value))throw notRunning();
  return value;
 }
 // Saved intent next to the connection file: running, and not already out of automatic recovery attempts.
@@ -94,7 +111,9 @@ async function launch(value){
  previous?.kill('SIGTERM');
  metadata=value;
  const cwd=await workspaceRoot();
- const processChild=spawn(process.execPath,[cli,'--cdp-endpoint',metadata.cdpEndpoint,'--headless','--idle-timeout','0','--no-webmcp','--output-dir',metadata.artifactDir,'--timeout-action','15000','--timeout-navigation','45000'],{stdio:['pipe','pipe','pipe'],env:childEnvironment(),...(cwd?{cwd}:{})});
+ // The CDP address goes in the environment, which only the daemon user can read, not on the command line every local
+ // account can list. (The port itself stays unauthenticated on 127.0.0.1; see the README's security notes.)
+ const processChild=spawn(process.execPath,[cli,'--headless','--idle-timeout','0','--no-webmcp','--output-dir',metadata.artifactDir,'--timeout-action','15000','--timeout-navigation','45000'],{stdio:['pipe','pipe','pipe'],env:{...childEnvironment(),PLAYWRIGHT_MCP_CDP_ENDPOINT:metadata.cdpEndpoint},...(cwd?{cwd}:{})});
  child=processChild;
  processChild.stderr.on('data',chunk=>process.stderr.write(chunk));
  const output=createInterface({input:processChild.stdout});
@@ -135,16 +154,19 @@ const readonlyTools=new Set(['browser_snapshot','browser_find','browser_wait_for
 const writeTools=new Set(['browser_navigate','browser_navigate_back','browser_click','browser_type','browser_fill_form','browser_press_key','browser_select_option','browser_hover','browser_drag','browser_drop','browser_file_upload','browser_handle_dialog','browser_evaluate','browser_resize','browser_emulate_media','browser_tabs']);
 // These read local files and hand them to the page.
 const fileTools=new Set(['browser_file_upload','browser_drop']);
+// A request's own headers and body are never offered: they carry submitted passwords and page-set Authorization headers, and
+// Playwright MCP keeps every request of a tab until it navigates that tab itself. Its full details view lists the headers too.
+const responseParts=new Set(['response-headers','response-body']);
 // Arbitrary Node.js in the Playwright MCP process is not a browsing tool: it would outlive manual takeover and act as the daemon user.
 const unsafeTools=new Set(['browser_run_code_unsafe','browser_run_code']);
-const serverInstructions='This MCP controls the shared browser running on the Linux server, visible in the Paseo Server Browser panel. Prefer it for shared-browser tasks; other browser servers have separate sessions. Manual takeover blocks writes: wait for the user, never bypass with shell or another browser. Use browser_read_page for article text and browser_diagnostics for page/network/login problems. Missing explicit tab targets fail instead of selecting another page. File uploads must be regular files inside the workspace directory.';
+const serverInstructions='This MCP controls the shared browser running on the Linux server, visible in the Paseo Server Browser panel. Prefer it for shared-browser tasks; other browser servers have separate sessions. Manual takeover blocks writes and reading the page structure (browser_snapshot, browser_find, browser_wait_for), network and console: look with browser_take_screenshot and wait for the user, never bypass with shell or another browser. Request headers and bodies are not available; browser_network_request takes part response-headers or response-body. Use browser_read_page for article text and browser_diagnostics for page/network/login problems. Missing explicit tab targets fail instead of selecting another page. File uploads must be regular files inside the workspace directory.';
 const extraTools=[
  {name:'browser_read_page',description:'Read the current or explicit shared tab as clean article Markdown or visible text, optionally filtered by literal text. No navigation or modification. Reports truncation and extraction method.',inputSchema:{type:'object',properties:{tabId:{type:'string'},mode:{type:'string',enum:['article','visible'],default:'article'},selector:{type:'string',maxLength:500},query:{type:'string',maxLength:200},maxChars:{type:'integer',minimum:500,maximum:60000,default:16000}},additionalProperties:false},annotations:{readOnlyHint:true,destructiveHint:false}},
  {name:'browser_diagnostics',description:'Inspect shared browser/runtime and visible network/login signals. Does not navigate, refresh or expose cookies. Accessible pages do not prove successful authentication.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,destructiveHint:false}},
 ];
 function textResult(value){return {content:[{type:'text',text:typeof value==='string'?value:JSON.stringify(value,null,2)}]};}
 function refusal(id,text){send({jsonrpc:'2.0',id,result:{isError:true,content:[{type:'text',text}]}});}
-function toolCatalog(result){return {...result,tools:[...(result.tools||[]).filter(t=>readonlyTools.has(t.name)||writeTools.has(t.name)).map(tool=>tool.name==='browser_tabs'?{...tool,description:'List, create, select or close shared tabs. Prefer stable tabId from list for select/close. Index refers to the last listed snapshot; closed targets fail rather than selecting another page.',inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,tabId:{type:'string',description:'Stable tab ID from browser_tabs list; preferred over index'}}}}:tool),...extraTools]};}
+function toolCatalog(result){return {...result,tools:[...(result.tools||[]).filter(t=>readonlyTools.has(t.name)||writeTools.has(t.name)).map(tool=>tool.name==='browser_handle_dialog'?{...tool,description:'Respond to the pending shared-page dialog. It stays open until explicitly accepted or dismissed; manual takeover blocks Agent responses.',inputSchema:{type:'object',properties:{accept:{type:'boolean'},promptText:{type:'string'},dialogId:{type:'string'}},required:['accept'],additionalProperties:false}}:tool.name==='browser_tabs'?{...tool,description:'List, create, select or close shared tabs. Prefer stable tabId from list for select/close. Index refers to the last listed snapshot; closed targets fail rather than selecting another page.',inputSchema:{...tool.inputSchema,properties:{...tool.inputSchema.properties,tabId:{type:'string',description:'Stable tab ID from browser_tabs list; preferred over index'}}}}:tool),...extraTools]};}
 function rememberTabs(result){const tabs=result.tabs||result.session?.tabs||[];tabSnapshot=new Map(tabs.map((tab,index)=>[index,tab.id]));return result;}
 // Every path must be a regular file (not a symbolic link) whose real path is inside the workspace directory.
 // Relative paths are read from the workspace directory, as Playwright MCP does. The checked real paths are what MCP receives.
@@ -185,6 +207,11 @@ async function handle(message){
  }
  const name=message.params?.name;
  const args=message.params?.arguments||{};
+ if(name==='browser_handle_dialog'){
+  try{const value=await control('dialog',{accept:args.accept,promptText:args.promptText,dialogId:args.dialogId});send({jsonrpc:'2.0',id:message.id,result:textResult(value)});}
+  catch(error){refusal(message.id,error.message||'Browser dialog handling failed.');}
+  return;
+ }
  if(name==='browser_diagnostics'||name==='browser_read_page'){
   try{const value=await control(name==='browser_diagnostics'?'diagnostics':'read',{...args,toolName:name});send({jsonrpc:'2.0',id:message.id,result:textResult(value)});}
   catch(error){refusal(message.id,error.message||'Browser inspection failed.');}
@@ -193,6 +220,7 @@ async function handle(message){
  if(name==='browser_close'||name==='browser_install'){refusal(message.id,'浏览器由 Paseo 共享面板管理。请通过面板停止或启动，不能由 Agent 关闭共享浏览器。');return;}
  if(unsafeTools.has(name)){refusal(message.id,'共享浏览器不提供在 MCP 进程中执行任意代码的工具。请改用 browser_evaluate（只在网页内执行）或其他浏览器工具。');return;}
  if(!readonlyTools.has(name)&&!writeTools.has(name)){refusal(message.id,'共享浏览器不提供工具 '+String(name)+'。请使用工具列表里的浏览器工具。');return;}
+ if(name==='browser_network_request'&&!responseParts.has(args.part)){refusal(message.id,'共享浏览器不提供请求头和请求正文：其中可能有用户提交的密码、登录令牌或 Authorization 头，不带 part 的完整详情也包含请求头。请把 part 设为 response-headers 或 response-body 查看响应。');return;}
  const write=!readonlyTools.has(name)&&!(name==='browser_tabs'&&args.action==='list');
  let lease;
  try{

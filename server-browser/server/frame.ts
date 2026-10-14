@@ -42,16 +42,47 @@ async function capture(cdp:BrowserCDPSession,quality:number,limits?:FrameLimits)
     if(attempt<SCALED_ATTEMPTS-1)await new Promise(resolve=>setTimeout(resolve,SETTLE_MS));
   }
   const bytes=await screenshot(),size=jpegSize(bytes);
-  return {bytes,width:size?.width??0,height:size?.height??0,scale:1};
+  // Device emulation can produce several pixels per CSS point. Pointer coordinates always stay in CSS points.
+  // LayoutMetrics.clientWidth excludes classic scrollbars; innerWidth includes every point shown in the image.
+  const view=await viewportMetrics(cdp);
+  return {bytes,width:view?.width??size?.width??0,height:view?.height??size?.height??0,scale:view&&size?size.width/view.width:1};
 }
 
-/** Capture the actual shared viewport without reapplying a Playwright connection's cached metrics. */
-export async function captureBrowserFrame(context:BrowserContext,page:BrowserPage,quality:number,limits?:FrameLimits):Promise<CapturedFrame>{
-  const cdp=await context.newCDPSession(page);let timer:ReturnType<typeof setTimeout>|undefined;
-  try{
-    return await Promise.race([
-      capture(cdp,quality,limits),
-      new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('浏览器截图超时，请重试。')),10000);}),
-    ]);
-  }finally{if(timer)clearTimeout(timer);await cdp.detach().catch(()=>{});}
+const CAPTURE_MS=10_000,MAX_RESTARTS=4;
+class CaptureRestart extends Error{}
+// A session attached while the tab swaps documents can be refused once; a fresh one a moment later works.
+const SWAPPING=/Not attached to an active page|Target closed|Session closed/i;
+export type CaptureOptions={
+  /** Subscribe to the page committing a new document; returns the unsubscribe. */
+  watchCommits?:(restart:()=>void)=>()=>void;
+  /** Runs as each attempt begins: what the picture belongs to is read here. */
+  onAttempt?:()=>void;
+};
+
+/**
+ * Capture the actual shared viewport without reapplying a Playwright connection's cached metrics. Chromium never answers
+ * a screenshot that is still pending when the page commits a new document (an Enter that submits a form), so a commit
+ * starts the capture again on a fresh session instead of waiting for the time limit; so does a session refused while
+ * the tab is swapping documents.
+ */
+export async function captureBrowserFrame(context:BrowserContext,page:BrowserPage,quality:number,limits?:FrameLimits,options:CaptureOptions={}):Promise<CapturedFrame>{
+  const deadline=Date.now()+CAPTURE_MS;
+  for(let attempt=0;;attempt++){
+    options.onAttempt?.();
+    let cdp:BrowserCDPSession|undefined,timer:ReturnType<typeof setTimeout>|undefined,unwatch=()=>{};
+    try{
+      cdp=await context.newCDPSession(page);
+      return await Promise.race([
+        capture(cdp,quality,limits),
+        new Promise<never>((_,reject)=>{
+          timer=setTimeout(()=>reject(new Error('浏览器截图超时，请重试。')),Math.max(0,deadline-Date.now()));
+          if(attempt<MAX_RESTARTS&&options.watchCommits)unwatch=options.watchCommits(()=>reject(new CaptureRestart()));
+        }),
+      ]);
+    }catch(error){
+      if(error instanceof CaptureRestart)continue;
+      if(attempt>=MAX_RESTARTS||page.isClosed?.()||!SWAPPING.test(error instanceof Error?error.message:'')||Date.now()>=deadline)throw error;
+      await new Promise(resolve=>setTimeout(resolve,60));
+    }finally{if(timer)clearTimeout(timer);unwatch();await cdp?.detach().catch(()=>{});}
+  }
 }

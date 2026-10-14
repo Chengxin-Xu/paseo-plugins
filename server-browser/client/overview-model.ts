@@ -67,7 +67,8 @@ export function agentStatus(agent: LinkedAgent): string {
   if (agent.status === 'running') return '运行中';
   if (agent.status === 'initializing') return '正在启动';
   if (agent.status === 'error') return '出错';
-  if (agent.status === 'closed') return '已结束';
+  // Not loaded (after a daemon restart, say): opening or messaging it loads it again.
+  if (agent.status === 'closed') return '未载入，打开时自动载入';
   if (agent.status === 'idle') return '空闲';
   return '状态待同步';
 }

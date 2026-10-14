@@ -1,15 +1,16 @@
 {
   "name": "server-browser",
   "private": true,
-  "version": "0.9.2",
+  "version": "0.11.2",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --require ./tests/text-loader.cjs --test tests/*.test.ts",
     "test:ui": "playwright test --config tests/playwright.config.mjs",
     "preview:build": "node scripts/preview.mjs",
     "test:agent": "node tests/live-agent-check.mjs",
     "test:ux": "node tests/live-ux-check.mjs",
-    "test:agent-tabs": "node tests/live-agent-tabs-check.mjs"
+    "test:agent-tabs": "node tests/live-agent-tabs-check.mjs",
+    "test:typing": "node tests/live-typing-check.mjs"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.11.1",

@@ -69,7 +69,8 @@ function makeTab(workspace: BrowserWorkspace, item?: BrowserOverviewItem): Brows
   else if (busy) { state = 'browser_busy'; statusLabel = '正在操作浏览器'; }
   else if (agent?.status === 'running' || agent?.status === 'initializing') { state = 'agent_running'; statusLabel = 'Agent 运行中，浏览器等待任务'; }
   else if (agent?.status === 'error') { state = 'error'; statusLabel = 'Agent 出错'; }
-  else if (agent?.status === 'closed') { state = 'offline'; statusLabel = 'Agent 已结束'; }
+  // `closed` is an unloaded Agent (after a daemon restart, say): still linked, it loads when opened.
+  else if (agent?.status === 'closed' && session?.status === 'running') statusLabel = 'Agent 未载入，打开时自动载入';
   else if (session?.status === 'idle' || !session) { state = 'offline'; statusLabel = '浏览器未启动'; }
   const mode = session?.status === 'running' ? session.mode : null;
   return { workspaceId: workspace.id, workspaceTitle, projectKey, projectTitle, identity: projectName(workspace), agentId: agent?.id || session?.agentId || null, title, subtitle: workspaceTitle, kind, state, mode, statusLabel, accessibilityLabel: `${projectTitle}，${title}，工作区 ${workspaceTitle}，${statusLabel}` };

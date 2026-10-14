@@ -33,6 +33,8 @@ export interface IndexRow {
   notice?: { ref: string | null; foreground: boolean };
   /** Boundary kind, for debugging and tests. */
   what?: string;
+  /** 0.6.0: an Agent text's length in lines (about), for the pinned question (shared/prompt-pin.ts). */
+  lines?: number;
   /** Paseo's `turnId` of the entry (0.3.0-local.3): timing never reaches into an earlier turn, and a new turn starts a new segment. */
   turn?: string;
 }
@@ -52,6 +54,11 @@ export interface FoldOptions {
    * shows exactly what it says. Absent = all.
    */
   present?: (key: string) => boolean;
+  /**
+   * 0.6.0-local.3: what the client decided for a repeat notice it projected (true: folded into its row, which needs that
+   * row's result the index may not have); undefined = the index's `foreground`.
+   */
+  noticeMerged?: (key: string) => boolean | undefined;
   /** Keys other Agents claim differently (forks, identical reasoning text): never hidden, never a summary. */
   contested?: (key: string) => boolean;
   /** Known start of a turn (its user message is a row of its own; this is `turn_started` / `activeTurn.startedAt`). */
@@ -182,6 +189,39 @@ function countLooks(steps: readonly Step[]): Array<[LookKey, number]> {
   return [...counts.entries()].sort((left, right) => right[1] - left[1]);
 }
 
+/**
+ * 0.5.0: a tool step the plugin never drew while steps before and after it in the same run were drawn: another plugin
+ * took that row (a card of its own, as Bots does with proposals) or Paseo shows it as something else, so it ends the
+ * segment like any card. A step not drawn at the start of a run is history Paseo has not loaded yet, one at the end is not
+ * drawn yet: both stay members, as before. Reasoning steps never count as foreign: their key follows the text, which
+ * changes while it streams, so a drawn one can look absent for a moment.
+ */
+function splitAtForeign(segment: Segment, options: FoldOptions, starts: ReadonlyMap<number, number | null>): Segment[] {
+  const present = options.present;
+  if (!present || segment.steps.length < 3) return [segment];
+  const drawn = segment.steps.map((step) => present(step.key));
+  const firstDrawn = drawn.indexOf(true);
+  const lastDrawn = drawn.lastIndexOf(true);
+  if (firstDrawn < 0 || lastDrawn - firstDrawn < 2) return [segment];
+  const parts: Segment[] = [];
+  let current: Segment | null = null;
+  for (let index = 0; index < segment.steps.length; index++) {
+    const step = segment.steps[index]!;
+    if (index > firstDrawn && index < lastDrawn && !drawn[index] && step.row.kind === "tool") {
+      if (current) current.followed = true;
+      current = null;
+      continue;
+    }
+    if (!current) {
+      current = { steps: [], turn: segment.turn, startAt: index === 0 ? segment.startAt : starts.get(step.row.seq) ?? null, followed: false };
+      parts.push(current);
+    }
+    current.steps.push(step);
+  }
+  if (current) current.followed = segment.followed;
+  return parts.length > 0 ? parts : [segment];
+}
+
 /** Splits the index into segments of consecutive member rows. */
 function segmentRows(rows: readonly IndexRow[], options: FoldOptions): Segment[] {
   const occurrences = new Map<string, number>();
@@ -208,7 +248,8 @@ function segmentRows(rows: readonly IndexRow[], options: FoldOptions): Segment[]
     }
     const key = row.key!;
     const ref = row.notice?.ref ? toolKey(row.notice.ref) : null;
-    const merged = Boolean(row.notice?.foreground && ref && (tools.has(ref) || options.present?.(ref)));
+    const foreground = row.notice ? (options.noticeMerged?.(key) ?? row.notice.foreground) : false;
+    const merged = Boolean(foreground && ref && (tools.has(ref) || options.present?.(ref)));
     const step: Step = {
       row,
       key,
@@ -229,7 +270,7 @@ function segmentRows(rows: readonly IndexRow[], options: FoldOptions): Segment[]
     }
     current.steps.push(step);
   }
-  return segments;
+  return segments.flatMap((segment) => splitAtForeign(segment, options, starts));
 }
 
 function isPresent(step: Step, options: FoldOptions): boolean {
@@ -274,6 +315,8 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
       if (durationMs !== null && durationMs > MAX_UNWITNESSED_MS && segment.turn === undefined && !segment.steps.some((step) => options.witnessed?.(step.key))) {
         durationMs = null;
       }
+      // 0.6.0: a failed notice (a background sub-agent or command that failed) is not a step, but the summary says so in red.
+      const failedNotices = foldable.filter((step) => step.notice && step.status === "failed" && !step.ambiguous && isPresent(step, options)).length;
       const summary: FoldSummary = {
         segment: id,
         mode: "done",
@@ -281,7 +324,7 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
         steps: loaded.length,
         hidden: loaded.length,
         counts: countLooks(loaded),
-        failed: loaded.filter((step) => step.status === "failed").length,
+        failed: loaded.filter((step) => step.status === "failed").length + failedNotices,
         canceled: loaded.filter((step) => step.status === "canceled").length,
         durationMs,
       };
@@ -296,7 +339,15 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
 
     // Running: keep running, waiting and failed rows plus the two most recent settled ones; fold the finished beginning.
     const live = (step: Step) => step.status === "running" || isWaiting(step, options);
-    const recent = new Set(foldable.filter((step) => !live(step)).slice(-keep));
+    // 0.5.0: only drawn steps use up the two places (a card another plugin draws at the end of the run does not), but
+    // newer steps not drawn yet stay visible too, so a row that just finished is never hidden when it first appears.
+    const recent = new Set<Step>();
+    const settled = foldable.filter((step) => !live(step));
+    for (let index = settled.length - 1, kept = 0; index >= 0 && kept < keep; index--) {
+      const step = settled[index]!;
+      recent.add(step);
+      if (isPresent(step, options)) kept += 1;
+    }
     const earlier = foldable.filter((step) => !recent.has(step) && !step.ambiguous && !live(step) && step.status !== "failed");
     const earlierSteps = earlier.filter((step) => !step.notice && isPresent(step, options));
     if (earlierSteps.length < minHidden) continue;

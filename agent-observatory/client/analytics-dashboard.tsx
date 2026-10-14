@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppState, Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
-import { buildHourlyHeatmap, coveredDuration, sumActivityMetrics, type ActivityMetrics, type AnalyticsSnapshot, type HourlyHeatmapCell, type UsageSample } from "../shared/analytics";
+import { analyticsZoneLabel, buildDailySeries, buildHourlyHeatmap, sumActivityMetrics, type ActivityMetrics, type AnalyticsSnapshot, type HourlyHeatmapCell, type UsageSample } from "../shared/analytics";
 import { formatTokens, type AgentRecord } from "../shared/model";
-import { Banner, Chip, Divider, EmptyState, MetaLine, ProjectMark, Row, Segmented, Sheet, Skeleton, Spacer, fontSize, formatDuration, hairline, hue, hueFor, radius, relativeTime, space } from "./kit";
+import { Badge, Banner, Chip, Divider, EmptyState, MetaLine, ProjectMark, Row, Segmented, Sheet, Skeleton, Spacer, aria, fontSize, formatDuration, hairline, hue, hueFor, radius, relativeTime, space } from "./kit";
 import { ChoiceList, InfoButton, StatRow } from "./ui";
 import { useAnalytics } from "./use-analytics";
 import { isForeground } from "./use-foreground";
@@ -20,6 +20,8 @@ const readableDate = (iso: string) => iso.slice(5, 10).replace("-", "/");
 const percent = (value: number | null) => value === null ? "—" : `${Math.round(value * 100)}%`;
 const valid = (value: number | null | undefined): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const hour = (value: number) => String(value).padStart(2, "0");
+/** 09:00–10:00, or 09:30–10:30 where the zone is off UTC by part of an hour (a cell is the UTC hour starting then). */
+const hourRange = (cell: Pick<HourlyHeatmapCell, "hour" | "minute">) => `${hour(cell.hour)}:${hour(cell.minute)}–${hour((cell.hour + 1) % 24)}:${hour(cell.minute)}`;
 /** Data marks only: one hue at an opacity step, over the surface. */
 function alpha(color: string, opacity: number): string {
   const hex = /^#([0-9a-f]{3})$/i.test(color) ? `#${color.slice(1).split("").map(c => c + c).join("")}` : color;
@@ -41,22 +43,30 @@ function Detail({ theme, title, lines }: { theme: PluginTheme; title: string; li
     <MetaLine theme={theme} numberOfLines={2} parts={lines} />
   </View>;
 }
-function Swatch({ theme, color, label, outline = false }: { theme: PluginTheme; color: string; label: string; outline?: boolean }) {
+/** A legend mark: filled, outlined (muted), or framed like the heatmap's daylight-saving cells (`frame`). */
+function Swatch({ theme, color, label, outline = false, frame }: { theme: PluginTheme; color: string; label: string; outline?: boolean; frame?: { color: string; dashed?: boolean } }) {
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 1 }}>
-    <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: outline ? "transparent" : color, borderWidth: outline ? hairline : 0, borderColor: theme.colors.foregroundMuted }} />
+    <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: outline || frame ? "transparent" : color, borderWidth: frame ? 1 : outline ? hairline : 0,
+      borderStyle: frame?.dashed ? "dashed" : "solid", borderColor: frame?.color ?? theme.colors.foregroundMuted }} />
     <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{label}</Text>
   </View>;
 }
 
+/**
+ * 活跃时段: the last 7 local days × 24 local hours of the device's clock (opus-F40). The hour clocks go back holds two
+ * hours (outlined, summed); the hour they skip does not exist (dashed, no value, not a zero).
+ */
 function Heatmap({ theme, analytics, compact, now, days = 7 }: { theme: PluginTheme; analytics: AnalyticsSnapshot; compact: boolean; now: number; days?: number }) {
   const { colors } = theme;
   const [metric, setMetric] = useState<HeatMetric>("eventCount");
   const [selected, setSelected] = useState<string | null>(null);
   const [width, setWidth] = useState(0);
-  const cells = useMemo(() => buildHourlyHeatmap(analytics.hours, { now, startedAt: analytics.startedAt, metric, days, coverageIntervals: analytics.coverageIntervals ?? [] }), [analytics, metric, now, days]);
+  const cells = useMemo(() => buildHourlyHeatmap(analytics.hours, { now, startedAt: analytics.startedAt, metric, days, coverageIntervals: analytics.coverageIntervals ?? [],
+    zone: analytics.zone ?? null, hourlyFrom: analytics.hourlyFrom }), [analytics, metric, now, days]);
   const maximum = Math.max(1, ...cells.map(cell => cell.value ?? 0));
   const peak = cells.reduce<HourlyHeatmapCell | null>((best, cell) => (cell.value ?? 0) > (best?.value ?? 0) ? cell : best, null);
-  const active = cells.find(cell => cell.bucketStart === selected) ?? null;
+  const active = cells.find(cell => cell.key === selected) ?? null;
+  const doubledHour = cells.some(cell => cell.utcHours > 1), skippedHour = cells.some(cell => !cell.exists);
   // Activity is green, output violet, failures red — each metric keeps its own colour ramp.
   const mark = hue(theme, metric === "failed" ? "red" : metric === "outputTokens" ? "violet" : "green");
   const fill = (cell: HourlyHeatmapCell) => cell.value === null ? "transparent" : cell.value === 0 ? colors.surface2 : alpha(mark, 0.22 + Math.sqrt(cell.value / maximum) * 0.78);
@@ -79,9 +89,12 @@ function Heatmap({ theme, analytics, compact, now, days = 7 }: { theme: PluginTh
         {Array.from({ length: columns }, (_, column) => {
           const cell = cellAt(row, column);
           if (!cell) return <View key={column} style={{ width: cellWidth, height: cellHeight }} />;
-          const isSelected = selected === cell.bucketStart;
-          return <Pressable key={cell.bucketStart} accessibilityRole="button" accessibilityLabel={`${cell.day} ${cell.hour} 时 UTC，${metricNames[metric]} ${cell.value === null ? "无观测数据" : cell.value}`} accessibilityState={{ selected: isSelected }} onPress={() => setSelected(cell.bucketStart)}
-            style={state => ({ width: cellWidth, height: cellHeight, borderRadius: 3, backgroundColor: fill(cell), borderWidth: isSelected ? 1.5 : cell.value === null ? hairline : 0, borderColor: isSelected ? colors.foreground : colors.border, opacity: state.pressed ? 0.7 : cell.coverage === "partial" ? 0.6 : 1 })} />;
+          const isSelected = selected === cell.key, doubled = cell.utcHours > 1;
+          const label = `${cell.day} ${hourRange(cell)}，${!cell.exists ? "夏令时开始跳过的一小时，不存在" : `${doubled ? "夏令时结束重复的一小时（两小时合计），" : ""}${metricNames[metric]} ${cell.value === null ? "无观测数据" : cell.value}`}`;
+          return <Pressable key={cell.key} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: isSelected }} {...aria({ pressed: isSelected })} onPress={() => setSelected(cell.key)}
+            style={state => ({ width: cellWidth, height: cellHeight, borderRadius: 3, backgroundColor: cell.exists ? fill(cell) : "transparent",
+              borderWidth: isSelected ? 1.5 : !cell.exists || doubled ? 1 : cell.value === null ? hairline : 0, borderStyle: cell.exists ? "solid" : "dashed",
+              borderColor: isSelected ? colors.foreground : doubled ? hue(theme, "amber") : colors.border, opacity: state.pressed ? 0.7 : cell.coverage === "partial" ? 0.6 : 1 })} />;
         })}
       </View>) : <View style={{ height: rows * (cellHeight + gap) }} />}
     </View>
@@ -92,28 +105,24 @@ function Heatmap({ theme, analytics, compact, now, days = 7 }: { theme: PluginTh
         <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>多</Text>
       </View>
       <Swatch theme={theme} color={colors.border} label="未采集" outline />
+      {doubledHour ? <Swatch theme={theme} color={hue(theme, "amber")} label="回拨重复的一小时（合计）" frame={{ color: hue(theme, "amber") }} /> : null}
+      {skippedHour ? <Swatch theme={theme} color={colors.border} label="拨快跳过、不存在" frame={{ color: colors.foregroundMuted, dashed: true }} /> : null}
     </View>
-    {shown ? <Detail theme={theme} title={`${active ? "" : "高峰 · "}${shown.day} · ${hour(shown.hour)}:00–${hour((shown.hour + 1) % 24)}:00 UTC`}
-      lines={shown.value === null ? [shown.isFuture ? "这个时间段尚未到来。" : !shown.observed ? "这个时间段没有在线采集覆盖，不能视为没有执行。" : "该时段未收到 provider 用量快照。"]
-        : [`事件 ${shown.metrics?.eventCount ?? 0}`, `完成 ${shown.metrics?.completed ?? 0} / 失败 ${shown.metrics?.failed ?? 0}`, `输出峰值 ${formatTokens(shown.metrics?.outputTokens)}`, shown.coveredMs === null ? null : `在线 ${formatDuration(shown.coveredMs)}${shown.coverage === "partial" ? "（部分）" : ""}`]} /> : null}
+    {shown ? <Detail theme={theme} title={`${active ? "" : "高峰 · "}${shown.day} · ${hourRange(shown)}`}
+      lines={!shown.exists ? ["夏令时开始，时钟跳过了这一小时，这个时段不存在。"]
+        : shown.value === null ? [shown.isFuture ? "这个时间段尚未到来。" : analytics.hourlyFrom && shown.bucketStart && shown.bucketStart < analytics.hourlyFrom ? "升级前只保留了 7 天的逐小时数据，这个时段没有记录。" : !shown.observed ? "这个时间段没有在线采集覆盖，不能视为没有执行。" : "该时段未收到 provider 用量快照。"]
+        : [shown.utcHours > 1 ? "夏令时结束，这一小时出现两次，合计显示" : null, `事件 ${shown.metrics?.eventCount ?? 0}`, `完成 ${shown.metrics?.completed ?? 0} / 失败 ${shown.metrics?.failed ?? 0}`, `输出峰值 ${formatTokens(shown.metrics?.outputTokens)}`, shown.coveredMs === null ? null : `在线 ${formatDuration(shown.coveredMs)}${shown.coverage === "partial" ? "（部分）" : ""}`]} /> : null}
     {metric === "outputTokens" ? <MetaLine theme={theme} numberOfLines={2} parts={["颜色表示提供方报告的输出 tokens 快照峰值，非该小时累计消耗。"]} /> : null}
   </Section>;
 }
 
+/** 每日结果: the last 7 / 28 local days of the device's clock, each from its own local midnight (opus-F40). */
 function DailyChart({ theme, analytics, now, dayCount = 28 }: { theme: PluginTheme; analytics: AnalyticsSnapshot; now: number; dayCount?: number }) {
   const { colors } = theme;
   const [selected, setSelected] = useState<string | null>(null);
   const [width, setWidth] = useState(0);
-  const days = useMemo(() => {
-    const dayMs = 86_400_000, end = Math.floor(now / dayMs) * dayMs;
-    const buckets = new Map(analytics.days.map(bucket => [bucket.bucketStart.slice(0, 10), bucket]));
-    return Array.from({ length: dayCount }, (_, index) => {
-      const at = end - (dayCount - 1 - index) * dayMs, day = new Date(at).toISOString().slice(0, 10);
-      const coveredMs = coveredDuration(analytics.coverageIntervals ?? [], at, Math.min(at + dayMs, now));
-      return { day, observed: coveredMs > 0, coveredMs, bucket: buckets.get(day) };
-    });
-  }, [analytics, now, dayCount]);
-  const total = (bucket?: { completed: number; failed: number; canceled: number }) => (bucket?.completed ?? 0) + (bucket?.failed ?? 0) + (bucket?.canceled ?? 0);
+  const days = useMemo(() => buildDailySeries(analytics, { now, count: dayCount }), [analytics, now, dayCount]);
+  const total = (bucket: { completed: number; failed: number; canceled: number } | null) => (bucket?.completed ?? 0) + (bucket?.failed ?? 0) + (bucket?.canceled ?? 0);
   const peak = Math.max(1, ...days.map(({ bucket }) => total(bucket)));
   const plot = 128, headroom = 20, columnWidth = width ? width / dayCount : 0, barWidth = Math.max(4, Math.min(16, columnWidth * 0.5));
   const success = hue(theme, "green"), danger = hue(theme, "red"), neutral = hue(theme, "gray");
@@ -126,12 +135,12 @@ function DailyChart({ theme, analytics, now, dayCount = 28 }: { theme: PluginThe
           <Text style={{ color: colors.foregroundMuted, fontSize: 11, fontVariant: ["tabular-nums"] }}>{peak}</Text>
           <View style={{ flex: 1, height: hairline, backgroundColor: colors.border }} />
         </View>
-        {columnWidth ? days.map(({ day, observed, bucket }, dayIndex) => {
+        {columnWidth ? days.map(({ day, observed, bucket, approximate }, dayIndex) => {
           const segments = [[bucket?.canceled ?? 0, neutral], [bucket?.failed ?? 0, danger], [bucket?.completed ?? 0, success]] as const;
           const visible = segments.filter(([value]) => value > 0);
-          return <Pressable key={day} accessibilityRole="button" accessibilityLabel={`${day} UTC，${observed ? `完成 ${bucket?.completed ?? 0}，失败 ${bucket?.failed ?? 0}，取消 ${bucket?.canceled ?? 0}` : "未观测"}`} accessibilityState={{ selected: active.day === day }} onPress={() => setSelected(day)}
+          return <Pressable key={day} accessibilityRole="button" accessibilityLabel={`${day}，${observed || bucket ? `完成 ${bucket?.completed ?? 0}，失败 ${bucket?.failed ?? 0}，取消 ${bucket?.canceled ?? 0}${approximate ? "，按升级前的 UTC 日估算" : ""}` : "未观测"}`} accessibilityState={{ selected: active.day === day }} {...aria({ pressed: active.day === day })} onPress={() => setSelected(day)}
             style={state => ({ width: columnWidth, height: plot, alignItems: "center", justifyContent: "flex-end", borderRadius: radius.sm, backgroundColor: active.day === day ? colors.surface1 : state.pressed ? colors.surface1 : "transparent" })}>
-            {visible.length ? <Grow delay={dayIndex * 14} style={{ alignItems: "center" }}>{visible.map(([value, color], index) => <View key={index} style={{ width: barWidth, height: Math.max(2, value / peak * (plot - headroom)), marginTop: index ? 2 : 0, backgroundColor: color, borderTopLeftRadius: index === 0 ? 4 : 0, borderTopRightRadius: index === 0 ? 4 : 0 }} />)}</Grow>
+            {visible.length ? <Grow delay={dayIndex * 14} style={{ alignItems: "center", opacity: approximate ? 0.55 : 1 }}>{visible.map(([value, color], index) => <View key={index} style={{ width: barWidth, height: Math.max(2, value / peak * (plot - headroom)), marginTop: index ? 2 : 0, backgroundColor: color, borderTopLeftRadius: index === 0 ? 4 : 0, borderTopRightRadius: index === 0 ? 4 : 0 }} />)}</Grow>
               : <View style={{ width: barWidth, height: 2, backgroundColor: observed ? colors.surface2 : "transparent" }} />}
           </Pressable>;
         }) : null}
@@ -142,7 +151,8 @@ function DailyChart({ theme, analytics, now, dayCount = 28 }: { theme: PluginThe
         </View>) : null}
       </View>
     </View>
-    <Detail theme={theme} title={`${active.day} UTC`} lines={active.observed ? [`完成 ${active.bucket?.completed ?? 0}`, `失败 ${active.bucket?.failed ?? 0}`, `取消 ${active.bucket?.canceled ?? 0}`, `执行 ${formatDuration(active.bucket?.runMs ?? 0)}`, `在线 ${formatDuration(active.coveredMs)}`] : ["尚未开始观测，不能推断为零次执行。"]} />
+    <Detail theme={theme} title={active.day} lines={active.observed || active.bucket ? [`完成 ${active.bucket?.completed ?? 0}`, `失败 ${active.bucket?.failed ?? 0}`, `取消 ${active.bucket?.canceled ?? 0}`, `执行 ${formatDuration(active.bucket?.runMs ?? 0)}`, `在线 ${formatDuration(active.coveredMs)}`,
+      active.approximate ? "升级前按 UTC 自然日记录，日界和本机差几小时" : null] : ["尚未开始观测，不能推断为零次执行。"]} />
   </Section>;
 }
 
@@ -225,17 +235,28 @@ export function AnalyticsDashboard({ theme, hostId = "local", compact, agents, a
     return () => { clearInterval(timer); listener.remove(); };
   }, []);
   const days = Number(period);
-  const totals = useMemo(() => { const from = Math.floor(now / 86_400_000) * 86_400_000 - (days - 1) * 86_400_000; return sumActivityMetrics((analytics?.days ?? []).filter(day => Date.parse(day.bucketStart) >= from && Date.parse(day.bucketStart) <= now)); }, [analytics, now, days]);
+  // The period is that many local days, each from the device's local midnight (the server cut them in its clock).
+  const series = useMemo(() => analytics ? buildDailySeries(analytics, { now, count: days }) : [], [analytics, now, days]);
+  const totals = useMemo(() => sumActivityMetrics(series.flatMap(day => day.bucket ? [day.bucket] : [])), [series]);
+  const approximate = series.some(day => day.approximate);
+  const zone = analytics?.zone ?? null, zoneLabel = analyticsZoneLabel(zone, now);
   const success = totals.completed + totals.failed > 0 ? totals.completed / (totals.completed + totals.failed) : null;
   const inset = compact ? space.lg : space.xl, twoColumns = !compact && width >= 900;
   const projectName = projectOptions.find(([id]) => id === projectId)?.[1] ?? "全部项目";
+  const info = [
+    zone ? `日期和小时以${zone.name ? `本机时区 ${zone.name} ` : zoneLabel}为准：每个小时按它当时的偏移归到本地的日期和钟点，夏令时切换前后的历史也对得上；时钟回拨那天重复的那一小时是两小时合计（琥珀框），拨快那天跳过的那一小时标为不存在（虚线框）。` : "这次没有取得本机时区，日期和小时按 UTC 划分。",
+    "只累加插件观测到的生命周期事件。", "灰框表示没有在线采集覆盖的时段，不代表没有执行；半透明表示只覆盖了部分时段。",
+    "tokens、缓存与费用只展示提供方报告的快照或峰值，不是累计消耗或账单。", "项目画像覆盖保留历史内的全部数据，不随图表时间范围变化。",
+    ...(approximate ? ["较早的几天来自升级前按 UTC 自然日记录的数据，柱子半透明，日界和本机最多差几个小时；四周后全部按本机时区。"] : []),
+  ];
   return <><ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingHorizontal: inset, paddingTop: space.md, paddingBottom: space.xxl }} keyboardShouldPersistTaps="handled">
     <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ gap: space.xl, width: "100%", maxWidth: 1080, alignSelf: "center" }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
         <Chip theme={theme} label={projectName} icon="Folder" tone={projectId !== "all" ? hueFor(projectName) : undefined} selected={projectId !== "all"} onPress={() => setProjectSheet(true)} />
         <Segmented theme={theme} size="sm" value={period} onChange={setPeriod} accessibilityLabel="时间范围" options={[{ value: "7", label: "7 天" }, { value: "28", label: "28 天" }]} />
+        {analytics && !zone ? <Badge theme={theme} label="按 UTC" tone="amber" icon="Globe" /> : null}
         <Spacer />
-        <InfoButton theme={theme} title="关于数据洞察" lines={["图表按 UTC 计时，只累加插件观测到的生命周期事件。", "灰框表示没有在线采集覆盖的时段，不代表没有执行；半透明表示只覆盖了部分时段。", "tokens、缓存与费用只展示提供方报告的快照或峰值，不是累计消耗或账单。", "项目画像覆盖保留历史内的全部数据，不随图表时间范围变化。"]} />
+        <InfoButton theme={theme} title="关于数据洞察" lines={info} />
       </View>
       {error ? <Banner theme={theme} tone="danger" message={`数据暂时无法同步：${error}`} /> : null}
       {analytics?.persistenceError ? <Banner theme={theme} tone="warning" message={analytics.persistenceError} /> : null}
@@ -256,7 +277,7 @@ export function AnalyticsDashboard({ theme, hostId = "local", compact, agents, a
           {!twoColumns ? <View style={{ width: "100%" }}><Divider theme={theme} /></View> : null}
           <View style={{ flex: twoColumns ? 1 : undefined, width: twoColumns ? undefined : "100%", minWidth: 0 }}><UsageSnapshots theme={theme} analytics={analytics} agents={agents} onSelectAgent={onSelectAgent} /></View>
         </View>
-        <MetaLine theme={theme} numberOfLines={2} parts={[`观测始于 ${new Date(analytics.startedAt).toLocaleDateString("zh-CN")}`, `最近观测 ${relativeTime(analytics.updatedAt, now)}`, "UTC"]} />
+        <MetaLine theme={theme} numberOfLines={2} parts={[`观测始于 ${new Date(analytics.startedAt).toLocaleDateString("zh-CN")}`, `最近观测 ${relativeTime(analytics.updatedAt, now)}`, zone ? `按${zoneLabel}` : "按 UTC（没有取得本机时区）"]} />
       </>}
     </View>
   </ScrollView>

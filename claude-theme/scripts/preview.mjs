@@ -1,5 +1,11 @@
 // Renders the theme family as a swatch sheet so the palettes can be judged by eye, not only
-// by contrast numbers. Writes preview/dist/themes.png, which is git-ignored.
+// by contrast numbers. Models Paseo 0.11.1's real light/dark surface expansion:
+//   - Light: sidebar = control (surfaceSidebar), selected = border (surface3), workspace = background (surface0)
+//   - Dark:  sidebar = background (surfaceSidebar), selected = control (surface2), workspace = raised (surface1)
+//   - Both:  user message bubble = border (surface3), composer input = control (surface2),
+//            placeholder / timestamps / toolbar icons = ring (surface4 / foregroundExtraMuted),
+//            primary button text = background (accentForeground) on accent.
+// Writes preview/dist/themes.png, which is git-ignored.
 // Usage: npm run preview
 import { deflateSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -7,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const { THEMES } = await import(join(root, "shared/palette.ts"));
+const { THEMES, resolveHostSurfaces } = await import(join(root, "shared/palette.ts"));
 
 const CARD = { width: 380, height: 232 };
 const GAP = 20;
@@ -40,32 +46,54 @@ function fill(x0, y0, width, height, hex, radius = 0) {
 
 THEMES.forEach((theme, index) => {
   const { colors } = theme;
+  const host = resolveHostSurfaces(theme);
   const x = GAP + (index % COLUMNS) * (CARD.width + GAP);
   const y = GAP + Math.floor(index / COLUMNS) * (CARD.height + GAP);
 
-  fill(x, y, CARD.width, CARD.height, colors.background, 10);
-  fill(x + 12, y + 12, CARD.width - 24, 3, colors.border); // top rule
+  // Page frame (surface0) and top border rule.
+  fill(x, y, CARD.width, CARD.height, host.surface0, 10);
+  fill(x + 12, y + 12, CARD.width - 24, 3, colors.border);
 
-  // Sidebar of "rows", one highlighted with the accent, mimicking a selected item.
-  fill(x + 12, y + 26, 96, CARD.height - 38, colors.raised, 8);
+  // Sidebar (`surfaceSidebar`: `control` in light mode, `background` in dark mode).
+  fill(x + 12, y + 26, 96, CARD.height - 38, host.surfaceSidebar, 8);
+  // Section header in `foregroundExtraMuted` (`ring`).
+  fill(x + 20, y + 34, 44, 5, host.foregroundExtraMuted);
   for (let row = 0; row < 5; row += 1) {
-    const rowY = y + 38 + row * 20;
-    fill(x + 20, rowY, row === 1 ? 60 : 72, 8, row === 1 ? colors.accent : colors.mutedForeground);
+    const rowY = y + 46 + row * 22;
+    if (row === 1) {
+      // Selected sidebar row (`surfaceSidebarSelected`: `border` in light, `control` in dark).
+      fill(x + 16, rowY - 4, 88, 16, host.surfaceSidebarSelected, 4);
+      fill(x + 20, rowY, 52, 8, colors.accent);
+    } else {
+      fill(x + 20, rowY, 54, 7, host.foregroundMuted);
+    }
+    // Trailing timestamp in `foregroundExtraMuted` (`ring`).
+    fill(x + 82, rowY + 1, 16, 5, host.foregroundExtraMuted);
   }
 
-  // Main card with a heading, body lines and a muted caption.
-  fill(x + 120, y + 26, CARD.width - 132, 116, colors.raised, 8);
-  fill(x + 132, y + 40, 120, 11, colors.foreground);
-  fill(x + 132, y + 60, CARD.width - 160, 7, colors.mutedForeground);
-  fill(x + 132, y + 74, CARD.width - 186, 7, colors.mutedForeground);
-  fill(x + 132, y + 88, CARD.width - 210, 7, colors.mutedForeground);
-  fill(x + 132, y + 110, 78, 20, colors.accent, 6); // primary button
-  fill(x + 220, y + 110, 78, 20, colors.control, 6); // secondary button
+  // Workspace pane (`surfaceWorkspace`: `background` in light mode, `raised` in dark mode).
+  fill(x + 120, y + 26, CARD.width - 132, 116, host.surfaceWorkspace, 8);
+  // User message bubble (`surface3` = `border`) with `foreground` text and `ring` timestamp.
+  fill(x + 188, y + 34, CARD.width - 212, 24, host.userBubble, 6);
+  fill(x + 196, y + 42, 96, 8, host.foreground);
+  fill(x + 304, y + 43, 28, 6, host.foregroundExtraMuted);
 
-  // Composer input with a focus ring underneath.
-  fill(x + 120, y + 152, CARD.width - 132, 34, colors.control, 8);
-  fill(x + 132, y + 165, 132, 8, colors.mutedForeground);
-  fill(x + 120, y + 190, CARD.width - 132, 2, colors.ring);
+  // Assistant card (`surface1` = `raised`) with heading, muted lines, primary & secondary buttons.
+  fill(x + 128, y + 64, CARD.width - 148, 72, host.surface1, 6);
+  fill(x + 138, y + 72, 116, 10, host.foreground);
+  fill(x + 138, y + 88, CARD.width - 176, 6, host.foregroundMuted);
+  fill(x + 138, y + 98, CARD.width - 204, 6, host.foregroundMuted);
+  // Primary button (`accent` fill with `accentForeground` = `background` label).
+  fill(x + 138, y + 110, 74, 20, host.accent, 6);
+  fill(x + 152, y + 117, 46, 6, host.accentForeground);
+  // Secondary button (`control` fill with `foreground` label).
+  fill(x + 220, y + 110, 74, 20, host.input, 6);
+  fill(x + 234, y + 117, 46, 6, host.foreground);
+
+  // Composer input (`input` = `control`) with placeholder (`surface4` = `ring`) and focus ring.
+  fill(x + 120, y + 152, CARD.width - 132, 34, host.input, 8);
+  fill(x + 132, y + 165, 132, 8, host.surface4);
+  fill(x + 120, y + 190, CARD.width - 132, 2, host.ring);
 
   // Palette strip: every token in registration order.
   const tokens = [

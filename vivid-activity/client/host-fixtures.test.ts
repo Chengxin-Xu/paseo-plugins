@@ -13,6 +13,7 @@ import { transformToolCall } from "./transform";
 import { takeoverParts } from "./takeover";
 import { lookFor, mcpParts, pendingCallIds, zh } from "../shared/vivid-model";
 import { normalizeToolCallDetail, paseoToolResult, unwrapProviderOutput } from "../shared/presentation";
+import { wireRowFromEntry } from "../shared/fold-index";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtures = JSON.parse(readFileSync(path.join(here, "../test-fixtures/host-items-0.11.1.json"), "utf8")) as {
@@ -45,12 +46,17 @@ describe("Claude Code rows from the 0.11.1 Claude provider", () => {
     expect(data(byName("claude-all", "Write")).presentation.label).toBe("Write");
     expect(data(byName("claude-all", "WebFetch")).presentation.label).toBe("Fetch URL");
   });
-  it("MCP calls get a dedicated GitHub view or an MCP look", () => {
+  it("MCP calls get a dedicated GitHub view or an MCP look; Bots keeps its proposal cards (0.5.0)", () => {
     const github = byName("claude-all", "mcp__github__search_code");
     expect(data(github).presentation.label).toBe("GitHub Code Search");
     expect(mcpParts("mcp__bots__propose_skill")).toEqual({ server: "bots", tool: "propose_skill" });
     const bots = byName("claude-bots", "mcp__bots__propose_skill");
-    expect(lookFor(bots.name, bots.detail, data(bots).presentation as never)).toBe("mcp");
+    // Finished with a proposal id, the call is Bots' card: left alone here, a segment boundary in the fold index.
+    expect(transform(bots)).toBeUndefined();
+    expect(wireRowFromEntry({ seqStart: 7, timestamp: "2026-01-01T00:00:00.000Z", provider: "claude", item: bots })).toMatchObject({ k: "b", w: "bots-proposal" });
+    // While it runs it is an ordinary MCP row.
+    const running = { ...bots, status: "running" } as ToolCallTimelineItem;
+    expect(lookFor(running.name, running.detail, data(running).presentation as never)).toBe("mcp");
   });
   it("hands ExitPlanMode / plan_approval back to Paseo's plan card", () => {
     expect(transform(byName("claude-all", "plan_approval"))).toBeUndefined();

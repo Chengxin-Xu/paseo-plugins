@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -190,3 +190,55 @@ test("a tracked log replaced by a symlink is not followed", async () => fixture(
     assert.equal(ingester.roots[0].error, null);
   } finally { await rm(outside, { recursive: true, force: true }); }
 }));
+
+const codexUsage = (total: number) => ({ input_tokens: 100 * total, cached_input_tokens: 40, output_tokens: 20 * total, total_tokens: 120 * total });
+const codexMeta = (id: string, source: unknown = "vscode") => ({ type: "session_meta", timestamp: iso(NOW - 60_000), payload: { id, cwd: "/repo/demo", source, instructions: "PRIVATE_INSTRUCTIONS" } });
+const codexRecord = (thread: string, response: string, at: number, total: number) => ({ type: "token_usage_record", timestamp: iso(at),
+  payload: { thread_id: thread, response_id: response, usage: codexUsage(1), thread_token_usage: codexUsage(total) } });
+
+test("Codex subagent rollouts are subagent calls of their own thread and name the thread that spawned them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tokens-subagent-")), calls = new Map<string, LedgerCall>(), threads: Array<[string, string]> = [];
+  const ingester = new TokenIngester({ roots: [{ source: "codex", path: root }], now: () => NOW, onCall: call => { calls.set(call.key, call); }, onThread: (child, parent) => { threads.push([child, parent]); } });
+  try {
+    const spawn = { subagent: { thread_spawn: { parent_thread_id: "parent-thread", depth: 1, agent_nickname: "Helper", agent_role: null } } };
+    await writeFile(join(root, "rollout-2026-10-01T00-00-00-child.jsonl"), line(codexMeta("child-thread", spawn)) +
+      // A record inherited from the parent thread stays the parent's (and is deduplicated against its own log).
+      line(codexRecord("parent-thread", "inherited", NOW - 3000, 1)) + line(codexRecord("child-thread", "own", NOW - 1000, 2)));
+    await writeFile(join(root, "rollout-2026-10-01T00-00-00-parent.jsonl"), line(codexMeta("parent-thread")) + line(codexRecord("parent-thread", "inherited", NOW - 3000, 1)));
+    await ingester.backfillAll();
+    const rows = [...calls.values()].sort((a, b) => a.at - b.at);
+    assert.deepEqual(rows.map(call => [call.sessionId, call.subagent]), [["parent-thread", false], ["child-thread", true]]);
+    assert.ok(threads.some(([child, parent]) => child === "child-thread" && parent === "parent-thread"));
+    const child = [...ingester.files.values()].find(file => file.path.endsWith("child.jsonl"))!;
+    assert.equal(child.state.parentThread, "parent-thread"); assert.ok(child.state.links.includes("parent-thread"));
+    assert.equal([...ingester.files.values()].find(file => file.path.endsWith("parent.jsonl"))!.state.parentThread, null);
+    assert.ok(!JSON.stringify([...ingester.files.values()]).includes("PRIVATE_"));
+  } finally { await ingester.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an archived Codex session keeps its read position when its rollout moves to archived_sessions", async () => {
+  const home = await mkdtemp(join(tmpdir(), "tokens-archive-")), sessions = join(home, "sessions"), archive = join(home, "archived_sessions"), calls = new Map<string, LedgerCall>();
+  const ingester = new TokenIngester({ roots: [{ source: "codex", path: sessions }, { source: "codex", path: archive }], now: () => NOW, onCall: call => { calls.set(call.key, call); } });
+  try {
+    await mkdir(join(sessions, "2026", "10", "01"), { recursive: true }); await mkdir(archive);
+    const name = "rollout-2026-10-01T00-00-00-moved.jsonl", before = join(sessions, "2026", "10", "01", name), after = join(archive, name);
+    await writeFile(before, line(codexMeta("moved-thread")) + line(codexRecord("moved-thread", "r1", NOW - 5000, 1)));
+    await ingester.backfillAll();
+    const offset = ingester.files.get(before)!.offset, read = ingester.diagnostics.bytesRead;
+    await rename(before, after);
+    await ingester.poll(true);
+    assert.equal(ingester.files.has(before), false); assert.equal(ingester.files.get(after)!.offset, offset);
+    assert.equal(ingester.files.get(after)!.root, 1);
+    assert.equal(ingester.diagnostics.bytesRead, read, "the moved log is not read again");
+    await appendFile(after, line(codexRecord("moved-thread", "r2", NOW - 1000, 2)));
+    await ingester.poll(true);
+    assert.deepEqual([...calls.values()].map(call => call.key).length, 2);
+    assert.equal(ingester.diagnostics.duplicates, 0);
+    // Copied to another inode instead (another file system): read again, every call recognised as already counted.
+    const copy = join(archive, "rollout-2026-10-01T00-00-00-copied.jsonl");
+    await writeFile(copy, await readFile(after)); await rm(after);
+    await ingester.poll(true);
+    assert.equal(calls.size, 2); assert.ok(ingester.diagnostics.duplicates >= 2);
+    assert.ok(ingester.files.has(copy));
+  } finally { await ingester.close(); await rm(home, { recursive: true, force: true }); }
+});

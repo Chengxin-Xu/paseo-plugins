@@ -1,5 +1,5 @@
 import type { AgentRecord } from "./model";
-import { isUnreadCompletion, timestamp } from "./model";
+import { isUnreadCompletion, stopUnseen, timestamp } from "./model";
 export type TimeRange = "24h" | "7d" | "30d" | "all";
 export const DEFAULT_TIME_RANGE: TimeRange = "7d";
 export const rangeLabels: Record<TimeRange, string> = { "24h": "24 小时", "7d": "最近 7 天", "30d": "最近 30 天", all: "全部时间" };
@@ -14,10 +14,18 @@ export function historyActivityTimestamp(agent: AgentRecord): number | null {
     .filter((value): value is number => value !== null && archiveTime !== null && value < archiveTime);
   return retained.length ? Math.max(...retained) : timestamp(agent.createdAt);
 }
+/**
+ * Never hidden by the time range: live work, unread results, and what still waits for you (an error or a stop not seen yet,
+ * a closed session's cut-off turn included, a question not answered), so 需要处理 counts the same here as in the sidebar badge.
+ */
+function pinned(agent: AgentRecord): boolean {
+  if (agent.archivedAt) return false;
+  if (["running", "waiting", "initializing"].includes(agent.status) || isUnreadCompletion(agent) || stopUnseen(agent)) return true;
+  return agent.status === "error" ? agent.requiresAttention !== false : agent.requiresAttention === true && agent.status === "idle";
+}
 export function withinRange(agent: AgentRecord, range: TimeRange = DEFAULT_TIME_RANGE, now = Date.now()): boolean {
   if (range === "all") return true;
-  if (!agent.archivedAt && ["running", "waiting", "initializing"].includes(agent.status)) return true;
-  if (isUnreadCompletion(agent)) return true;
+  if (pinned(agent)) return true;
   if (!Number.isFinite(now)) return false;
   const since = now - (range === "24h" ? 1 : range === "7d" ? 7 : 30) * 86400_000;
   const time = historyActivityTimestamp(agent);
@@ -30,7 +38,7 @@ export function nextRangeChange(agents: readonly AgentRecord[], range: TimeRange
   const span = rangeSpan(range);
   let next = Infinity;
   for (const agent of agents) {
-    if (!agent.archivedAt && ["running", "waiting", "initializing"].includes(agent.status) || isUnreadCompletion(agent)) continue;
+    if (pinned(agent)) continue;
     const time = historyActivityTimestamp(agent);
     if (time === null) continue;
     if (time > now) next = Math.min(next, time);

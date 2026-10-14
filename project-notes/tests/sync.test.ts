@@ -9,6 +9,25 @@ const board = (projectId: string, revision: number, title = "条目"): BoardSnap
 const projects = [{ id: "__inbox__", name: "随手记", path: "" }, { id: "prj_a", name: "A", path: "/a" }];
 
 describe("mergeDashboard", () => {
+  it("accepts a lower-revision backup and removes boards in authoritative full and delta replies", () => {
+    const current: DashboardData = { revision: "old", changedAt: 1, projects, boards: [board("prj_a", 5), board("gone", 2)] };
+    const full = mergeDashboard(current, { mode: "full", revision: "backup", projects, boards: [board("prj_a", 3, "备份")] }, 2);
+    expect(full.boards).toEqual([board("prj_a", 3, "备份")]);
+    const delta = mergeDashboard(current, { mode: "delta", baseRevision: "old", revision: "backup", removedProjectIds: ["gone"], boards: [board("prj_a", 3, "备份")] }, 2);
+    expect(delta.boards).toEqual(full.boards);
+    expect(mergeDashboard(delta, { unchanged: true, revision: "backup" }, 3)).toBe(delta);
+  });
+
+  it("discards a response predating a local write, then accepts a fresh disk snapshot", () => {
+    const current: DashboardData = { revision: "old", changedAt: 1, projects, boards: [board("prj_a", 1)] };
+    const written = patchDashboard(current, board("prj_a", 2, "本地保存"), 2);
+    const stale = { mode: "full" as const, revision: "stale", projects, boards: [board("prj_a", 1)] };
+    expect(mergeDashboard(written, stale, 3, 0)).toBe(written);
+    expect(mergeDashboard(written, { ...stale, revision: "restore" }, 4, 1).boards[0]!.revision).toBe(1);
+    const mismatch = mergeDashboard(written, { mode: "delta", baseRevision: "unknown", revision: "new", boards: [] }, 5, 1);
+    expect(mismatch.revision).toBeNull();
+    expect(mismatch.boards).toEqual(written.boards);
+  });
   it("returns the very same object for an unchanged reply, so nothing re-renders", () => {
     const current: DashboardData = { revision: "r1", changedAt: 1, projects, boards: [board("prj_a", 1)] };
     expect(mergeDashboard(current, { unchanged: true, revision: "r1" }, 99)).toBe(current);
@@ -38,12 +57,14 @@ describe("mergeDashboard", () => {
     expect(next.boards).toHaveLength(1);
   });
 
-  it("patches a write result without claiming a newer server revision", () => {
+  it("patches a write result while retaining the server revision and forcing only that board into the next delta", () => {
     const current: DashboardData = { revision: "r1", changedAt: 1, projects, boards: [board("prj_a", 1)] };
     const next = patchDashboard(current, board("prj_a", 2, "刚保存"), 10);
     expect(next.revision).toBe("r1");
+    expect(next.pendingProjectIds).toEqual(["prj_a"]);
     expect(next.changedAt).toBe(10);
     expect(next.boards[0]!.items[0]!.title).toBe("刚保存");
+    expect(mergeDashboard(next, { mode: "full", revision: "r1", projects, boards: [board("prj_a", 1, "备份")] }, 11, next.writeEpoch).boards[0]!.items[0]!.title).toBe("备份");
     expect(patchDashboard(undefined, board("prj_a", 1), 4)).toMatchObject({ revision: null, projects: [], boards: [board("prj_a", 1)] });
   });
 });

@@ -1,8 +1,8 @@
 import { tokenInput, tokenTotal, type TokenLive, type TokenLiveAgent } from "../../shared/tokens";
 import type { StatsDirectory } from "../stats-directory";
-import type { StatsDirectoryAgent } from "../stats-types";
-import { sessionKey, type TokenData } from "./data";
-import { dayOf, iso, type LedgerCall } from "./types";
+import { statsLocalDay, statsZone, type StatsDirectoryAgent } from "../stats-types";
+import { modelCalls, rootSession, sessionKey, type TokenData } from "./data";
+import { iso, type LedgerCall } from "./types";
 
 const BUCKET = 10_000;
 const bucketOf = (at: number): number => Math.floor(at / BUCKET) * BUCKET;
@@ -25,13 +25,17 @@ function spread(call: LedgerCall, start: number, output: number[]): void {
   for (let index = first; index <= last; index++) output[index] += portion(call, start + index * BUCKET, start + (index + 1) * BUCKET);
 }
 
-/** Pure in-memory projection. Directory refresh is deliberately outside this latency-critical path. */
-export function buildTokenLive(data: TokenData, input: { windowMinutes: 30 | 60; utcOffsetMinutes: number; detail: "full" | "agents" },
+/**
+ * Pure in-memory projection. Directory refresh is deliberately outside this latency-critical path. `today` starts at the
+ * device's local midnight (2.14: its IANA zone when known, as on the Token page), counting each UTC hour on the local
+ * day it starts in.
+ */
+export function buildTokenLive(data: TokenData, input: { windowMinutes: 30 | 60; utcOffsetMinutes: number; timeZone?: string | null; detail: "full" | "agents" },
   now: number, directory: StatsDirectory): TokenLive {
   const count = input.windowMinutes * 6, start = bucketOf(now) - (count - 1) * BUCKET, miniStart = bucketOf(now) - 11 * BUCKET;
   const output = input.detail === "full" ? Array<number>(count).fill(0) : [], read = output.map(() => 0), calls = output.map(() => 0);
-  const localDay = dayOf(now + input.utcOffsetMinutes * 60_000), today = { total: 0, output: 0, calls: 0 };
-  for (const bucket of data.hours.values()) if (bucket.at <= now && dayOf(bucket.at + input.utcOffsetMinutes * 60_000) === localDay) {
+  const zone = statsZone(input.utcOffsetMinutes, input.timeZone, now), localDay = statsLocalDay(now, zone), today = { total: 0, output: 0, calls: 0 };
+  for (const bucket of data.hours.values()) if (bucket.at <= now && statsLocalDay(bucket.at, zone) === localDay) {
     today.total += tokenTotal(bucket); today.output += bucket.output; today.calls += bucket.calls;
   }
   const agents = new Map<string, StatsDirectoryAgent>();
@@ -42,24 +46,27 @@ export function buildTokenLive(data: TokenData, input: { windowMinutes: 30 | 60;
   const rows = new Map<string, TokenLiveAgent>();
   let nowOutput = 0, nowInput = 0, nowCalls = 0;
   for (const call of data.recent.values()) {
-    if (call.at > now) continue;
+    // A Grok record is a whole turn, logged when it ends with no response time: dropped into one 10 s bucket it would read
+    // as a burst of thousands of tokens per second. It counts in today's totals (the hour buckets), not in the live speed.
+    if (call.at > now || call.source === "grok") continue;
     const endIndex = Math.floor((call.at - start) / BUCKET);
     if (input.detail === "full") {
       spread(call, start, output);
-      if (endIndex >= 0 && endIndex < count) { read[endIndex] += tokenInput(call); calls[endIndex]++; }
+      if (endIndex >= 0 && endIndex < count) { read[endIndex] += tokenInput(call); calls[endIndex] += modelCalls(call); }
     }
     if (call.at >= now - 60_000) {
-      nowOutput += portion(call, now - 60_000, now); nowInput += tokenInput(call); nowCalls++;
+      nowOutput += portion(call, now - 60_000, now); nowInput += tokenInput(call); nowCalls += modelCalls(call);
     }
     if (call.at < now - 600_000) continue;
-    const key = sessionKey(call.source, call.sessionId), agent = agents.get(call.sessionId);
+    // A Codex subagent thread's output shows on its parent session's row.
+    const root = rootSession(data, call.source, call.sessionId), key = sessionKey(call.source, root), agent = agents.get(root);
     let row = rows.get(key);
     if (!row) {
-      row = { sessionId: call.sessionId, source: call.source, agentId: agent?.id ?? null, title: text(agent?.title ?? null), model: text(call.model),
+      row = { sessionId: root, source: call.source, agentId: agent?.id ?? null, title: text(agent?.title ?? null), model: text(call.model),
         outputPerSec: 0, recent: Array<number>(12).fill(0), output10m: 0, calls10m: 0, lastCallAt: iso(call.at) };
       rows.set(key, row);
     }
-    row.output10m += call.output; row.calls10m++;
+    row.output10m += call.output; row.calls10m += modelCalls(call);
     row.outputPerSec += portion(call, now - 120_000, now) / 120;
     spread(call, miniStart, row.recent);
     if (iso(call.at) >= row.lastCallAt) { row.lastCallAt = iso(call.at); row.model = text(call.model); }

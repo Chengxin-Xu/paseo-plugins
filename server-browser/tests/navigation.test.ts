@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { blockedHostResolverRules, isBlockedHost, isSecretParameter, normalizeNavigationUrl, restorableUrl } from '../server/navigation';
+import { blockedHostResolverRules, isBlockedHost, isSecretParameter, normalizeNavigationUrl, restorableUrl, withoutCredentials } from '../server/navigation';
 
 test('navigation refuses link-local and cloud metadata addresses in every spelling URL parsing accepts', () => {
   for (const url of [
@@ -33,4 +33,22 @@ test('restored tab addresses lose fragments and one-time credentials but keep or
   assert.equal(restorableUrl('about:blank'), null);
   for (const name of ['code', 'State', 'csrf-token', 'oauth_verifier', 'SAMLResponse', 'X-Goog-Signature', 'client_secret', 'sessionid', 'auth_code', 'otp_code']) assert.equal(isSecretParameter(name), true, name);
   for (const name of ['q', 'page', 'lang', 'keyword', 'ticket_id', 'country_code', 'authuser', 'tab', 'view', 'utm_source']) assert.equal(isSecretParameter(name), false, name);
+});
+
+test('viewer and Agent addresses lose only the account and password; query and fragment stay', () => {
+  assert.equal(withoutCredentials('https://user:pw@example.com/a?code=1#x'), 'https://example.com/a?code=1#x');
+  assert.equal(withoutCredentials('https://example.com/a?b=1'), 'https://example.com/a?b=1');
+  assert.equal(withoutCredentials('about:blank'), 'about:blank');
+  assert.equal(withoutCredentials('not a url'), 'not a url');
+});
+
+test('saved tab addresses drop verification codes, PINs, hashes, assertions and session path parameters (a name heuristic)', () => {
+  const origin = 'https://app.example.com';
+  const dropped = ['passWord', 'PassWord', 'passWd', 'userPassWord', 'pWd', 'verification_code', 'verify_code', 'sms_code', 'mfa_code', 'confirmation_code', 'invite_code', 'reset_code', 'oobCode', 'verificationCode', 'code_challenge', 'totp', 'totp_code', 'passcode', 'pin', 'pin_code', 'pass', 'hash', 'hmac', 'x_hmac_sha256', 'assertion', 'client_assertion', 'PHPSESSID', 'ott'];
+  for (const name of dropped) assert.equal(restorableUrl(`${origin}/verify?${name}=123456&lang=en`), `${origin}/verify?lang=en`, name);
+  const kept = ['country_code', 'zipCode', 'postal_code', 'currency_code', 'language_code', 'shipping', 'hashtag', 'passenger', 'spinner', 'bottom', 'zipcode'];
+  for (const name of kept) assert.equal(restorableUrl(`${origin}/search?${name}=1`), `${origin}/search?${name}=1`, name);
+  assert.equal(restorableUrl(`${origin}/app;jsessionid=ABC123/item;color=red?q=1`), `${origin}/app/item;color=red?q=1`);
+  assert.equal(restorableUrl(`${origin}/cart;JSESSIONID=ABC123`), `${origin}/cart`);
+  assert.equal(restorableUrl(`${origin}/auth/action?mode=resetPassword&oobCode=abc&apiKey=k&continueUrl=%2Fhome`), `${origin}/auth/action?mode=resetPassword&continueUrl=%2Fhome`);
 });

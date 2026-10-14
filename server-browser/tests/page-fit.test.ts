@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { chromium, type Browser } from 'playwright-core';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 import { defaultRuntimeRoot } from '../server/runtime';
 import { computeViewportLayout, mapViewportPoint } from '../client/viewport-geometry';
 

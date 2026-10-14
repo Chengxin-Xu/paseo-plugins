@@ -1,7 +1,7 @@
 {
   "id": "terracotta-themes",
   "name": "Terracotta Themes",
-  "description": "Six color themes, three dark and three light, derived from one perceptual tonal ladder.",
+  "description": "Twelve color themes, six dark and six light, derived from one perceptual tonal ladder.",
   "icon": "assets/icon.png",
   "media": [
     "assets/screenshot-overview.png",

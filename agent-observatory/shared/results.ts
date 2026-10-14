@@ -3,7 +3,10 @@ import { z } from "zod";
 export const resultExcerptSchema = z.object({ text: z.string().max(60_000), ref: z.string(), at: z.string().nullable(), truncated: z.boolean() });
 export const agentResultSchema = z.object({
   agentId: z.string(), capturedAt: z.string(), epoch: z.string(),
-  source: z.object({ lastUserMessageAt: z.string().nullable(), attentionTimestamp: z.string().nullable() }).optional(),
+  // Which turn it was read for (shared/model.ts `resultSource`): the host's tokens, and the completion and heartbeat round they
+  // cannot name on their own (codex-obs-attn-F1). Older servers send only the tokens.
+  source: z.object({ lastUserMessageAt: z.string().nullable(), attentionTimestamp: z.string().nullable(),
+    completionAt: z.string().nullable().optional(), roundEndedAt: z.string().nullable().optional() }).optional(),
   firstInput: resultExcerptSchema.extend({ completeOrigin: z.boolean() }).nullable(),
   latestUserInput: resultExcerptSchema.nullable(), latestReply: resultExcerptSchema.nullable(),
   isRunning: z.boolean(), isFinal: z.boolean(),

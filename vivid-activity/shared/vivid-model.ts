@@ -4,7 +4,8 @@
  */
 export type Hue = "blue" | "sky" | "cyan" | "teal" | "green" | "lime" | "amber" | "orange" | "red" | "pink" | "fuchsia" | "violet" | "indigo" | "gray";
 
-export type RowStatus = "running" | "waiting" | "completed" | "failed" | "canceled";
+/** waiting: a permission request on the row (等你批准); question: the row asks you something (等你回答, 0.6.0). */
+export type RowStatus = "running" | "waiting" | "question" | "completed" | "failed" | "canceled";
 export type LookKey = "think" | "read" | "list" | "edit" | "write" | "shell" | "search" | "web" | "agent" | "plan" | "mcp" | "paseo" | "ask" | "skill" | "other";
 
 /**
@@ -30,6 +31,21 @@ export const looks: Record<LookKey, { label: string; icon: string; hue: Hue }> =
   other: { label: "其他", icon: "Puzzle", hue: "gray" },
 };
 
+/**
+ * 0.5.0：「鲜明」调色板里上游详情视图的类别色（shared/presentation.ts 的 ActivityCategory）。图标色和底色都从这一张表取，
+ * 不再各写一份：0.4 的子 Agent 图标是品红、底色却写成了绿色。null 是「其他」，用主题的弱前景色和 surface2。
+ */
+export const VIVID_CATEGORY_HUES = {
+  reasoning: looks.think.hue,
+  shell: looks.shell.hue,
+  file: looks.read.hue,
+  search: looks.search.hue,
+  agent: looks.agent.hue,
+  plan: looks.plan.hue,
+  communication: looks.mcp.hue,
+  unknown: null,
+} as const satisfies Record<string, Hue | null>;
+
 /** 本地补丁：折叠摘要里的类别计数名，与行标题一致（读取、编辑、命令……）。 */
 export const COUNT_LABELS: Record<LookKey, string> = {
   think: "思考", read: "读取", list: "列目录", edit: "编辑", write: "写入", shell: "命令", search: "搜索", web: "联网",
@@ -43,6 +59,7 @@ export function isLookKey(value: string): value is LookKey {
 export const statusLooks: Record<RowStatus, { label: string; hue: Hue | "muted"; icon: string }> = {
   running: { label: "运行中", hue: "blue", icon: "LoaderCircle" },
   waiting: { label: "等你批准", hue: "amber", icon: "Hand" },
+  question: { label: "等你回答", hue: "amber", icon: "MessageCircleQuestionMark" },
   completed: { label: "完成", hue: "green", icon: "Check" },
   failed: { label: "失败", hue: "red", icon: "X" },
   canceled: { label: "已取消", hue: "muted", icon: "CircleSlash2" },
@@ -124,6 +141,8 @@ const LABELS: Record<string, string> = {
   "Supervisor Status": "子 Agent 状态", "Subagent Supervisor": "子 Agent 监管",
   Wait: "等待", "Wait for Background Work": "等待后台任务", "Wait Subscription": "订阅等待", "Wait for All": "等待全部",
   "Wait for Run": "等待运行", "Bg Wait": "后台等待", "Wait for Agent": "等待 Agent",
+  // 0.5.0: Pi's sub-agent tools (shared/pi-subagents.ts piSubagentPresentation).
+  "Dispatch Agent": "派出子 Agent", "Steer Agent": "引导子 Agent", "Check Agent Result": "查看子 Agent 结果", "Agent Result": "子 Agent 结果",
   "GitHub Actions Details": "GitHub Actions 详情", "GitHub Actions List": "GitHub Actions 列表", "GitHub Actions Run": "GitHub Actions 运行",
   "GitHub File": "GitHub 文件", "GitHub Job Logs": "GitHub 作业日志", "GitHub Pull Request": "GitHub PR", "GitHub Code Search": "GitHub 代码搜索",
   "GitHub Repository Search": "GitHub 仓库搜索",
@@ -180,21 +199,52 @@ export function lookFor(name: string, detail: DetailLike, presentation: { catego
   return "other";
 }
 
-/** `mcp__github__search_code` → { server: "github", tool: "search_code" }. */
+/**
+ * `mcp__github__search_code` → { server: "github", tool: "search_code" }: the server up to the first `__` after it, as
+ * `/^mcp__(.+?)__(.+)$/` read it. 0.6.0-local.2 (codex-vivid-F1): found by index; the lazy regex retried past every later
+ * `__` when the name held a line break.
+ */
 export function mcpParts(name: string): { server: string; tool: string } | null {
-  const match = /^mcp__(.+?)__(.+)$/.exec(name.trim());
-  return match ? { server: match[1]!, tool: match[2]! } : null;
+  const trimmed = name.trim();
+  const at = trimmed.startsWith("mcp__") && !/[\n\r\u2028\u2029]/.test(trimmed) ? trimmed.indexOf("__", 6) : -1;
+  return at >= 0 && at + 2 < trimmed.length ? { server: trimmed.slice(5, at), tool: trimmed.slice(at + 2) } : null;
 }
 
-type PendingLike = { metadata?: Record<string, unknown> } | null | undefined;
-/** Claude 的权限请求带 metadata.toolUseId，ACP 的带 metadata.toolCallId；二者都等于时间线里的 callId。 */
+type PendingLike = { kind?: unknown; metadata?: Record<string, unknown> } | null | undefined;
+/**
+ * Where a permission request names the timeline row it belongs to: Claude `metadata.toolUseId`, ACP `metadata.toolCallId`,
+ * Codex app-server `metadata.itemId` (0.6.0, opus-F48: its command, file-change and request_user_input requests carry only the
+ * item id, and the row's callId is that same item.id), OpenCode questions `metadata.callID`. Each equals the row's callId.
+ */
+const ROW_ID_KEYS = ["toolUseId", "toolCallId", "itemId", "callID"] as const;
+
+function rowIdsOf(request: PendingLike): string[] {
+  const meta = request?.metadata ?? {};
+  return ROW_ID_KEYS.map((key) => meta[key]).filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
 export function pendingCallIds(pending: readonly PendingLike[] | null | undefined): ReadonlySet<string> {
+  return pendingCalls(pending).ids;
+}
+
+/**
+ * 0.6.0 (opus-F54): the rows waiting for you, and which of them ask a question (`kind: "question"`: Claude's
+ * AskUserQuestion, Codex request_user_input, OpenCode/Pi/OMP questions) rather than ask for approval. `onlyQuestions`:
+ * every pending request is a question, for a row that cannot be matched by id.
+ */
+export function pendingCalls(pending: readonly PendingLike[] | null | undefined): { ids: ReadonlySet<string>; questions: ReadonlySet<string>; onlyQuestions: boolean } {
   const ids = new Set<string>();
+  const questions = new Set<string>();
+  let onlyQuestions = (pending?.length ?? 0) > 0;
   for (const request of pending ?? []) {
-    const meta = request?.metadata ?? {};
-    for (const key of ["toolUseId", "toolCallId"]) if (typeof meta[key] === "string" && meta[key]) ids.add(meta[key] as string);
+    const question = request?.kind === "question";
+    if (!question) onlyQuestions = false;
+    for (const id of rowIdsOf(request)) {
+      ids.add(id);
+      if (question) questions.add(id);
+    }
   }
-  return ids;
+  return { ids, questions, onlyQuestions };
 }
 
 /**
@@ -206,7 +256,7 @@ export function rowMotion(input: { status: RowStatus; statusChanges: number; fin
   return {
     spin: input.status === "running",
     sweep: input.status === "running",
-    ping: input.status === "waiting",
+    ping: input.status === "waiting" || input.status === "question",
     breathe: input.live,
     pop: input.statusChanges > 0,
     flash: input.status === "completed" && input.finishes > 0,
@@ -215,7 +265,7 @@ export function rowMotion(input: { status: RowStatus; statusChanges: number; fin
 
 /** Row wash behind live and attention states; light themes need a little more tint to read on white. */
 export function washAlpha(status: RowStatus, dark: boolean): number {
-  if (status !== "running" && status !== "waiting" && status !== "failed") return 0;
+  if (status !== "running" && status !== "waiting" && status !== "question" && status !== "failed") return 0;
   return dark ? 0.14 : 0.1;
 }
 
@@ -230,6 +280,7 @@ const STATUS_ZH: Readonly<Record<string, string>> = {
   worktree: "工作树", local: "本地", none: "不隔离", directory: "目录",
   tool: "工具", plan: "计划", question: "提问", mode: "模式", other: "其他",
   finished: "已结束", permission: "等待审批", closed_by_user: "已关闭",
+  background: "后台运行",
 };
 export function statusLabel(value: string): string {
   return STATUS_ZH[value] ?? STATUS_ZH[value.toLowerCase()] ?? value;
@@ -249,6 +300,6 @@ export function failureText(detail: { type?: unknown; exitCode?: unknown } | nul
 /** Screen-reader label: action, what it touched (the path as shown), and the state when it needs attention. */
 export function rowLabel({ expanded, title, summary, fileDisplay, status }: { expanded: boolean; title: string; summary?: string; fileDisplay?: { dir?: string; base: string }; status?: RowStatus }): string {
   const target = fileDisplay ? (fileDisplay.dir ? `${fileDisplay.dir}/${fileDisplay.base}` : fileDisplay.base) : summary;
-  const state = status === "waiting" || status === "failed" || status === "running" ? `，${statusLooks[status].label}` : "";
+  const state = status === "waiting" || status === "question" || status === "failed" || status === "running" ? `，${statusLooks[status].label}` : "";
   return `${expanded ? "收起" : "展开"} ${title}${target ? ` ${target}` : ""}${state}`;
 }

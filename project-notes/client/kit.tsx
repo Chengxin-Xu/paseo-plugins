@@ -1,11 +1,12 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useState, type ReactNode } from "react";
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type StyleProp, type TextInput as NativeTextInput, type ViewStyle } from "react-native";
 
 /**
  * Paseo-native UI kit. Every plugin in this collection carries an identical copy (plugins install
- * independently), so change all copies together and never fork one plugin's copy.
+ * independently). The copies are generated from the collection's `kit/` directory: edit that source and sync,
+ * never one plugin's copy.
  * Scales mirror the host app: 4-pt spacing, 12/13/14/16 type, 8 px control radius, 28/32 px controls,
  * regular-weight button text, one primary action per view. Surfaces, text and the primary button come from the
  * host theme; states and categories use the vivid palette below (`hue`, `toneColor`, `hueFor`).
@@ -17,6 +18,12 @@ export const control = { sm: 28, md: 32 } as const;
 export const hairline = Platform.OS === "web" ? 1 : StyleSheet.hairlineWidth;
 /** Extends 28–32 px controls to a comfortable touch target without changing their look. */
 const touchSlop = { top: 8, bottom: 8, left: 6, right: 6 };
+/**
+ * react-native-web ignores `accessibilityState`, so selected / pressed / expanded / busy never reach the DOM.
+ * Pass the matching `aria-*` attribute next to it (React Native's types lack some of them, hence the cast).
+ */
+export const aria = (attributes: Record<string, boolean | string | undefined>): object =>
+  Object.fromEntries(Object.entries(attributes).filter(([, value]) => value !== undefined).map(([key, value]) => [`aria-${key}`, value]));
 
 /** Semantic tones, or any palette hue for categories (e.g. `tone="violet"` for prompts). */
 export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger" | Hue;
@@ -60,13 +67,17 @@ export function hue(theme: PluginTheme, name: Hue, use: "solid" | "text" | "soft
   return use === "text" ? dark ? darkText : lightText : use === "soft" ? withAlpha(solid, dark ? 0.22 : 0.13) : use === "line" ? withAlpha(solid, dark ? 0.55 : 0.4) : solid;
 }
 /**
- * Linear gradient background. Native (new architecture) uses `experimental_backgroundImage`, web a CSS `backgroundImage`;
- * both keep `backgroundColor` as the fallback. `stops` are palette hues or colours; `alpha` fades hue stops.
+ * Linear gradient background. Native (new architecture) uses `experimental_backgroundImage`, web a CSS `backgroundImage`.
+ * `stops` are palette hues or colours; `alpha` fades hue stops. An opaque gradient keeps its first stop as the
+ * `backgroundColor` fallback; a translucent wash falls back to transparent (a solid first stop would tint the whole
+ * view wherever the image does not draw). `fallback` overrides either choice.
  */
-export function gradient(theme: PluginTheme, stops: readonly (Hue | string)[], options: { angle?: number; alpha?: number } = {}): ViewStyle {
+export function gradient(theme: PluginTheme, stops: readonly (Hue | string)[], options: { angle?: number; alpha?: number; fallback?: string } = {}): ViewStyle {
   const colors = stops.map(stop => { const color = stop in palette ? hue(theme, stop as Hue) : stop; return options.alpha === undefined ? color : withAlpha(color, options.alpha); });
   const css = `linear-gradient(${options.angle ?? 135}deg, ${colors.join(", ")})`;
-  return { backgroundColor: colors[0], ...(Platform.OS === "web" ? { backgroundImage: css } : { experimental_backgroundImage: css }) } as ViewStyle;
+  const translucent = colors.some(color => /^#[0-9a-f]{8}$/i.test(color) && !/ff$/i.test(color) || color === "transparent");
+  const fallback = options.fallback ?? (translucent ? "transparent" : colors[0]);
+  return { backgroundColor: fallback, ...(Platform.OS === "web" ? { backgroundImage: css } : { experimental_backgroundImage: css }) } as ViewStyle;
 }
 /** Soft coloured glow around a mark or card (dark themes glow more). */
 export function glow(theme: PluginTheme, color: string, radius = 14): ViewStyle {
@@ -108,6 +119,7 @@ export function useCompactLayout(hostCompact: boolean, breakpoint = 760): { comp
 }
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+/** `grow` fills the free space of a row from the label's own width; a basis of 0 would collapse it inside a column on native. */
 export function Button({ theme, label, icon, onPress, variant = "secondary", size = "md", disabled = false, busy = false, grow = false, tone, accessibilityLabel, testID }: {
   theme: PluginTheme; label: string; icon?: string; onPress: () => void; variant?: ButtonVariant; size?: "sm" | "md";
   disabled?: boolean; busy?: boolean; grow?: boolean; accessibilityLabel?: string; testID?: string;
@@ -118,27 +130,27 @@ export function Button({ theme, label, icon, onPress, variant = "secondary", siz
   const background = variant === "primary" ? colors.accent : tint ? toneColor(theme, tint, "soft") : variant === "secondary" ? colors.surface2 : "transparent";
   const foreground = variant === "primary" ? colors.accentForeground : tint ? toneColor(theme, tint, "text") : variant === "ghost" ? colors.foregroundMuted : colors.foreground;
   const inactive = disabled || busy;
-  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: inactive, busy }} disabled={inactive} onPress={onPress} hitSlop={touchSlop}
+  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: inactive, busy }} {...aria({ busy: busy || undefined })} disabled={inactive} onPress={onPress} hitSlop={touchSlop}
     style={state => {
       const { pressed, hovered } = hoverable(state);
       return [{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.xs + 2, minHeight: size === "sm" ? control.sm : control.md, paddingHorizontal: size === "sm" ? 10 : space.md, borderRadius: radius.md, backgroundColor: background, borderWidth: tint ? hairline : 0, borderColor: tint ? toneColor(theme, tint, "line") : colors.border, opacity: disabled ? 0.45 : pressed ? 0.8 : 1 },
-        hovered && !inactive && variant !== "primary" && !tint ? { backgroundColor: variant === "secondary" ? colors.surface2 : colors.surface1 } : null, grow ? { flexGrow: 1, flexBasis: 0 } : null];
+        hovered && !inactive && variant !== "primary" && !tint ? { backgroundColor: variant === "secondary" ? colors.surface2 : colors.surface1 } : null, grow ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : null];
     }}>
     {busy ? <ActivityIndicator size="small" color={foreground} /> : icon ? <Icon name={icon} size={size === "sm" ? 14 : 16} color={foreground} /> : null}
     <Text numberOfLines={1} style={{ color: foreground, fontSize: size === "sm" ? fontSize.small : fontSize.body, fontWeight: variant === "primary" ? "500" : "400" }}>{label}</Text>
   </Pressable>;
 }
 
-/** Square icon-only button; `label` is required for screen readers and tooltips. */
-export function IconButton({ theme, icon, label, onPress, active = false, disabled = false, tone, size = "md", badge, testID }: {
+/** Square icon-only button; `label` is required for screen readers and tooltips. Passing `active` makes it a toggle. */
+export function IconButton({ theme, icon, label, onPress, active, disabled = false, tone, size = "md", badge, testID }: {
   theme: PluginTheme; icon: string; label: string; onPress: () => void; active?: boolean; disabled?: boolean; tone?: Tone; size?: "sm" | "md"; badge?: boolean; testID?: string;
 }) {
-  const { colors } = theme, edge = size === "sm" ? control.sm : control.md;
-  const color = tone ? toneColor(theme, tone) : active ? colors.foreground : colors.foregroundMuted;
-  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled, selected: active }} disabled={disabled} onPress={onPress} hitSlop={touchSlop}
+  const { colors } = theme, edge = size === "sm" ? control.sm : control.md, on = active ?? false;
+  const color = tone ? toneColor(theme, tone) : on ? colors.foreground : colors.foregroundMuted;
+  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled, selected: on }} {...aria({ pressed: active })} disabled={disabled} onPress={onPress} hitSlop={touchSlop}
     style={state => {
       const { pressed, hovered } = hoverable(state);
-      return { width: edge, height: edge, alignItems: "center", justifyContent: "center", borderRadius: radius.md, backgroundColor: active ? colors.surface2 : hovered || pressed ? colors.surface1 : "transparent", opacity: disabled ? 0.4 : pressed ? 0.8 : 1 };
+      return { width: edge, height: edge, alignItems: "center", justifyContent: "center", borderRadius: radius.md, backgroundColor: on ? colors.surface2 : hovered || pressed ? colors.surface1 : "transparent", opacity: disabled ? 0.4 : pressed ? 0.8 : 1 };
     }}>
     <Icon name={icon} size={size === "sm" ? 14 : 16} color={color} />
     {badge ? <View style={{ position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: 4, backgroundColor: colors.accent, borderWidth: 1.5, borderColor: colors.surface0 }} /> : null}
@@ -166,7 +178,7 @@ export function Segmented<Value extends string>({ theme, value, options, onChang
   return <View accessibilityRole="tablist" accessibilityLabel={accessibilityLabel} style={{ flexDirection: "row", alignSelf: "flex-start", padding: space.xxs, gap: space.xxs, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
     {options.map(option => {
       const selected = option.value === value;
-      return <Pressable key={option.value} accessibilityRole="tab" accessibilityLabel={option.count === undefined ? option.label : `${option.label} ${option.count}`} accessibilityState={{ selected }} onPress={() => onChange(option.value)} hitSlop={{ top: 6, bottom: 6 }}
+      return <Pressable key={option.value} accessibilityRole="tab" accessibilityLabel={option.count === undefined ? option.label : `${option.label} ${option.count}`} accessibilityState={{ selected }} aria-selected={selected} onPress={() => onChange(option.value)} hitSlop={{ top: 6, bottom: 6 }}
         style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minHeight: size === "sm" ? 24 : control.md - 2 * space.xxs, paddingHorizontal: size === "sm" ? space.sm : 10, borderRadius: radius.sm, backgroundColor: selected ? colors.surface0 : hoverable(state).hovered ? colors.surface1 : "transparent", borderWidth: selected ? hairline : 0, borderColor: colors.border })}>
         {option.icon ? <Icon name={option.icon} size={14} color={option.tone ? toneColor(theme, option.tone, "mark") : selected ? colors.foreground : colors.foregroundMuted} /> : null}
         <Text numberOfLines={1} style={{ color: selected ? colors.foreground : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: selected ? "500" : "400" }}>{option.label}</Text>
@@ -182,7 +194,7 @@ export function Tabs<Value extends string>({ theme, value, options, onChange }: 
   return <View accessibilityRole="tablist" style={{ flexDirection: "row", gap: space.lg, borderBottomWidth: hairline, borderBottomColor: colors.border }}>
     {options.map(option => {
       const selected = option.value === value;
-      return <Pressable key={option.value} accessibilityRole="tab" accessibilityLabel={option.count === undefined ? option.label : `${option.label} ${option.count}`} accessibilityState={{ selected }} onPress={() => onChange(option.value)}
+      return <Pressable key={option.value} accessibilityRole="tab" accessibilityLabel={option.count === undefined ? option.label : `${option.label} ${option.count}`} accessibilityState={{ selected }} aria-selected={selected} onPress={() => onChange(option.value)}
         style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minHeight: 40, marginBottom: -hairline, borderBottomWidth: 2, borderBottomColor: selected ? option.tone ? toneColor(theme, option.tone, "mark") : colors.foreground : "transparent" }}>
         {option.icon ? <Icon name={option.icon} size={14} color={option.tone ? toneColor(theme, option.tone, "mark") : selected ? colors.foreground : colors.foregroundMuted} /> : null}
         <Text style={{ color: selected ? colors.foreground : colors.foregroundMuted, fontSize: fontSize.body, fontWeight: selected ? "500" : "400" }}>{option.label}</Text>
@@ -201,14 +213,21 @@ export function Chip({ theme, label, icon, count, tone, selected = false, onPres
     {tone && !icon ? <StatusDot theme={theme} tone={tone} size={7} /> : icon ? <Icon name={icon} size={13} color={color} /> : null}
     <Text numberOfLines={1} style={{ color: selected || tone ? colors.foreground : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: selected ? "500" : "400" }}>{label}</Text>
     {count !== undefined ? <Text style={{ color: tone && tone !== "neutral" && count ? toneColor(theme, tone) : colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: tone && count ? "600" : "400", fontVariant: ["tabular-nums"] }}>{count}</Text> : null}
-    {onRemove ? <Pressable accessibilityRole="button" accessibilityLabel={`移除 ${label}`} onPress={onRemove} hitSlop={8}><Icon name="X" size={12} color={colors.foregroundMuted} /></Pressable> : null}
   </>;
+  const remove = onRemove ? <Pressable accessibilityRole="button" accessibilityLabel={`移除 ${label}`} onPress={onRemove} hitSlop={8}><Icon name="X" size={12} color={colors.foregroundMuted} /></Pressable> : null;
   const tinted = tone && tone !== "neutral";
   const style = (hovered = false): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minHeight: control.sm, paddingHorizontal: 10, borderRadius: radius.full, borderWidth: hairline,
     borderColor: selected ? tinted ? toneColor(theme, tone, "mark") : colors.foregroundMuted : tinted ? toneColor(theme, tone, "line") : colors.border,
     backgroundColor: selected ? tinted ? toneColor(theme, tone, "soft") : colors.surface2 : hovered ? colors.surface1 : "transparent" });
-  if (!onPress) return <View testID={testID} style={style()}>{body}</View>;
-  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={count === undefined ? label : `${label} ${count}`} accessibilityState={{ selected }} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={state => [style(hoverable(state).hovered), { opacity: hoverable(state).pressed ? 0.8 : 1 }]}>{body}</Pressable>;
+  const pressLabel = count === undefined ? label : `${label} ${count}`;
+  if (!onPress) return <View testID={testID} style={style()}>{body}{remove}</View>;
+  if (!remove) return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={pressLabel} accessibilityState={{ selected }} {...aria({ pressed: selected })} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={state => [style(hoverable(state).hovered), { opacity: hoverable(state).pressed ? 0.8 : 1 }]}>{body}</Pressable>;
+  // Both actions: two sibling buttons inside one pill, so the web never renders a <button> inside a <button>.
+  return <View testID={testID} style={[style(), { paddingHorizontal: 0, gap: 0 }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={pressLabel} accessibilityState={{ selected }} {...aria({ pressed: selected })} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }}
+      style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minHeight: control.sm, paddingLeft: 10, paddingRight: space.xs, opacity: hoverable(state).pressed ? 0.8 : 1 })}>{body}</Pressable>
+    <View style={{ paddingRight: 10 }}>{remove}</View>
+  </View>;
 }
 
 /** Small label: state, count or category, on a ground tinted with its tone (`solid` for the loudest ones). */
@@ -261,7 +280,7 @@ export function Row({ theme, title, subtitle, leading, trailing, onPress, select
   </>;
   const frame: ViewStyle = { flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 10, paddingHorizontal: space.md, borderRadius: radius.md };
   if (!onPress) return <View testID={testID} style={frame}>{content}</View>;
-  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title} accessibilityState={{ selected }} onPress={onPress}
+  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title} accessibilityState={{ selected }} {...aria({ current: selected ? "true" : undefined })} onPress={onPress}
     style={state => { const { pressed, hovered } = hoverable(state); return [frame, { backgroundColor: selected ? colors.surface2 : pressed || hovered ? colors.surface1 : "transparent" }]; }}>{content}</Pressable>;
 }
 
@@ -276,7 +295,7 @@ export function SectionHeader({ theme, title, count, action, open, onToggle, ico
     {count !== undefined ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"], opacity: 0.8 }}>{count}</Text> : null}
   </View>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32, paddingHorizontal: space.md, paddingTop: space.sm }}>
-    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} accessibilityState={{ expanded: open }} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
+    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} accessibilityState={{ expanded: open }} {...aria({ expanded: open })} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
     {action}
   </View>;
 }
@@ -290,11 +309,12 @@ export function Banner({ theme, tone = "neutral", message, icon, action, onDismi
   theme: PluginTheme; tone?: Tone; message: string; icon?: string; action?: { label: string; onPress: () => void }; onDismiss?: () => void;
 }) {
   const { colors } = theme, color = toneColor(theme, tone);
+  // Message text stays foreground: red text on a red-tinted ground falls under 4.5:1 on dark themes.
   const glyph = icon ?? (tone === "danger" ? "CircleAlert" : tone === "warning" ? "TriangleAlert" : tone === "success" ? "CircleCheck" : "Info");
   const tinted = tone !== "neutral";
   return <View accessibilityRole={tone === "danger" ? "alert" : undefined} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingVertical: space.sm, paddingLeft: space.md, paddingRight: action || onDismiss ? space.xs : space.md, borderRadius: radius.md, backgroundColor: tinted ? toneColor(theme, tone, "soft") : colors.surface1, borderWidth: hairline, borderColor: tinted ? toneColor(theme, tone, "line") : colors.border }}>
     <Icon name={glyph} size={16} color={tinted ? toneColor(theme, tone, "mark") : color} />
-    <Text selectable style={{ flex: 1, color: tone === "danger" ? color : colors.foreground, fontSize: fontSize.small, lineHeight: 19 }}>{message}</Text>
+    <Text selectable style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, lineHeight: 19, fontWeight: tone === "danger" ? "500" : "400" }}>{message}</Text>
     {action ? <Button theme={theme} label={action.label} size="sm" variant="ghost" onPress={action.onPress} /> : null}
     {onDismiss ? <IconButton theme={theme} icon="X" label="关闭提示" size="sm" onPress={onDismiss} /> : null}
   </View>;
@@ -330,15 +350,29 @@ export function SyncStatus({ theme, state, label }: { theme: PluginTheme; state:
   </View>;
 }
 
+/**
+ * Autofocus once the host sheet has finished opening (about 300 ms): focusing during the opening animation makes
+ * web scroll the half-laid-out form, and on phones the keyboard pushes a sheet that is still moving.
+ */
+export function useSettledFocus(enabled: boolean, delay = 350) {
+  const ref = useRef<NativeTextInput>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setTimeout(() => ref.current?.focus(), delay);
+    return () => clearTimeout(timer);
+  }, [enabled, delay]);
+  return ref;
+}
+
 /** `grow` fills a row. It keeps the content-sized basis: `flex: 1` (basis 0) collapses the field's parent on native, so whatever follows overlaps it. */
 export function SearchField({ theme, value, onChangeText, placeholder = "搜索", onSubmit, autoFocus = false, accessibilityLabel, grow = true }: {
   theme: PluginTheme; value: string; onChangeText: (value: string) => void; placeholder?: string; onSubmit?: () => void; autoFocus?: boolean; accessibilityLabel?: string; grow?: boolean;
 }) {
-  const { colors } = theme;
+  const { colors } = theme, input = useSettledFocus(autoFocus);
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2, minHeight: control.md, paddingLeft: 10, paddingRight: value ? space.xxs : 10, borderRadius: radius.md, backgroundColor: colors.surface2, ...(grow ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : {}) }}>
     <Icon name="Search" size={14} color={colors.foregroundMuted} />
-    <TextInput accessibilityLabel={accessibilityLabel ?? placeholder} value={value} onChangeText={onChangeText} onSubmitEditing={onSubmit} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted}
-      autoFocus={autoFocus} autoCapitalize="none" autoCorrect={false} returnKeyType="search" style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.body, paddingVertical: 6 }} />
+    <TextInput ref={input} accessibilityLabel={accessibilityLabel ?? placeholder} value={value} onChangeText={onChangeText} onSubmitEditing={onSubmit} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted}
+      autoCapitalize="none" autoCorrect={false} returnKeyType="search" style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.body, paddingVertical: 6 }} />
     {value ? <IconButton theme={theme} icon="X" label="清除搜索" size="sm" onPress={() => onChangeText("")} /> : null}
   </View>;
 }
@@ -346,10 +380,10 @@ export function SearchField({ theme, value, onChangeText, placeholder = "搜索"
 export function TextField({ theme, label, value, onChangeText, placeholder, multiline = false, minHeight, autoFocus = false, editable = true, hint }: {
   theme: PluginTheme; label: string; value: string; onChangeText: (value: string) => void; placeholder?: string; multiline?: boolean; minHeight?: number; autoFocus?: boolean; editable?: boolean; hint?: string;
 }) {
-  const { colors } = theme;
+  const { colors } = theme, input = useSettledFocus(autoFocus && editable);
   return <View style={{ gap: space.xs + 2 }}>
     <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>{label}</Text>
-    <TextInput accessibilityLabel={label} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted} multiline={multiline} editable={editable} autoFocus={autoFocus}
+    <TextInput ref={input} accessibilityLabel={label} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted} multiline={multiline} editable={editable}
       textAlignVertical={multiline ? "top" : "center"} style={{ color: colors.foreground, backgroundColor: colors.surface2, borderRadius: radius.md, minHeight: minHeight ?? (multiline ? 120 : 36), paddingHorizontal: space.md, paddingVertical: space.sm, fontSize: fontSize.body, lineHeight: 20, opacity: editable ? 1 : 0.6 }} />
     {hint ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{hint}</Text> : null}
   </View>;

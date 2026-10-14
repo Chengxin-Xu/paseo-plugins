@@ -3,6 +3,7 @@ import { z } from "zod";
 import { GROK_DEFAULT_EFFORT, GROK_DEFAULT_MODEL, grokRunnerLabel, type InsightJob, type InsightModelOption, type InsightRunner, type InsightRunnerInfo, type InsightRunnerOption, type InsightRunners } from "../shared/insights";
 import { findGrokBinary } from "./grok-runner";
 import { redactSecrets } from "./insight-analysis";
+import { defaultModelOf, providerModelId } from "../shared/provider-model";
 
 export const BUILTIN_INSIGHT_RUNNER: InsightRunnerInfo = { kind: "grok", label: "Grok 4.7 · xhigh", provider: null, model: GROK_DEFAULT_MODEL, thinkingOptionId: GROK_DEFAULT_EFFORT, modeId: null, sessionAgentId: null };
 /** The built-in Grok CLI with its saved model and reasoning effort (grok-4.7 · xhigh when unset). */
@@ -11,6 +12,8 @@ export function grokPlan(runner: Extract<InsightRunner, { kind: "grok" }>): Insi
   return { info: { ...BUILTIN_INSIGHT_RUNNER, label: grokRunnerLabel({ model, effort }), model, thinkingOptionId: effort }, model, effort, access: "none", featureValues: {} };
 }
 export const AUTO_RUNNER_LABEL = "自动选择";
+/** What the built-in runner really does (grok-runner.ts): no tools offered and every call refused; its session is deleted when the run ends. */
+export const GROK_RUNNER_DETAIL = "Grok CLI：不提供工具，工具调用一律拒绝；会话和它的会话搜索记录在分析结束后立即删除";
 export const NO_RUNNER_ERROR = "没有可以自动选用的分析执行器：安装并登录 Grok CLI、在 Paseo 里启用 Claude Code 或 Codex，或者在「分析设置」里选一个 Profile 或模型";
 export const INSIGHT_PERMISSION_MESSAGE = "分析会话是只读的：不能使用工具。请直接输出 JSON 报告。";
 /** Shown for `ask` access: only requests that need approval reach the observatory, so say so. */
@@ -138,7 +141,7 @@ export class InsightRunnerRegistry {
     return null;
   }
   /**
-   * What `auto` runs now: the Grok CLI when it is installed (no session, no tools), else Claude Code, Codex, then a
+   * What `auto` runs now: the Grok CLI when it is installed (no tools; its session is deleted after each run), else Claude Code, Codex, then a
    * custom provider that extends one of them, each with its default model; within a rank, read-only modes come first.
    * Other providers are never picked automatically. Null: nothing usable.
    */
@@ -168,7 +171,8 @@ export class InsightRunnerRegistry {
     const provider = runner.kind === "provider" ? runner.provider : profile!.provider;
     const entry = catalog.entries.find(candidate => candidate.provider === provider);
     const reason = this.unavailable(entry); if (reason || !entry) throw new Error(`无法启动分析：${reason}`);
-    const modelId = (runner.kind === "provider" ? runner.model : profile?.model) ?? entry.models.find(model => model.isDefault)?.id ?? null;
+    // No model chosen: the provider's default (or first) one; a provider that lists none runs as "<provider>/default".
+    const modelId = (runner.kind === "provider" ? runner.model : profile?.model) ?? defaultModelOf(entry.models);
     const model = entry.models.find(candidate => candidate.id === modelId);
     const thinkingOptionId = (runner.kind === "provider" ? runner.thinkingOptionId : profile?.thinkingOptionId) ?? model?.defaultThinkingOptionId ?? null;
     const thinkingLabel = model?.thinking.find(option => option.id === thinkingOptionId)?.label ?? thinkingOptionId;
@@ -178,7 +182,7 @@ export class InsightRunnerRegistry {
   }
   async runners(): Promise<InsightRunners> {
     const [catalog, available] = await Promise.all([this.catalog(), this.binaryAvailable()]);
-    const builtin: InsightRunnerOption = { runner: { kind: "grok" }, label: BUILTIN_INSIGHT_RUNNER.label, detail: "Grok CLI，工具已关闭", providerLabel: "Grok", modelLabel: "Grok 4.7", thinkingLabel: "xhigh", available, reason: available ? null : "未找到本机 Grok CLI", access: "none", modeId: null };
+    const builtin: InsightRunnerOption = { runner: { kind: "grok" }, label: BUILTIN_INSIGHT_RUNNER.label, detail: GROK_RUNNER_DETAIL, providerLabel: "Grok", modelLabel: "Grok 4.7", thinkingLabel: "xhigh", available, reason: available ? null : "未找到本机 Grok CLI", access: "none", modeId: null };
     const chosen = await this.resolve({ kind: "auto" }).catch(() => null);
     const auto: InsightRunnerOption = { runner: { kind: "auto" }, label: AUTO_RUNNER_LABEL, detail: "有 Grok CLI 时用它；否则用已启用的 Claude Code 或 Codex（包括 extends 它们的自定义 Provider）和它的默认模型",
       providerLabel: chosen ? `现在：${chosen.info.label}` : null, modelLabel: null, thinkingLabel: null, available: !!chosen,
@@ -261,7 +265,7 @@ export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T
   };
   try {
     remaining();
-    const config: PaseoAgentCreateOptions["config"] = { provider: plan.info.model ? `${plan.info.provider}/${plan.info.model}` : plan.info.provider,
+    const config: PaseoAgentCreateOptions["config"] = { provider: providerModelId(plan.info.provider, plan.info.model),
       modeId: plan.info.modeId, ...(plan.info.thinkingOptionId ? { thinkingOptionId: plan.info.thinkingOptionId } : {}), featureValues: filterInsightFeatures(plan.featureValues),
       ...(plan.providerOptions ? { options: plan.providerOptions as NonNullable<PaseoAgentCreateOptions["config"]["options"]> } : {}), systemPrompt: options.systemPrompt };
     const common = { config, title: (options.title ?? `观测台分析 · ${parent.title}`).slice(0, 60), prompt: options.prompt, outputSchema: z.toJSONSchema(options.schema), labels: { "observatory.role": "insight", "observatory.job": options.jobId } };

@@ -6,6 +6,10 @@ const hour = 3_600_000, day = 24 * hour;
 const iso = ms => new Date(ms).toISOString();
 const agentOf = id => rawAgents.find(agent => agent.id === id);
 const localDay = (at, offset) => new Date(at + offset * 60_000).toISOString().slice(0, 10);
+/** The browser's own zone, as a device would report it; null where the runtime cannot tell. */
+const browserZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } };
+/** How a suggestion window records its clock (grok-F3): the device's zone, or UTC days for ?scenario=insights-utc. */
+const windowClock = scenario => scenario === "insights-utc" ? { timeZone: null } : { timeZone: browserZone(), utcOffsetMinutes: -new Date().getTimezoneOffset() };
 
 /** Twelve reports over nine days; three still have open high findings. */
 function reports(now) {
@@ -29,7 +33,8 @@ function reports(now) {
 
 export const fixtureSuggestionsState = { jobs: [], feedback: {} };
 /** Scenarios whose 智能分析 has history: the reports list and the 总览 agree. */
-export const richInsightScenarios = new Set(["insights-rich", "insights-suggesting", "insights-suggest-failed"]);
+// ?scenario=insights-utc: the latest suggestion set was written before any device reported its zone (按 UTC 日期).
+export const richInsightScenarios = new Set(["insights-rich", "insights-suggesting", "insights-suggest-failed", "insights-utc"]);
 
 /** Full report jobs behind the roll-up, so 总览 links open real reports. */
 export function fixtureReportJobs(now = Date.now()) {
@@ -49,7 +54,7 @@ export function fixtureReportJobs(now = Date.now()) {
   }));
 }
 
-function suggestionJob(now, days, extra = {}) {
+function suggestionJob(now, days, extra = {}, scenario = null) {
   const all = reports(now).filter(item => item.at >= now - days * day);
   const ref = (jobId, findingId) => { const report = all.find(item => item.jobId === jobId); const finding = report?.findings.find(item => item.id === findingId);
     return report ? { jobId, findingId: finding ? findingId : null, agentId: report.agentId, agentTitle: report.title, projectName: report.projectName, title: finding?.title ?? "整份报告", severity: finding?.severity ?? null, category: finding?.category ?? null } : null; };
@@ -58,7 +63,8 @@ function suggestionJob(now, days, extra = {}) {
     ["R11#f1", ref("r-migration-draft-1", "f1")]].filter(([, value]) => value));
   return {
     id: "fixture-suggestions-1", createdAt: iso(now - 40 * 60_000), updatedAt: iso(now - 35 * 60_000), status: "completed", trigger: "manual", stage: "建议已生成",
-    window: { days, from: localDay(now - (days - 1) * day, 0), to: localDay(now, 0), reports: all.length, findings: all.reduce((sum, item) => sum + item.findings.length, 0), agents: new Set(all.map(item => item.agentId)).size },
+    window: { days, from: localDay(now - (days - 1) * day, 0), to: localDay(now, 0), reports: all.length, findings: all.reduce((sum, item) => sum + item.findings.length, 0), agents: new Set(all.map(item => item.agentId)).size,
+      ...windowClock(scenario) },
     runner: { kind: "grok", label: "Grok 4.7 · xhigh", provider: null, model: "grok-4.7", thinkingOptionId: "xhigh", modeId: null, sessionAgentId: null },
     usage: { inputTokens: 48_200, outputTokens: 6_900, costUsd: null }, error: null, basis: all.map(item => item.jobId), evidence,
     feedback: fixtureSuggestionsState.feedback,
@@ -98,7 +104,7 @@ function summary(job) {
 
 export function fixtureSuggestions(now, scenario, days = 7) {
   if (!richInsightScenarios.has(scenario)) return { job: null, history: fixtureSuggestionsState.jobs.map(summary) };
-  const job = suggestionJob(now, days);
+  const job = suggestionJob(now, days, {}, scenario);
   const extra = fixtureSuggestionsState.jobs.map(summary);
   return { job, history: [...extra, summary(job)] };
 }
@@ -106,7 +112,7 @@ export function fixtureSuggestions(now, scenario, days = 7) {
 export function fixtureOverview(days, offset, scenario, settings, runnerLabel) {
   const now = Date.now();
   if (!richInsightScenarios.has(scenario)) {
-    return { generatedAt: iso(now), days, utcOffsetMinutes: offset, from: localDay(now - (days - 1) * day, offset), to: localDay(now, offset), autoEnabled: settings.autoEnabled, runnerLabel,
+    return { generatedAt: iso(now), days, utcOffsetMinutes: offset, timeZone: browserZone(), from: localDay(now - (days - 1) * day, offset), to: localDay(now, offset), autoEnabled: settings.autoEnabled, runnerLabel,
       totals: { reports: 0, agents: 0, projects: 0, auto: 0, manual: 0, failedRuns: 0, openFindings: 0, resolvedFindings: 0, dismissedFindings: 0, highOpen: 0, tokens: null },
       health: { healthy: 0, watch: 0, blocked: 0 }, daily: Array.from({ length: days }, (_, index) => ({ day: localDay(now - (days - 1 - index) * day, offset), healthy: 0, watch: 0, blocked: 0 })),
       categories: ["failure", "loop", "efficiency", "coordination", "quality"].map(category => ({ category, high: 0, medium: 0, low: 0, open: 0, resolved: 0 })),
@@ -134,7 +140,7 @@ export function fixtureOverview(days, offset, scenario, settings, runnerLabel) {
   const suggestions = fixtureSuggestions(now, scenario, days);
   const running = scenario === "insights-suggesting" ? { ...summary(suggestionJob(now, days, { id: "fixture-suggestions-running", status: "analyzing", stage: "Grok 4.7 · xhigh 正在读 12 份报告，寻找跨 Agent 的模式", report: null, createdAt: iso(now - 60_000), updatedAt: iso(now) })) } : null;
   const failed = scenario === "insights-suggest-failed" ? summary(suggestionJob(now, days, { id: "fixture-suggestions-failed", status: "failed", stage: "分析未完成", error: "模拟：分析模型没有返回合法的 JSON。", report: null, createdAt: iso(now - 5 * 60_000) })) : null;
-  return { generatedAt: iso(now), days, utcOffsetMinutes: offset, from: localDay(now - (days - 1) * day, offset), to: localDay(now, offset), autoEnabled: settings.autoEnabled, runnerLabel,
+  return { generatedAt: iso(now), days, utcOffsetMinutes: offset, timeZone: browserZone(), from: localDay(now - (days - 1) * day, offset), to: localDay(now, offset), autoEnabled: settings.autoEnabled, runnerLabel,
     totals: { reports: all.length, agents: latest.size, projects: projects.length, auto: all.length - 2, manual: 2, failedRuns: 1, openFindings: count("open"), resolvedFindings: count("resolved"),
       dismissedFindings: count("false_positive"), highOpen: findings.filter(item => item.status === "open" && item.severity === "high").length, tokens: all.length * 64_000 },
     health: { healthy: all.filter(item => item.health === "healthy").length, watch: all.filter(item => item.health === "watch").length, blocked: all.filter(item => item.health === "blocked").length },
@@ -145,7 +151,7 @@ export function fixtureOverview(days, offset, scenario, settings, runnerLabel) {
 
 export const fixtureRunners = {
   auto: { runner: { kind: "auto" }, label: "自动选择", detail: "有 Grok CLI 时用它；否则用已启用的 Claude Code 或 Codex（包括 extends 它们的自定义 Provider）和它的默认模型", providerLabel: "现在：Grok 4.7 · xhigh", modelLabel: null, thinkingLabel: null, available: true, reason: null, access: "none", modeId: null },
-  builtin: { runner: { kind: "grok" }, label: "Grok 4.7 · xhigh", detail: "Grok CLI：在临时目录里分析，不创建会话，也不使用任何工具", providerLabel: null, modelLabel: "grok-4.7", thinkingLabel: "xhigh", available: true, reason: null, access: "none", modeId: null },
+  builtin: { runner: { kind: "grok" }, label: "Grok 4.7 · xhigh", detail: "Grok CLI：不提供工具，工具调用一律拒绝；会话和它的会话搜索记录在分析结束后立即删除", providerLabel: null, modelLabel: "grok-4.7", thinkingLabel: "xhigh", available: true, reason: null, access: "none", modeId: null },
   profiles: [
     { runner: { kind: "profile", profileId: "daily" }, label: "日常 · Opus 5.5", detail: "常规问答、代码阅读、一般分析", providerLabel: "Claude Code", modelLabel: "Opus 5.5", thinkingLabel: "high", available: true, reason: "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行", access: "ask", modeId: "default" },
     { runner: { kind: "profile", profileId: "implement" }, label: "实现 · 长程执行与交付", detail: "目标和验收明确的编码、重构、迁移", providerLabel: "Codex", modelLabel: "GPT-5 Codex", thinkingLabel: "high", available: true, reason: null, access: "read", modeId: "auto" },

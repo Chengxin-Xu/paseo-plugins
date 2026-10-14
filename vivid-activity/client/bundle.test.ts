@@ -50,9 +50,9 @@ function wrapCommonJsBundle(code: string): string {
   return `(function(require) {\nconst module = { exports: {} };\nconst exports = module.exports;\n${code}\nreturn module.exports;\n})`;
 }
 
-async function compileClientBundle(): Promise<string> {
+async function compileClientBundle(entry = entryPath): Promise<string> {
   const result = await esbuild.build({
-    entryPoints: [entryPath],
+    entryPoints: [entry],
     bundle: true,
     format: "cjs",
     jsx: "automatic",
@@ -80,10 +80,29 @@ async function compileClientBundle(): Promise<string> {
 describe("client mobile bundle compatibility", () => {
   it("bundles index.client.tsx and stays within mobile size budget", async () => {
     const bundle = await compileClientBundle();
-    const sizeKb = Math.round(bundle.length / 1024);
+    // Details/highlighting/settings must never drift back into the eager timeline bundle.
+    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(360 * 1024);
+    expect(bundle).not.toMatch(/\/\/ .*\/client\/(?:activity-details|highlight|settings)\.tsx?\n/);
+    expect(bundle).not.toContain("prismjs/components/");
+    expect(bundle).toMatch(/(?:var|function) transformToolCall\b/);
+    expect(bundle).toContain("function ColorfulToolCall");
+    // 0.6.0-local.5: the Pi notice reader comes in its own chunk; the resident timeline keeps only isPiNotice/piNoticeStatus.
+    expect(bundle).not.toMatch(/function (?:readPiNotice|subagentNotification|backgroundTask)\b/);
+  });
 
-    // Keep client bundle under 1024 KB for mobile Hermes eval performance
-    expect(sizeKb).toBeLessThan(1024);
+  it("ships the Pi notice reader in a chunk of its own, without the fold or takeover state (0.6.0-local.5)", async () => {
+    const bundle = await compileClientBundle(path.resolve(__dirname, "../pi-chunk.client.tsx"));
+    expect(bundle).toContain("function readPiNotice");
+    expect(bundle).not.toMatch(/\b(?:createFoldRuntime|foldRuntime|startTakeover|ColorfulToolCall|DetailBody)\b/);
+    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(96 * 1024);
+  });
+
+  it("keeps the chunk independent of the eager fold and takeover state", async () => {
+    const bundle = await compileClientBundle(path.resolve(__dirname, "../ui-chunk.client.tsx"));
+    expect(bundle).toContain("function DetailBody");
+    expect(bundle).toContain("function ActivitySettings");
+    expect(bundle).not.toMatch(/\b(?:createFoldRuntime|foldRuntime|startTakeover|createLatestRows)\b/);
+    expect(bundle).not.toMatch(/\/\/ .*\/client\/(?:fold-runtime|takeover|latest-rows)\.tsx?\n/);
   });
 
   it("contains no ES6 classes in client bundle code", async () => {

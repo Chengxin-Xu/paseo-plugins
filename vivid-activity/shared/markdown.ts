@@ -39,6 +39,13 @@ export function parseInlineMarkdown(text: string): InlineMarkdownPart[] {
   return parts;
 }
 
+// 本地补丁（0.6.0-local.2，codex-vivid-F1）：标记后的文字原来是 `\s+(.+)$`。空白和 `.+` 都吃空格，行里夹着 \r 或 U+2028
+// 时（`.` 不匹配它们，`$` 只认结尾）会从每个切分点重扫到行尾，一长串空格就平方级。现在文字要么以非空白开头，要么只是
+// 最后一个空白字符（原来在这种情况下抓到的也是它），匹配结果不变。
+const HEADING = /^\s{0,3}#{1,6}\s+(\S.*|[^\S\n\r\u2028\u2029])$/;
+const UNORDERED = /^\s*[-*+]\s+(\S.*|[^\S\n\r\u2028\u2029])$/;
+const ORDERED = /^\s*(\d+)[.)]\s+(\S.*|[^\S\n\r\u2028\u2029])$/;
+
 export function parseReasoningMarkdown(text: string): ReasoningMarkdownBlock[] {
   const blocks: ReasoningMarkdownBlock[] = [];
   const lines = text.split("\n");
@@ -73,19 +80,19 @@ export function parseReasoningMarkdown(text: string): ReasoningMarkdownBlock[] {
       continue;
     }
 
-    const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)$/);
+    const heading = line.match(HEADING);
     if (heading) {
       blocks.push({ type: "heading", text: heading[1] ?? "" });
       continue;
     }
 
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const unordered = line.match(UNORDERED);
     if (unordered) {
       blocks.push({ type: "unordered", text: unordered[1] ?? "" });
       continue;
     }
 
-    const ordered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
+    const ordered = line.match(ORDERED);
     if (ordered) {
       blocks.push({
         type: "ordered",

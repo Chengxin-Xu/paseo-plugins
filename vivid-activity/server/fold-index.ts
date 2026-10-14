@@ -65,6 +65,22 @@ export function knownTurnStart(agentId: string, turnId: string): number | null {
   return turnStarts.get(turnKey(agentId, turnId)) ?? null;
 }
 
+/**
+ * 0.5.0: Paseo 0.11 closes an Agent when it is archived, deleted, restored from the archive (its history is read again)
+ * or the daemon stops (`agent.closed`). Its turn starts are of no use after that, and a reopened session counts its turn
+ * ids from the start again, so the old ones could only be wrong.
+ */
+export function forgetAgentTurns(agentId: string): void {
+  if (!agentId) return;
+  const prefix = turnKey(agentId, "");
+  for (const key of turnStarts.keys()) if (key.startsWith(prefix)) turnStarts.delete(key);
+}
+
+/** For tests. */
+export function turnMemoSize(): number {
+  return turnStarts.size;
+}
+
 /** For tests. */
 export function forgetTurnStarts(): void {
   turnStarts.clear();

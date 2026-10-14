@@ -2,7 +2,8 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type TextStyle } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
-import type { ActionFeedback, FindingCategory, FindingSeverity, InsightOverview, OverviewDays, SuggestionAction, SuggestionEvidence, SuggestionJob, SuggestionSummary, SuggestionTheme } from "../shared/insight-overview";
+import { suggestionWindowNote, type ActionFeedback, type FindingCategory, type FindingSeverity, type InsightOverview, type OverviewDays, type SuggestionAction, type SuggestionEvidence, type SuggestionJob,
+  type SuggestionSummary, type SuggestionTheme } from "../shared/insight-overview";
 import type { AgentRecord } from "../shared/model";
 import { bigNumber, percent } from "../shared/stats-view";
 import { Badge, Banner, Button, EmptyState, IconButton, Segmented, Skeleton, fontSize, gradient, hue, isDarkTheme, radius, relativeTime, space, withAlpha, type Hue } from "./kit";
@@ -226,6 +227,8 @@ function Suggestions({ theme, compact, overview, job, history, onSelect, loading
     </Text>
   </Card>;
   const report = job.report, status = (id: string) => job.feedback?.[id]?.status ?? "open";
+  // A set read in UTC days (written before any device reported its zone, or by an older version) says so (grok-F3).
+  const zoneNote = suggestionWindowNote(job.window);
   const openCount = report.actions.filter(action => status(action.id) === "open" || status(action.id) === "adopted").length;
   const shown = filter === "open" ? report.actions.filter(action => status(action.id) === "open" || status(action.id) === "adopted") : report.actions;
   return <>
@@ -237,7 +240,8 @@ function Suggestions({ theme, compact, overview, job, history, onSelect, loading
         : <EmptyState theme={theme} icon="PartyPopper" tone="green" title="建议都处理完了" message="切到「全部」查看已完成和忽略的建议" />}
       {feedback.error ? <Banner theme={theme} tone="danger" message={`状态保存失败：${feedback.error.message}`} /> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{job.runner.label} · 读了 {job.window.reports} 份报告 · {relativeTime(job.updatedAt)}</Text>
+        <Text style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{job.runner.label} · 读了 {job.window.reports} 份报告 · {relativeTime(job.updatedAt)}</Text>
+        {zoneNote ? <Badge theme={theme} label={zoneNote} tone="amber" icon="Globe" /> : null}
         {history.filter(item => item.status === "completed").length > 1 ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
           {history.filter(item => item.status === "completed").slice(0, 5).map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`查看 ${new Date(item.createdAt).toLocaleString("zh-CN", { hour12: false })} 的建议`} aria-pressed={item.id === job.id}
             onPress={() => onSelect(item.id)} style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full, borderWidth: 1, borderColor: item.id === job.id ? hue(theme, "amber") : theme.colors.border }}>
@@ -335,6 +339,7 @@ export function InsightsOverview({ theme, compact, agents, header, onOpenReport,
   const resolvedShare = t && t.openFindings + t.resolvedFindings ? t.resolvedFindings / (t.openFindings + t.resolvedFindings) : null;
   const info = useMemo(() => [
     "总览汇总所选时间内完成的分析报告：健康度、问题类型、待处理的问题和需要关注的 Agent，都按你在报告里标记的状态（仍存在 / 已解决 / 误判）统计。",
+    "「7 天」「30 天」是本机时区的自然日：从 6 天（或 29 天）前的本地零点到现在，每份报告记在它完成那天；夏令时切换前后按各自的偏移。自动生成的建议按设备最近一次上报的时区，还没有上报过时按 UTC 日期，并在建议上标明。",
     "「生成建议」让当前分析模型读一遍这些报告，找出跨 Agent 反复出现的问题，给出可以直接动手的改进；每条建议都注明依据，点开可以跳到对应报告。",
     "开启自动分析后，每积累 3 份新报告（与上次自动建议间隔至少 20 小时）会自动更新建议。",
     "「交给 Agent」会在所选项目的工作区用所选 Profile 新建一个 Agent 执行任务，开始前可以修改任务内容。",

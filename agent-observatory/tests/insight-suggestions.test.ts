@@ -34,7 +34,7 @@ function suggestionJob(id: string, offset = 0, changes: Partial<SuggestionJob> =
 }
 const data = (prompt: string) => JSON.parse(prompt.split("<reports_data>")[1].split("</reports_data>")[0]);
 
-test("suggestion collection uses UTC days, completed reports and open-risk priority with exact references", () => {
+test("suggestion collection without a device clock uses UTC days, completed reports and open-risk priority with exact references", () => {
   const lowNewest = job("new", 0, { report: report("low") });
   const highOlder = job("high", -day, { findingFeedback: { repeat: { status: "open", updatedAt: at() } } });
   const resolved = job("resolved", -1000, { findingFeedback: { repeat: { status: "resolved", updatedAt: at() } } });
@@ -45,7 +45,7 @@ test("suggestion collection uses UTC days, completed reports and open-risk prior
   assert.equal(value.window.from, "2026-09-17T00:00:00.000Z"); assert.equal(value.window.to, at());
   assert.deepEqual(value.basis, ["high", "boundary", "new", "resolved", "dismissed"]);
   assert.equal(value.parentJob?.id, "new"); assert.equal(value.eligible, true);
-  assert.deepEqual(value.window, { days: 7, from: "2026-09-17T00:00:00.000Z", to: at(), reports: 5, findings: 5, agents: 5 });
+  assert.deepEqual(value.window, { days: 7, from: "2026-09-17T00:00:00.000Z", to: at(), reports: 5, findings: 5, agents: 5, timeZone: null });
   assert.equal(value.references["R1#repeat"].jobId, "high"); assert.equal(value.references.R3.findingId, null);
   assert.equal(value.reports[3].findings[0].status, "resolved"); assert.equal(value.reports[4].findings[0].status, "false_positive");
   assert.deepEqual(value.aggregates.categories.find(row => row.category === "loop"), { category: "loop", high: 4, medium: 0, low: 1, open: 3, resolved: 1, falsePositive: 1 });
@@ -171,5 +171,9 @@ test("suggestion storage recovers valid entries and preserves malformed original
     await writeFile(file, "{broken"); const corrupt = new SuggestionStorage(directory); assert.deepEqual(await corrupt.load(), []); assert.match(corrupt.error!, /无法恢复/);
     const backups = (await readdir(directory)).filter(name => name.endsWith(".backup")); assert.equal(backups.length, 1); assert.equal(await readFile(join(directory, backups[0]), "utf8"), "{broken");
     await corrupt.save([suggestionJob("recovered")]); assert.equal((await corrupt.load()).length, 1); await corrupt.close();
+    // Damaged again: the newer copy replaces the older one, so backups never pile up.
+    await writeFile(file, "{broken again"); const again = new SuggestionStorage(directory); assert.deepEqual(await again.load(), []); await again.close();
+    assert.deepEqual((await readdir(directory)).filter(name => name.endsWith(".backup")), ["insight-suggestions.json.backup"]);
+    assert.equal(await readFile(join(directory, "insight-suggestions.json.backup"), "utf8"), "{broken again");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

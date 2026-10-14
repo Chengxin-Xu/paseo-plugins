@@ -2,7 +2,8 @@ import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { completionReadState, type AgentRecord, type AgentStatus } from "../shared/model";
+import { completionReadState, stopShown, stopUnseen, waitingKind, type AgentRecord, type AgentStatus } from "../shared/model";
+import { stopLabels } from "../shared/stop-reason";
 import { IconButton, ProjectMark, Sheet, StatusDot, fontSize, hairline, hue, radius, space, toneColor, type Tone } from "./kit";
 import { useForeground } from "./use-foreground";
 
@@ -16,9 +17,20 @@ export const statusTones: Record<AgentStatus, Tone> = {
 };
 export const monoFont = Platform.OS === "ios" ? "Menlo" : "monospace";
 
+/** The state a row is announced with: a question or a plan is not an ordinary approval, a usage limit not an ordinary stop. */
+export function stateName(agent: AgentRecord): string {
+  const waiting = waitingKind(agent);
+  if (waiting === "question") return "提问";
+  if (waiting === "plan") return "计划待批";
+  // The row shows why the turn stopped (额度用尽 / 空轮 / 可能未收尾) wherever the stop applies; it is announced the same way.
+  if (stopShown(agent)) return stopLabels[agent.stop!.kind];
+  return statusNames[agent.status];
+}
 /** Screen-reader state of a session; completed ones say whether their result was read. */
 export function readLabel(agent: AgentRecord): string {
-  const state = completionReadState(agent);
+  const state = completionReadState(agent), name = stateName(agent);
+  if (name !== statusNames[agent.status]) return name === "提问" ? "提问，等你回答" : name === "计划待批" ? "计划待批，等你批准"
+    : agent.stop?.kind === "quota" ? "额度用尽，等恢复" : `${name}，${stopUnseen(agent) ? "还没看过" : "已看过"}`;
   return state === "unread" ? "已完成，未读结果" : state === "read" ? "已完成，已读" : agent.background && agent.status === "running" ? "执行中，后台子任务在跑" : statusNames[agent.status];
 }
 export function checkoutName(agent: AgentRecord): string {

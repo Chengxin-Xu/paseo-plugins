@@ -4,7 +4,7 @@ import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { PaseoApi, AgentTimelineItem } from "./paseo-types";
-import { addStatsMetrics, emptyStatsMetrics, statsMetricsSchema, statsToolSchema, type StatsMetrics,
+import { addStatsMetrics, emptyStatsMetrics, statsMetricsSchema, statsToolSchema, TOOL_KINDS, type StatsMetrics,
   type StatsRange, type StatsResponse, type StatsSnapshot, type StatsTool, type ToolKind } from "../shared/stats";
 import type { ActivityMetrics, AnalyticsSnapshot } from "../shared/analytics";
 import type { TelemetrySnapshot, TurnOutcome } from "../shared/telemetry";
@@ -14,22 +14,60 @@ import { StatsDirectory } from "./stats-directory";
 import { settleWithin, type BackgroundTracker } from "./background";
 import { buildStatsSnapshot } from "./stats-snapshot";
 import { extractTurnContent } from "./turn-content";
-import { STATS_DAY_MS as DAY, STATS_HOUR_MS as HOUR, statsDay, statsHour,
-  type StatsAgentRecord, type StatsAttribution, type StatsHour, type StatsToolDay } from "./stats-types";
+import { STATS_HOUR_MS as HOUR, statsDay, statsDayText, statsHour, statsLocalDay, statsZone,
+  type StatsAgentRecord, type StatsAttribution, type StatsHour, type StatsToolHour } from "./stats-types";
 
-const MAX_HOURS = 92 * 24, MAX_ATTRIBUTIONS = 20_000, MAX_AGENTS = 2_000, MAX_TOOL_DAYS = 92;
+// One retention window for every hour-keyed list: 92 days of UTC hours hold a 90-day local range in any zone (±14 h).
+const MAX_HOURS = 92 * 24, MAX_AGENTS = 2_000;
+// Agent × hour buckets exist only for hours an Agent was active. A busy host (about 20 Agents a day) makes 30–60 a
+// day, about 5,000 in 92 days. The 30,000 cap (about 15 MB in memory and 7 MB in stats.json, which leaves out zero
+// metrics) keeps all 92 days up to about 300 Agent-hours a day; beyond that the oldest hours go first, so 7 / 30 天
+// stay complete the longest.
+const MAX_ATTRIBUTIONS = 30_000;
+// Tool names: at most 60 an hour (formerly a day) and 30,000 in all (about 2 MB on disk), the oldest hours' names
+// going first while their exact per-kind totals stay. A busy host uses about 100 a day.
+const MAX_HOUR_TOOLS = 60, MAX_TOOL_NAMES = 30_000;
+// Per-UTC-day lists written by 2.12.0 and earlier, read only to migrate them.
+const LEGACY_ATTRIBUTIONS = 20_000, LEGACY_TOOL_DAYS = 92;
 const MAX_TURN_MS = 12 * HOUR, WRITE_DELAY = 20_000, MAX_FILE_BYTES = 64 * 1024 * 1024;
 const id = z.string().min(1).max(256), time = z.number().finite().nonnegative();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/), iso = z.iso.datetime();
+const toolList = (maximum: number) => z.array(statsToolSchema).max(maximum);
 const recordSchema = z.object({ agentId: id, lastKey: z.string().nullable(), maxTurnMs: time, maxTurnAt: iso.nullable(), updatedAt: time });
+/**
+ * Still version 1: the hour lists are new fields that 2.12.0 and earlier ignore, and the per-UTC-day lists they read
+ * are written empty. A downgrade therefore keeps the file and its 看板 hours (only 明细 / 横评 history starts over)
+ * instead of setting the whole file aside as corrupt.
+ */
 const savedSchema = z.object({ version: z.literal(1), change: z.number().int().nonnegative(), backfilled: z.boolean(),
   observedSince: iso.nullable(), contentSince: iso,
   hours: z.array(statsMetricsSchema.extend({ hour: iso })).max(MAX_HOURS),
-  attributions: z.array(statsMetricsSchema.extend({ agentId: id, day, lastActiveAt: iso })).max(MAX_ATTRIBUTIONS),
-  toolDays: z.array(z.object({ day, tools: z.array(statsToolSchema).max(60), kinds: z.array(statsToolSchema).max(8).optional() })).max(MAX_TOOL_DAYS),
+  /** Agent × UTC hour; metrics that are zero are left out. */
+  agentHours: z.array(statsMetricsSchema.partial().extend({ agentId: id, hour: iso, lastActiveAt: iso })).max(MAX_ATTRIBUTIONS).default([]),
+  toolHours: z.array(z.object({ hour: iso, tools: toolList(MAX_HOUR_TOOLS), kinds: toolList(TOOL_KINDS.length) })).max(MAX_HOURS).default([]),
+  attributions: z.array(statsMetricsSchema.extend({ agentId: id, day, lastActiveAt: iso })).max(LEGACY_ATTRIBUTIONS).default([]),
+  toolDays: z.array(z.object({ day, tools: toolList(60), kinds: toolList(8).optional() })).max(LEGACY_TOOL_DAYS).default([]),
   records: z.array(recordSchema).max(MAX_AGENTS), running: z.array(z.tuple([id, time])),
   permissions: z.array(z.object({ agentId: id, requests: z.array(z.tuple([z.string().max(64), time])).max(32) })),
 });
+/** Oldest hour key other than `except`; keys are `statsHour` strings, which sort chronologically. */
+function oldestHour(map: ReadonlyMap<string, unknown>, except: string): string | undefined {
+  let oldest: string | undefined;
+  for (const key of map.keys()) if (key !== except && (oldest === undefined || key < oldest)) oldest = key;
+  return oldest;
+}
+/** Zero metrics are implied on disk: most Agent-hours carry a handful of the 25. */
+const sparse = (bucket: StatsAttribution) => Object.fromEntries(Object.entries(bucket).filter(([, value]) => value !== 0));
+/** The `statsHour` key of a saved ISO time (any valid spelling), or null. */
+function hourKey(stamp: string): string | null {
+  const at = Date.parse(stamp);
+  return Number.isFinite(at) ? statsHour(at) : null;
+}
+/** Hour of a 2.12.0 per-UTC-day Agent bucket: its latest activity, which lies inside that day, else UTC noon. */
+function legacyAgentHour(day: string, lastActiveAt: string): string | null {
+  const at = Date.parse(lastActiveAt);
+  return Number.isFinite(at) && statsDay(at) === day ? statsHour(at) : hourKey(`${day}T12:00:00.000Z`);
+}
 
 export type StatsObservation =
   | { type: "turn_started"; agentId: string }
@@ -64,10 +102,13 @@ export class StatsStore {
   private readonly replies?: Pick<TelemetryStore, "awaitingAgents">;
   private readonly background?: StatsStoreOptions["background"];
   private readonly hours = new Map<string, StatsHour>();
-  private readonly attributions = new Map<string, StatsAttribution>();
-  private readonly attributionDays = new Map<string, Set<string>>();
-  private readonly toolDays = new Map<string, Map<string, StatsTool>>();
+  /** UTC hour → Agent → metrics, only for hours an Agent was active (see MAX_ATTRIBUTIONS). */
+  private readonly attributions = new Map<string, Map<string, StatsAttribution>>();
+  private attributionCount = 0;
+  /** UTC hour → tool names (at most 60) and exact per-kind totals; an hour with names always has kinds. */
+  private readonly toolNames = new Map<string, Map<string, StatsTool>>();
   private readonly toolKinds = new Map<string, Map<ToolKind, StatsTool>>();
+  private toolNameCount = 0;
   private readonly records = new Map<string, StatsAgentRecord>();
   private readonly running = new Map<string, number>();
   /** When each Agent's latest turn ended, to overrule a directory walk that still shows it running. */
@@ -173,7 +214,7 @@ export class StatsStore {
     } catch { /* Keep all other lifecycle consumers operational. */ }
   }
 
-  async read(input: { range: StatsRange; utcOffsetMinutes: number; revision?: string }, paseo: PaseoApi): Promise<StatsResponse> {
+  async read(input: { range: StatsRange; utcOffsetMinutes: number; timeZone?: string; revision?: string }, paseo: PaseoApi): Promise<StatsResponse> {
     await this.ready;
     await this.directoryCache.refresh(paseo);
     if (this.background) await settleWithin(this.background.sync(this.directoryCache.agents, this.directoryCache.refreshedAt), 4_000);
@@ -195,15 +236,18 @@ export class StatsStore {
     const walkedAt = this.directoryCache.refreshedAt, background = this.background?.runningIds() ?? new Set<string>();
     // A turn that ended after the walk is over, even while the cached walk still shows it running.
     const ended = new Set([...this.ended].filter(([agentId, at]) => at > walkedAt && !this.running.has(agentId)).map(([agentId]) => agentId));
+    // The zone actually applied (null: the fixed offset) and its local today are part of both the revision and the memo
+    // key, so another zone, or the same zone past local midnight, never gets an earlier projection.
+    const zone = statsZone(input.utcOffsetMinutes, input.timeZone, now), today = statsDayText(statsLocalDay(now, zone));
     const revision = createHash("sha256").update(JSON.stringify([this.change, this.directoryCache.digest,
-      input.range, input.utcOffsetMinutes, statsDay(now + input.utcOffsetMinutes * 60_000), [...this.running.keys()].sort(), [...awaiting].sort(),
+      input.range, input.utcOffsetMinutes, zone.name, today, [...this.running.keys()].sort(), [...awaiting].sort(),
       [...background].sort(), [...ended].sort()])).digest("hex").slice(0, 24);
     if (input.revision === revision) return { mode: "unchanged", unchanged: true, revision };
-    const key = `${input.range}:${input.utcOffsetMinutes}`, cached = this.memo.get(key);
+    const key = JSON.stringify([input.range, input.utcOffsetMinutes, zone.name]), cached = this.memo.get(key);
     let snapshot = cached?.revision === revision ? cached.snapshot : undefined;
     if (!snapshot) {
-      snapshot = buildStatsSnapshot({ now, range: input.range, utcOffsetMinutes: input.utcOffsetMinutes,
-        hours: [...this.hours.values()], attributions: [...this.attributions.values()], toolDays: this.tools(),
+      snapshot = buildStatsSnapshot({ now, range: input.range, utcOffsetMinutes: input.utcOffsetMinutes, timeZone: zone.name,
+        hours: [...this.hours.values()], attributions: this.attributionList(), toolHours: this.tools(),
         records: [...this.records.values()], running: this.running, directory: this.directoryCache.agents,
         observedSince: this.observedSince, contentSince: this.contentSince, directoryTruncated: this.directoryCache.truncated, awaiting,
         background, ended, walkedAt });
@@ -229,17 +273,36 @@ export class StatsStore {
     addStatsMetrics(bucket, metrics); this.hours.set(hour, bucket);
   }
   private addAttribution(agentId: string, at: number, metrics: Partial<StatsMetrics>): void {
-    const day = statsDay(at), key = JSON.stringify([agentId, day]);
-    const bucket = this.attributions.get(key) ?? { agentId, day, lastActiveAt: new Date(at).toISOString(), ...emptyStatsMetrics() };
-    addStatsMetrics(bucket, metrics); bucket.lastActiveAt = new Date(Math.max(at, Date.parse(bucket.lastActiveAt))).toISOString();
-    this.attributions.set(key, bucket);
-    const keys = this.attributionDays.get(day) ?? new Set<string>(); keys.add(key); this.attributionDays.set(day, keys);
-    while (this.attributions.size > MAX_ATTRIBUTIONS) {
-      const oldest = [...this.attributionDays.keys()].sort()[0], members = this.attributionDays.get(oldest)!;
-      const dropped = members.values().next().value!; this.attributions.delete(dropped); members.delete(dropped);
-      if (!members.size) this.attributionDays.delete(oldest);
+    const hour = statsHour(at), members = this.membersOf(hour);
+    let bucket = members.get(agentId);
+    if (!bucket) { bucket = { agentId, hour, lastActiveAt: new Date(at).toISOString(), ...emptyStatsMetrics() }; members.set(agentId, bucket); this.attributionCount++; }
+    else if (at > Date.parse(bucket.lastActiveAt)) bucket.lastActiveAt = new Date(at).toISOString();
+    addStatsMetrics(bucket, metrics);
+    this.evictAttributions(hour);
+  }
+  private membersOf(hour: string): Map<string, StatsAttribution> {
+    let members = this.attributions.get(hour);
+    if (!members) { members = new Map(); this.attributions.set(hour, members); }
+    return members;
+  }
+  /** Restore and migration: adds a whole Agent-hour, merging with one already held. */
+  private mergeAttribution(bucket: StatsAttribution): void {
+    const members = this.membersOf(bucket.hour), current = members.get(bucket.agentId);
+    if (!current) { members.set(bucket.agentId, bucket); this.attributionCount++; return; }
+    addStatsMetrics(current, bucket);
+    if (Date.parse(bucket.lastActiveAt) > Date.parse(current.lastActiveAt)) current.lastActiveAt = bucket.lastActiveAt;
+  }
+  /** Whole oldest hours go first; the hour being written only loses entries if it alone is above the cap. */
+  private evictAttributions(keep: string): void {
+    while (this.attributionCount > MAX_ATTRIBUTIONS) {
+      const oldest = oldestHour(this.attributions, keep);
+      if (oldest !== undefined) { this.attributionCount -= this.attributions.get(oldest)!.size; this.attributions.delete(oldest); continue; }
+      const first = this.attributions.get(keep)?.keys().next();
+      if (!first || first.done) return;
+      this.attributions.get(keep)!.delete(first.value); this.attributionCount--;
     }
   }
+  private attributionList(): StatsAttribution[] { return [...this.attributions.values()].flatMap(members => [...members.values()]); }
   private add(agentId: string, at: number, metrics: Partial<StatsMetrics>): void { this.addHour(at, metrics); this.addAttribution(agentId, at, metrics); }
 
   private observePeak(at: number): void {
@@ -270,28 +333,44 @@ export class StatsStore {
 
   private addTools(at: number, tools: readonly StatsTool[]): void {
     if (!tools.length) return;
-    const day = statsDay(at), map = this.toolDays.get(day) ?? new Map<string, StatsTool>();
-    const kinds = this.toolKinds.get(day) ?? new Map<ToolKind, StatsTool>();
-    for (const tool of tools) {
-      const total = kinds.get(tool.kind) ?? { name: tool.kind, kind: tool.kind, calls: 0, failures: 0 };
-      total.calls += tool.calls; total.failures += tool.failures; kinds.set(tool.kind, total);
-      const key = JSON.stringify([tool.name, tool.kind]);
-      if (!map.has(key) && map.size >= 60) continue;
-      const current = map.get(key) ?? { ...tool, calls: 0, failures: 0 };
-      current.calls += tool.calls; current.failures += tool.failures; map.set(key, current);
-    }
-    this.toolDays.set(day, map); this.toolKinds.set(day, kinds);
+    const hour = statsHour(at);
+    this.mergeTools(hour, tools, tools); this.evictToolNames(hour);
   }
-  private tools(): StatsToolDay[] { return [...this.toolDays].map(([day, tools]) => ({ day, tools: [...tools.values()], kinds: [...(this.toolKinds.get(day)?.values() ?? [])] })); }
+  /** Adds named counts (new names only while the hour has fewer than 60) and per-kind totals to one hour. */
+  private mergeTools(hour: string, tools: readonly StatsTool[], kinds: readonly StatsTool[]): void {
+    const names = this.toolNames.get(hour) ?? new Map<string, StatsTool>(), totals = this.toolKinds.get(hour) ?? new Map<ToolKind, StatsTool>();
+    for (const tool of kinds) {
+      const total = totals.get(tool.kind) ?? { name: tool.kind, kind: tool.kind, calls: 0, failures: 0 };
+      total.calls += tool.calls; total.failures += tool.failures; totals.set(tool.kind, total);
+    }
+    for (const tool of tools) {
+      const key = JSON.stringify([tool.name, tool.kind]), current = names.get(key);
+      if (current) { current.calls += tool.calls; current.failures += tool.failures; }
+      else if (names.size < MAX_HOUR_TOOLS) { names.set(key, { ...tool }); this.toolNameCount++; }
+    }
+    if (names.size) this.toolNames.set(hour, names);
+    this.toolKinds.set(hour, totals);
+  }
+  private evictToolNames(keep: string): void {
+    while (this.toolNameCount > MAX_TOOL_NAMES) {
+      const oldest = oldestHour(this.toolNames, keep);
+      if (oldest === undefined) return;
+      this.toolNameCount -= this.toolNames.get(oldest)!.size; this.toolNames.delete(oldest);
+    }
+  }
+  private tools(): StatsToolHour[] {
+    return [...this.toolKinds].map(([hour, kinds]) => ({ hour, tools: [...(this.toolNames.get(hour)?.values() ?? [])], kinds: [...kinds.values()] }));
+  }
 
   private prune(at: number): void {
     const hour = statsHour(at);
     if (hour === this.prunedHour) return;
     this.prunedHour = hour;
-    const minimum = Date.parse(hour) - (MAX_HOURS - 1) * HOUR;
-    for (const key of this.hours.keys()) if (Date.parse(key) < minimum) { this.hours.delete(key); this.changed(); }
-    const firstDay = statsDay(Math.floor(at / DAY) * DAY - (MAX_TOOL_DAYS - 1) * DAY);
-    for (const key of this.toolDays.keys()) if (key < firstDay) { this.toolDays.delete(key); this.toolKinds.delete(key); this.changed(); }
+    const minimum = Date.parse(hour) - (MAX_HOURS - 1) * HOUR, expired = (key: string) => Date.parse(key) < minimum;
+    for (const key of this.hours.keys()) if (expired(key)) { this.hours.delete(key); this.changed(); }
+    for (const [key, members] of this.attributions) if (expired(key)) { this.attributions.delete(key); this.attributionCount -= members.size; this.changed(); }
+    for (const key of this.toolKinds.keys()) if (expired(key)) { this.toolKinds.delete(key); this.changed(); }
+    for (const [key, names] of this.toolNames) if (expired(key)) { this.toolNames.delete(key); this.toolNameCount -= names.size; this.changed(); }
   }
   private changed(): void { this.change++; this.dirty = true; if (this.initialized) this.scheduleWrite(); }
   private scheduleWrite(): void {
@@ -341,24 +420,37 @@ export class StatsStore {
       this.observedSince = saved.observedSince; this.contentSince = saved.contentSince;
       this.change = saved.change; this.backfilled = saved.backfilled;
       for (const bucket of saved.hours) this.hours.set(bucket.hour, bucket);
-      for (const bucket of saved.attributions) {
-        const key = JSON.stringify([bucket.agentId, bucket.day]); this.attributions.set(key, bucket);
-        const keys = this.attributionDays.get(bucket.day) ?? new Set<string>(); keys.add(key); this.attributionDays.set(bucket.day, keys);
+      for (const { hour, ...entry } of saved.agentHours) {
+        const key = hourKey(hour);
+        if (key) this.mergeAttribution({ ...emptyStatsMetrics(), ...entry, hour: key });
       }
-      for (const bucket of saved.toolDays) {
-        this.toolDays.set(bucket.day, new Map(bucket.tools.map(tool => [JSON.stringify([tool.name, tool.kind]), tool])));
-        const kinds = new Map<ToolKind, StatsTool>();
-        for (const tool of bucket.kinds ?? bucket.tools) {
-          const total = kinds.get(tool.kind) ?? { name: tool.kind, kind: tool.kind, calls: 0, failures: 0 };
-          total.calls += tool.calls; total.failures += tool.failures; kinds.set(tool.kind, total);
-        }
-        this.toolKinds.set(bucket.day, kinds);
+      for (const entry of saved.toolHours) { const key = hourKey(entry.hour); if (key) this.mergeTools(key, entry.tools, entry.kinds); }
+      // 2.12.0 and earlier kept these two per UTC day, which cannot be split exactly. An Agent-day moves whole to the
+      // hour of its latest activity (inside that UTC day by construction); a tool day to the hour that halves that day's
+      // tool calls in the 看板 hours (they carry the same per-hour totals), so it lands on the local day that had most
+      // of them. UTC noon stands in when neither is known.
+      for (const { day, ...bucket } of saved.attributions) {
+        const hour = legacyAgentHour(day, bucket.lastActiveAt);
+        if (hour) this.mergeAttribution({ ...bucket, hour });
       }
+      for (const bucket of saved.toolDays) { const hour = this.legacyToolHour(bucket.day); if (hour) this.mergeTools(hour, bucket.tools, bucket.kinds ?? bucket.tools); }
+      this.evictAttributions(""); this.evictToolNames("");
+      // Rewritten in the hour layout with the next write.
+      if (saved.attributions.length || saved.toolDays.length) this.changed();
       for (const record of saved.records.sort((a, b) => a.updatedAt - b.updatedAt)) this.records.set(record.agentId, record);
       for (const [agentId, start] of saved.running) if (start + MAX_TURN_MS > this.lastAdvance) this.running.set(agentId, start);
       for (const entry of saved.permissions) this.permissions.set(entry.agentId, new Map(entry.requests));
       // No unobserved process downtime is charged as busy time after restore.
     } catch { this.quarantine(); }
+  }
+  /** Hour of a 2.12.0 tool day: where the day's tool calls in the 看板 hours reach half (UTC noon without any). */
+  private legacyToolHour(day: string): string | null {
+    const start = Date.parse(`${day}T00:00:00.000Z`);
+    if (!Number.isFinite(start)) return null;
+    const calls = Array.from({ length: 24 }, (_, index) => this.hours.get(statsHour(start + index * HOUR))?.toolCalls ?? 0);
+    const total = calls.reduce((sum, value) => sum + value, 0);
+    let seen = 0;
+    return statsHour(start + (total ? calls.findIndex(value => (seen += value) * 2 >= total) : 12) * HOUR);
   }
   private quarantine(): void {
     try { renameSync(this.file, `${this.file}.corrupt`); }
@@ -378,8 +470,8 @@ export class StatsStore {
       }
       const change = this.change;
       const payload = JSON.stringify({ version: 1, change, backfilled: this.backfilled, observedSince: this.observedSince, contentSince: this.contentSince,
-        hours: [...this.hours.values()], attributions: [...this.attributions.values()], toolDays: this.tools(), records: [...this.records.values()],
-        running: [...this.running], permissions: [...this.permissions].map(([agentId, requests]) => ({ agentId, requests: [...requests] })) });
+        hours: [...this.hours.values()], agentHours: this.attributionList().map(sparse), toolHours: this.tools(), attributions: [], toolDays: [],
+        records: [...this.records.values()], running: [...this.running], permissions: [...this.permissions].map(([agentId, requests]) => ({ agentId, requests: [...requests] })) });
       const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
       try {
         await ensurePrivateDirectory(this.directory);

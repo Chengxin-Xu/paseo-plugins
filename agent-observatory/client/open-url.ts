@@ -1,19 +1,18 @@
+import * as host from "@getpaseo/plugin/client";
 import { Linking } from "react-native";
 
 /**
- * Opens an http(s) link (a merge or pull request) in the user's browser. On the desktop app `Linking.openURL` would
- * open a bare child frame, so the preload opener Paseo's own links use is preferred there.
- * Adapted from panrafal/paseo-plugins schedule-runs (MIT).
+ * Opens an http(s) link (a merge or pull request) in the user's browser through the host's `openExternalUrl` (Paseo 0.11):
+ * the desktop app's own opener, the system browser on phones. A host without it (the preview, an older client) falls
+ * back to `Linking`.
  */
-interface DesktopOpener { readonly opener?: { readonly openUrl?: (url: string) => Promise<void> } }
+type Opener = (url: string) => Promise<void>;
 export function isHttpUrl(url: string): boolean {
   try { const protocol = new URL(url).protocol; return protocol === "http:" || protocol === "https:"; } catch { return false; }
 }
 export async function openExternalUrl(url: string): Promise<void> {
   if (!isHttpUrl(url)) throw new Error("只能打开 http(s) 链接");
-  const openUrl = (globalThis as { paseoDesktop?: DesktopOpener }).paseoDesktop?.opener?.openUrl;
-  if (typeof openUrl === "function") {
-    try { await openUrl(url); return; } catch { /* fall back to Linking */ }
-  }
+  const open = (host as { openExternalUrl?: Opener }).openExternalUrl;
+  if (typeof open === "function") return open(url);
   await Linking.openURL(url);
 }

@@ -20,6 +20,7 @@ const errorText = (error: unknown): string => error instanceof Error ? error.mes
 const REQUEST_PREFIX = "observatory-read-";
 /** Requests in flight, and those held while the host session is closed (a separate, smaller cap). */
 const MAX_PENDING = 24, MAX_WAITING = 16;
+export type ProviderBridge = ReturnType<typeof createProviderSubagentBridge>;
 export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 8000) {
   const pending = new Map<string, { type: string; resolve(value: Record<string, unknown>): void;
     reject(error: Error): void; timer: ReturnType<typeof setTimeout>; sent: boolean }>();
@@ -48,12 +49,13 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
     if (payload.error || message.type === "rpc_error") request.reject(new Error(errorText(payload.error || "宿主拒绝了子任务读取请求")));
     else request.resolve(payload);
   });
-  const request = (message: Record<string, unknown>, responseType: string): Promise<Record<string, unknown>> => {
+  /** `timeout` overrides the bridge's default for slow requests (a session restore). */
+  const request = (message: Record<string, unknown>, responseType: string, timeout = timeoutMs): Promise<Record<string, unknown>> => {
     if (disposed) return Promise.reject(new Error("子任务观察通道已关闭"));
     if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(new Error("子任务读取繁忙，请稍后重试"));
     return new Promise((resolve, reject) => {
       const requestId = `${REQUEST_PREFIX}${randomUUID()}`;
-      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error("宿主未响应子任务请求。可重试，或确认 Paseo 宿主支持子任务观察。")); }, timeoutMs);
+      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error("宿主未响应子任务请求。可重试，或确认 Paseo 宿主支持子任务观察。")); }, timeout);
       const entry = { type: responseType, resolve, reject, timer, sent: false };
       pending.set(requestId, entry);
       const send = () => {
@@ -127,11 +129,17 @@ export function boundProviderTimeline(payload: Record<string, unknown>): Record<
     hasOlder: normalized.hasOlder || cut && direction !== "after", hasNewer: normalized.hasNewer || cut && direction === "after",
     truncated: budget.truncated || cut || normalized.truncated };
 }
-export function registerProviderSubagents(server: PluginServerContext): () => void {
-  const bridge = createProviderSubagentBridge({
+/**
+ * The plugin process's one bridge to its host session. Every module that needs a raw session request shares it, so each IPC
+ * frame is inspected by one listener (four used to parse every frame four times).
+ */
+export function createProcessBridge(): ProviderBridge {
+  return createProviderSubagentBridge({
     send(message) { if (!process.send) throw new Error("当前环境没有 Paseo 宿主通道"); process.send(message); },
     listen(listener) { process.on("message", listener); return () => process.off("message", listener); },
   });
+}
+export function registerProviderSubagents(server: PluginServerContext, bridge: Pick<ProviderBridge, "request">): void {
   server.handle(providerSubagentsRpc, async ({ parentAgentId }) => {
     try {
       const payload = await bridge.request({ type: "agent.provider_subagents.list.request", parentAgentId }, "agent.provider_subagents.list.response");
@@ -155,5 +163,4 @@ export function registerProviderSubagents(server: PluginServerContext): () => vo
       return { page: boundProviderTimeline(payload), error: null };
     } catch (error) { return { page: null, error: errorText(error) }; }
   });
-  return () => bridge.dispose();
 }

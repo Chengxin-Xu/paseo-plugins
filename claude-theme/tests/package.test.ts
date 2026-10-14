@@ -1,14 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { THEMES } from "../shared/palette.ts";
 
 // The registry reads the listing (name, icon, screenshots, overview) straight from the files
 // shipped beside the manifest, so these guard what a reviewer and the Paseo app will see.
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const json = (path: string) => JSON.parse(readFileSync(join(root, path), "utf8"));
 const manifest = json("paseo-plugin.json");
+const ossExport = existsSync(join(root, "oss-export.json")) ? json("oss-export.json") : null;
 const pkg = json("package.json");
 
 function pngSize(path: string) {
@@ -23,9 +25,27 @@ test("the manifest names the listing and points at shipped PNGs", () => {
   assert.doesNotMatch(manifest.name, /claude|anthropic/i, "the listing is unofficial");
   assert.ok(manifest.description?.trim(), "the registry card shows the description");
 
+  // Guard the public export overlay in oss-export.json when running in the source repo.
+  if (ossExport) {
+    const exported = { ...manifest, ...ossExport.manifest };
+    assert.equal(exported.id, "terracotta-themes");
+    assert.doesNotMatch(exported.name, /claude|anthropic/i);
+    assert.doesNotMatch(exported.description, /claude|anthropic/i);
+  }
+
   const icon = pngSize(manifest.icon);
   assert.equal(icon.width, icon.height, "icon must be square");
   assert.ok(icon.width >= 512, `icon is ${icon.width} px`);
+
+  // Verify the swatch fan in assets/icon.svg matches the anchor themes' current hex values.
+  const iconSvg = readFileSync(join(root, "assets/icon.svg"), "utf8");
+  for (const id of ["blueberry-night", "claude-code-light", "cocoa-night", "sakura-latte", "claude-code-dark", "matcha-latte"]) {
+    const theme = THEMES.find((item) => item.id === id);
+    assert.ok(theme, `missing anchor theme ${id}`);
+    for (const hex of [theme.colors.accent!, theme.colors.border, theme.colors.control, theme.colors.raised, theme.colors.background]) {
+      assert.ok(iconSvg.includes(hex), `assets/icon.svg is missing ${id} swatch ${hex}`);
+    }
+  }
 
   assert.ok(manifest.media.length >= 1, "a theme listing needs a screenshot");
   for (const entry of manifest.media) {

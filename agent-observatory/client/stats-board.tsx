@@ -54,8 +54,10 @@ export function KpiTile({ theme, tile, width }: { theme: PluginTheme; tile: Tile
 
 /** Today's token total from the Token view, shown as a shortcut to it. */
 export interface TokenShortcut { today: number; onOpen: () => void }
-function Hero({ theme, stats, badges, narrow, onOpenScope, tokens }: { theme: PluginTheme; stats: StatsSnapshot; badges: Achievement[]; narrow: boolean; onOpenScope?: (scope: SessionScopeTarget) => void; tokens?: TokenShortcut }) {
-  const today = stats.daily.at(-1), { live, streak } = stats, lv = level(badges);
+/** The page's own live counts (its directory, the list's rules, 稍后处理 excluded): what a tapped pill then shows (opus-F14). */
+export interface LiveCounts { running: number; approvals: number; unread: number; idle: number }
+function Hero({ theme, stats, badges, narrow, onOpenScope, tokens, live: counted, quota }: { theme: PluginTheme; stats: StatsSnapshot; badges: Achievement[]; narrow: boolean; onOpenScope?: (scope: SessionScopeTarget) => void; tokens?: TokenShortcut; live?: LiveCounts; quota?: ReactNode }) {
+  const today = stats.daily.at(-1), { streak } = stats, live = counted ?? stats.live, lv = level(badges);
   const hour = new Date().getHours();
   return <View style={[{ borderRadius: 20, padding: space.lg, gap: space.md, overflow: "hidden" }, gradient(theme, ["#FF4FB8", "#8B5CF6", "#3B82F6"], { angle: 125 })]}>
     <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.md }}>
@@ -76,6 +78,7 @@ function Hero({ theme, stats, badges, narrow, onOpenScope, tokens }: { theme: Pl
       <GlassPill label="未读" value={live.unread} icon="Mail" onPress={onOpenScope ? () => onOpenScope("unread") : undefined} />
       <GlassPill label="待回复" value={live.idle} icon="MessageCircleMore" onPress={onOpenScope ? () => onOpenScope("idle") : undefined} />
       {tokens ? <GlassPill label="今日 Token" value={bigNumber(tokens.today)} icon="Coins" onPress={tokens.onOpen} /> : null}
+      {quota}
     </View>
   </View>;
 }
@@ -229,24 +232,26 @@ function ModelMixCard({ theme, stats, onOpenBreakdown }: { theme: PluginTheme; s
 }
 
 /** 看板: a personal dashboard over the whole host. */
-export function StatsBoard({ theme, compact, stats, loading, error, range, onRange, onRefresh, onOpenScope, onOpenAgent, onOpenBreakdown, tokens }: StatsViewProps & {
+export function StatsBoard({ theme, compact, stats, loading, error, range, onRange, onRefresh, onOpenScope, onOpenAgent, onOpenBreakdown, tokens, live, quota }: StatsViewProps & {
   onOpenScope?: (scope: SessionScopeTarget) => void; onOpenAgent?: (agentId: string) => void; onOpenBreakdown?: () => void; tokens?: TokenShortcut;
+  /** Live counts from the page's directory; without them the pills show the snapshot's once-a-minute counts. */ live?: LiveCounts;
+  /** The tightest usage window (Token → 额度), next to the pills. */ quota?: ReactNode;
 }) {
   const [width, setWidth] = useState(0);
   const inset = compact ? space.md : space.xl, wide = width >= 900;
   return <ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingHorizontal: inset, paddingTop: space.md, paddingBottom: space.xxl }}>
     <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ gap: space.lg, width: "100%", maxWidth: 1180, alignSelf: "center" }}>
       <StatsHeader theme={theme} compact={compact} stats={stats} range={range} onRange={onRange} />
-      <StatsGate theme={theme} stats={stats} loading={loading} error={error} onRefresh={onRefresh}>{snapshot => <BoardBody theme={theme} stats={snapshot} wide={wide} width={width} onOpenScope={onOpenScope} onOpenAgent={onOpenAgent} onOpenBreakdown={onOpenBreakdown} tokens={tokens} />}</StatsGate>
+      <StatsGate theme={theme} stats={stats} loading={loading} error={error} onRefresh={onRefresh}>{snapshot => <BoardBody theme={theme} stats={snapshot} wide={wide} width={width} onOpenScope={onOpenScope} onOpenAgent={onOpenAgent} onOpenBreakdown={onOpenBreakdown} tokens={tokens} live={live} quota={quota} />}</StatsGate>
     </View>
   </ScrollView>;
 }
-function BoardBody({ theme, stats, wide, width, onOpenScope, onOpenAgent, onOpenBreakdown, tokens }: { theme: PluginTheme; stats: StatsSnapshot; wide: boolean; width: number; onOpenScope?: (scope: SessionScopeTarget) => void; onOpenAgent?: (agentId: string) => void; onOpenBreakdown?: () => void; tokens?: TokenShortcut }) {
+function BoardBody({ theme, stats, wide, width, onOpenScope, onOpenAgent, onOpenBreakdown, tokens, live, quota }: { theme: PluginTheme; stats: StatsSnapshot; wide: boolean; width: number; onOpenScope?: (scope: SessionScopeTarget) => void; onOpenAgent?: (agentId: string) => void; onOpenBreakdown?: () => void; live?: LiveCounts; quota?: ReactNode; tokens?: TokenShortcut }) {
   const badges = useMemo(() => achievements(stats), [stats]);
   const columns = width >= 900 ? 4 : width >= 560 ? 3 : 2;
   const pair = (left: ReactNode, right: ReactNode, ratio = 1.6) => wide ? <View style={{ flexDirection: "row", gap: space.lg, alignItems: "stretch" }}><View style={{ flex: ratio, minWidth: 0 }}>{left}</View><View style={{ flex: 1, minWidth: 0 }}>{right}</View></View> : <>{left}{right}</>;
   return <>
-    <Hero theme={theme} stats={stats} badges={badges} narrow={width > 0 && width < 420} onOpenScope={onOpenScope} tokens={tokens} />
+    <Hero theme={theme} stats={stats} badges={badges} narrow={width > 0 && width < 420} onOpenScope={onOpenScope} tokens={tokens} live={live} quota={quota} />
     <View style={{ flexDirection: "row", flexWrap: "wrap", margin: -space.xs }}>{tiles(stats).map(tile => <KpiTile key={tile.key} theme={theme} tile={tile} width={`${100 / columns}%`} />)}</View>
     {pair(<CalendarCard theme={theme} stats={stats} />, <GrowthCard theme={theme} badges={badges} />)}
     {pair(<TrendCard theme={theme} stats={stats} />, <HighlightsCard theme={theme} stats={stats} onOpenAgent={onOpenAgent} />)}

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { redactSecrets } from "../server/insight-analysis";
+import { buildAnalysisRequest, parseInsightText, redactSecrets } from "../server/insight-analysis";
+import { summarizeTrajectoryRow } from "../server/trajectory";
+import { normalizeTimelinePage } from "../shared/timeline";
+import type { SessionTrajectory } from "../shared/trajectory";
 
 /** Every case below is synthetic: shapes of real credential formats, never real values. */
 const leaks = (text: string, secret: string) => redactSecrets(text).includes(secret);
@@ -88,8 +91,115 @@ test("ordinary text, counters and documentation about credentials stay unchanged
 test("redaction is linear on hostile input", () => {
   const n = 60_000;
   for (const [label, text] of [["eyJ runs", "eyJ-".repeat(n / 4)], ["dotted eyJ", "eyJaaaaaaaaaaaaa.".repeat(n / 17)], ["PEM headers", armour("BEGIN", "PRIVATE KEY").repeat(n / 27)],
-    ["token keys", "token: ".repeat(n / 7)], ["bearer words", "Bearer ".repeat(n / 7)], ["assignment spaces", `password${" ".repeat(n)}x`], ["prefix runs", "sk-".repeat(n / 3)]] as const) {
+    ["token keys", "token: ".repeat(n / 7)], ["bearer words", "Bearer ".repeat(n / 7)], ["assignment spaces", `password${" ".repeat(n)}x`], ["prefix runs", "sk-".repeat(n / 3)],
+    ["scheme letters", "a".repeat(n)], ["schemes", "a://".repeat(n / 4)], ["userinfo colons", `a://${"b:".repeat(n / 2)}`],
+    ["escaped keys", '\\"password\\": \\"'.repeat(n / 16)], ["escaped values", `password: ${"\\x".repeat(n / 2)}`], ["query keys", "?key=".repeat(n / 5)],
+    ["webhook paths", "hooks.slack.com/services/".repeat(n / 25)], ["SendGrid dots", "SG.".repeat(n / 3)], ["SendGrid body", `SG.${"a".repeat(n)}`],
+    ["escapes", "\\n".repeat(n / 2)], ["escaped prefixes", "\\nsk-".repeat(n / 5)]] as const) {
     const started = performance.now(); redactSecrets(text); const took = performance.now() - started;
     assert.ok(took < 250, `${label} took ${took.toFixed(0)} ms`);
   }
+});
+
+// leak-1014: formats the patterns missed, JSON escaping, and secrets parted from their prefix by an excerpt cut.
+const BODY = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+test("npm, temporary AWS, Slack app and refresh, Google OAuth, GitLab, Hugging Face, SendGrid, Stripe, Groq and Composio keys are masked", () => {
+  const keys = [fake("npm_", BODY), fake("ASIA", "Q2W3E4R5T6Y7U8I9"), fake("xapp-", "1-A0123456789-0123456789012-abcdef"), fake("xoxe-", "1-AbCdEfGhIjKlMnOp"),
+    fake("ya29.", "a0AfH6SMBxAbCdEfGhIjKlMnOpQr"), fake("GOCSPX-", "AbCdEfGhIjKlMnOpQrStUvWx"), ...["gldt-", "glrt-", "glptt-"].map(prefix => fake(prefix, "AbCdEfGhIjKlMnOpQrSt12")),
+    fake("hf_", BODY), fake("SG.", "AbCdEfGhIjKlMnOpQrStUv.AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg"), fake("rk_live_", "AbCdEfGhIjKlMnOpQrStUvWx"),
+    fake("whsec_", "AbCdEfGhIjKlMnOpQrStUvWx12"), fake("gsk_", `${BODY}AbCdEfGh`), fake("ak_", "AbCdEfGhIjKlMnOpQrSt")];
+  for (const key of keys) for (const text of [`value ${key} end`, `export TOKEN_VALUE=${key}`]) assert.equal(leaks(text, key), false, text);
+});
+
+test("a password in any URL scheme, webhook paths and signed query values are masked", () => {
+  const password = "Pa55-w0rd-QX7";
+  for (const url of [`postgres://app:${password}@db.internal:5432/app`, `mysql://root:${password}@127.0.0.1/db`, `mongodb+srv://user:${password}@cluster0.example.net/test`,
+    `redis://default:${password}@cache:6379`, `amqp://guest:${password}@mq/vhost`, `jdbc:postgresql://app:${password}@db/app`, `DATABASE_URL="postgresql://app:${password}@db/app"`])
+    assert.equal(leaks(url, password), false, url);
+  const path = ["T0123ABCD", "B0123ABCD", "AbCdEfGhIjKlMnOpQrStUvWx"].join("/");
+  for (const url of [`https://hooks.slack.com/services/${path}`, `https://discord.com/api/webhooks/123456789012/${BODY}`]) {
+    const masked = redactSecrets(url); assert.equal(masked.includes("AbCdEfGh"), false, url); assert.match(masked, /\[redacted\]$/);
+  }
+  for (const [url, value] of [[`https://maps.example.com/api/geocode?key=${BODY}&q=1`, BODY], [`https://bucket.s3.amazonaws.com/f.txt?X-Amz-Date=1&X-Amz-Signature=${"0a".repeat(32)}`, "0a".repeat(32)],
+    [`https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sig=${BODY}%3D`, BODY]]) assert.equal(leaks(url, value), false, url);
+});
+
+test("JSON-escaped values and prefixes after an escape are masked", () => {
+  const github = fake("ghp_", BODY), openai = fake("sk-", "proj-AbCdEfGhIjKlMnOp");
+  for (const [text, secret] of [[JSON.stringify(JSON.stringify({ apiKey: "k-0123456789abcdef" })), "k-0123456789abcdef"], [JSON.stringify(JSON.stringify({ password: "hunter2-long-pass" })), "hunter2-long-pass"],
+    [JSON.stringify(JSON.stringify({ token: "abc123def456" })), "abc123def456"], [JSON.stringify({ text: `line\n${github}` }), github], [JSON.stringify({ text: `col\t${openai}` }), openai]])
+    assert.equal(leaks(text, secret), false, text);
+});
+
+test("ordinary URLs, short values and words that only start like a key prefix stay unchanged", () => {
+  for (const text of ["postgres://localhost:5432/app and redis://cache:6379 have no password", "https://user@example.com/path names a user, no password",
+    "?key=1&sig=abc are short", "the key=value pairs; signature=ok", "ak_short, hf_ and npm_install are not keys; SG.example is a domain", "C:\\Users\\me\\new\\task.txt"])
+    assert.equal(redactSecrets(text), text);
+});
+
+const toolRow = (detail: Record<string, unknown>) => normalizeTimelinePage({ epoch: "e", rows: [{ seq: 1, item: { type: "tool_call", name: "exec", status: "completed", detail } }] }).rows[0]!;
+test("tool payloads are masked before they are turned into JSON or cut: edits, nested arguments and a key whose header an excerpt drops", () => {
+  const key = "k-0123456789abcdef";
+  const edit = summarizeTrajectoryRow(toolRow({ type: "edit", filePath: ".mcp.json", oldString: '{"apiKey": "old-value-000000"}', newString: `{"apiKey": "${key}"}` }));
+  assert.equal(edit.text.includes(key), false, edit.text); assert.equal(edit.text.includes("old-value-000000"), false);
+  const nested = summarizeTrajectoryRow(toolRow({ type: "mcp", input: { server: "db", args: { config: JSON.stringify({ password: "hunter2-long-pass" }) } } }));
+  assert.equal(nested.text.includes("hunter2-long-pass"), false, nested.text);
+  // The excerpt keeps the start and the end of a long output: the key's header is in the dropped middle, part of its body at the end.
+  const body = Array.from({ length: 50 }, (_, line) => `${PEM_BODY.slice(line % 20)}${line}`.slice(0, 64)).join("\n");
+  const output = `${"x".repeat(3000)}\n${armour("BEGIN", "PRIVATE KEY")}\n${body}\n${armour("END", "PRIVATE KEY")}\ndone`;
+  const cut = summarizeTrajectoryRow(toolRow({ type: "shell", command: "cat key.pem", output }));
+  assert.equal(cut.truncated, true);
+  for (const line of body.split("\n")) assert.equal(cut.text.includes(line.slice(0, 40)), false, line);
+});
+
+// Unprefixed values the patterns cannot recognise on their own: only the field name says they are credentials.
+const plain = (seed: number, length: number) => Array.from({ length }, (_, index) => "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"[(index * 7 + seed) % 56]).join("");
+const windows = (secret: string) => Array.from({ length: secret.length - 39 }, (_, index) => secret.slice(index, index + 40));
+const keeps = (text: string, secret: string) => windows(secret).some(window => text.includes(window));
+const analysed = (text: string, agent: Partial<SessionTrajectory["agent"]> = {}, previousSummary?: string): string => buildAnalysisRequest({
+  agent: { id: "a1", title: "t", provider: "codex", model: null, cwd: null, workspaceId: null, archivedAt: null, status: "idle", attentionReason: null, ...agent },
+  project: null, capturedAt: "2026-10-14T00:00:00.000Z", completionEvidence: { kind: "none", at: null },
+  coverage: { complete: true, hasOlder: false, hasNewer: false, gap: false, truncated: false, reason: null, projectedItems: 1, characters: text.length, pages: 1, firstAt: null, lastAt: null, epoch: "e" },
+  counts: { userTurns: 1, assistantMessages: 0, tools: 1, toolFailures: 0, errors: 0, observedTurnIds: 0 },
+  rows: [{ ref: "a1:e:1-1", epoch: "e", seqStart: 1, seqEnd: 1, at: null, turnId: null, kind: "tool_call", text, toolName: "exec", toolStatus: "completed" }],
+}, undefined, previousSummary === undefined ? {} : { previousReview: { jobId: "j1", summary: previousSummary, findings: [] } }).prompt;
+test("a credential field is masked whole before a structured value is cut: long plain fields, then a token or password, in input and output", () => {
+  const session = plain(3, 520), password = `correct horse battery ${plain(5, 40)}`, github = plain(11, 64), apiKey = plain(17, 48);
+  const cases = [
+    { type: "mcp", input: { header: "h".repeat(700), AWS_SESSION_TOKEN: session } },
+    { type: "mcp", input: { header: "h".repeat(1500), password } },
+    { type: "shell", output: { stdout: "l".repeat(2500), env: { GITHUB_TOKEN: github, OPENAI_API_KEY: apiKey } } },
+    { type: "shell", output: JSON.stringify({ log: "l".repeat(2500), api_key: apiKey }) },
+    { type: "mcp", input: { list: [{ note: "n".repeat(900), credentials: { user: "deploy", value: session } }] } },
+    { type: "mcp", input: { header: "h".repeat(700), credentials: [github, apiKey] } },
+  ];
+  for (const detail of cases) {
+    const row = summarizeTrajectoryRow(toolRow(detail));
+    const prompt = analysed(row.text);
+    for (const secret of [session, password, github, apiKey]) {
+      assert.equal(keeps(row.text, secret), false, `${JSON.stringify(detail).slice(0, 80)} → ${row.text.slice(-300)}`);
+      assert.equal(keeps(prompt, secret), false);
+    }
+  }
+  // A number under a credential name is masked in the JSON, before the cut.
+  const numeric = summarizeTrajectoryRow(toolRow({ type: "mcp", input: { db: { host: "localhost", password: 12345678901234 } } }));
+  assert.equal(numeric.text.includes("12345678901234"), false, numeric.text);
+  // Counters and names that only mention a credential stay readable.
+  const ordinary = summarizeTrajectoryRow(toolRow({ type: "mcp", input: { max_tokens: 4096, tokenizer: "cl100k_base", secretName: "db-creds", tokens: "1234 used" } }));
+  for (const text of ["4096", "cl100k_base", "db-creds", "1234 used"]) assert.ok(ordinary.text.includes(text), ordinary.text);
+});
+test("agent metadata and an earlier review (older reports were stored unmasked) are masked before they are cut", () => {
+  const value = plain(23, 600), earlier = plain(29, 400);
+  const prompt = analysed("row", { title: `${"a".repeat(900)}password=${value}` }, `${"s".repeat(700)}password=${earlier}`);
+  assert.equal(keeps(prompt, value), false); assert.equal(keeps(prompt, earlier), false);
+});
+
+test("a stored report never keeps a credential the reviewer quoted", () => {
+  const key = fake("ghp_", BODY);
+  const report = { summary: `读取了 ${key}`, health: "watch", confidence: "high", strengths: ["已有验证"], nextActions: ["轮换 password=hunter2-long-pass"], limitations: [],
+    findings: [{ id: "one", severity: "high", category: "efficiency", title: "泄露", detail: `日志打印了 ${key}`, evidence: ["ref-1"], recommendation: "轮换" }] };
+  const parsed = parseInsightText(JSON.stringify(report), new Set(["ref-1"]));
+  const stored = JSON.stringify(parsed.report);
+  assert.equal(stored.includes(key), false); assert.equal(stored.includes("hunter2-long-pass"), false);
+  assert.equal(parsed.report.findings[0]!.evidence[0], "ref-1");
 });

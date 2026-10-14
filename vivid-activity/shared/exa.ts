@@ -1,3 +1,5 @@
+import { splitAtLine } from "./text-scan";
+
 export type ExaToolKind =
   | "search"
   | "fetch"
@@ -149,9 +151,13 @@ function structuredResults(value: unknown): ExaSearchResult[] {
   return [];
 }
 
+/** 本地补丁（codex-vivid-F1）：按 `---` 行切开结果块（下一行是 `Title:`），线性扫描；原来的正则遇到一长串空行会平方级回溯。 */
+function resultBlocks(text: string): string[] {
+  return splitAtLine(text, "---", (end, spacesEnd) => end === spacesEnd && text.startsWith("Title:", end) && /\s/.test(text[end + 6] ?? ""));
+}
+
 function parseTextResults(text: string): ExaSearchResult[] {
-  return text
-    .split(/\n\s*---\s*\n(?=Title:\s)/)
+  return resultBlocks(text)
     .map((block) => {
       const title = block.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
       if (!title) return null;

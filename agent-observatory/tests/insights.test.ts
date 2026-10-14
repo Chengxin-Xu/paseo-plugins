@@ -9,7 +9,7 @@ import type { SessionTrajectory } from "../shared/trajectory";
 import type { InsightJob, InsightReport } from "../shared/insights";
 import { assessTrajectory, buildAnalysisPrompt, buildAnalysisRequest, isUsefulInsightReport, parseGrokReport, redactSecrets } from "../server/insight-analysis";
 import { InsightManager, type InsightManagerOptions } from "../server/insights";
-import { runGrokAnalysis } from "../server/grok-runner";
+import { GROK_DISALLOWED_TOOLS, GrokTurnLimitError, runGrokAnalysis } from "../server/grok-runner";
 
 const paseo = {} as PaseoApi;
 function trajectory(turns = 3, tools = 3, length = 12): SessionTrajectory {
@@ -127,11 +127,14 @@ test("Grok runner uses isolated prompt file and removes it after fake CLI exits"
   const directory = await mkdtemp(join(tmpdir(), "fake-grok-test-")); const executable = join(directory, "grok-fake");
   await writeFile(executable, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()}));\n', { mode: 0o700 });
   try {
-    const response = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "fixture prompt", signal: new AbortController().signal, timeoutMs: 2000 }));
+    // A scratch GROK_HOME and temp root: the run's session cleanup never looks at the real ~/.grok here.
+    const response = JSON.parse(await runGrokAnalysis({ binary: executable, prompt: "fixture prompt", signal: new AbortController().signal, timeoutMs: 2000, grokHome: join(directory, "grok-home"), tmp: directory }));
     assert.ok(response.args.includes("--json-schema")); assert.ok(response.args.includes("--no-subagents")); assert.ok(response.args.includes("--disable-web-search"));
     assert.ok(response.args.includes("--system-prompt-override"));
     assert.equal(response.args[response.args.indexOf("--model") + 1], "grok-4.7");
-    assert.equal(response.args[response.args.indexOf("--tools") + 1], "");
+    // `--tools ""` removed nothing (opus-F72): the built-in tools are removed by name and every call is still denied.
+    assert.equal(response.args.includes("--tools"), false);
+    assert.deepEqual(response.args[response.args.indexOf("--disallowed-tools") + 1].split(","), [...GROK_DISALLOWED_TOOLS]);
     assert.equal(response.args[response.args.indexOf("--deny") + 1], "*");
     assert.equal(response.args[response.args.indexOf("--max-turns") + 1], "3");
     assert.equal(response.args.includes("fixture prompt"), false); await assert.rejects(stat(response.cwd), { code: "ENOENT" });
@@ -141,8 +144,17 @@ test("Grok runner decodes Chinese output split across stdout chunks", async () =
   const directory = await mkdtemp(join(tmpdir(), "fake-grok-test-")); const executable = join(directory, "grok-fake");
   // "插件" is 6 UTF-8 bytes; the fake CLI writes them in two chunks that split the second character.
   await writeFile(executable, '#!/usr/bin/env node\nconst bytes = Buffer.from("插件", "utf8"); process.stdout.write(bytes.subarray(0, 4)); setTimeout(() => process.stdout.write(bytes.subarray(4)), 50);\n', { mode: 0o700 });
-  try { assert.equal(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000 }), "插件"); }
+  try { assert.equal(await runGrokAnalysis({ binary: executable, prompt: "p", signal: new AbortController().signal, timeoutMs: 2000, grokHome: join(directory, "grok-home"), tmp: directory }), "插件"); }
   finally { await rm(directory, { recursive: true, force: true }); }
+});
+test("a Grok turn limit reaches the report as a Chinese error and is retried at most once (opus-F72)", async () => {
+  let calls = 0;
+  const f = await fixture({ run: async () => { calls++; throw new GrokTurnLimitError(3); } });
+  try {
+    const job = await f.manager.start(paseo, "a"); const failed = await waitFor(f.manager, job.id, "failed");
+    assert.match(failed.error ?? "", /轮次上限/); assert.equal(/max turns/i.test(failed.error ?? ""), false);
+    assert.ok(calls >= 1 && calls <= 2, `one run, plus at most one compact retry (${calls})`);
+  } finally { await f.close(); }
 });
 test("fresh installation does not read trajectories or call the model until automation is enabled", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });

@@ -1,4 +1,4 @@
-import { compareAgents, normalizeAgent, preserveCompletionEvidence, timestamp, type AgentRecord, type AgentSource, type AgentProjectPlacement } from "./model";
+import { agentAttentionPriority, compareAgents, normalizeAgent, preserveCompletionEvidence, timestamp, type AgentRecord, type AgentSource, type AgentProjectPlacement } from "./model";
 
 export interface AgentDirectoryPage {
   entries: Array<{ agent: AgentSource; project?: AgentProjectPlacement | null }>;
@@ -43,6 +43,11 @@ interface DirectoryOptions {
   reconcileIntervalMs?: number;
   retryDelaysMs?: readonly number[];
   now?: () => number;
+  /**
+   * Live updates are folded into one notification per this many milliseconds. A running Claude turn reports usage on every
+   * API message, so a dozen running Agents send dozens of updates a second; each used to re-sort and re-render everything.
+   */
+  notifyDelayMs?: number;
 }
 
 export const DIRECTORY_LIMIT = 2_000;
@@ -84,8 +89,14 @@ export function createAgentDirectory(api: AgentDirectoryApi, options: DirectoryO
   const reconcileIntervalMs = Math.max(pollIntervalMs, options.reconcileIntervalMs ?? DIRECTORY_RECONCILE_INTERVAL);
   const retryDelays = options.retryDelaysMs?.length ? options.retryDelaysMs : OBSERVE_RETRY_DELAYS;
   const now = options.now ?? Date.now;
+  const notifyDelay = Math.max(0, options.notifyDelayMs ?? 200);
   let state: ObservatoryState = { agents: [], loading: true, error: null, lastSyncedAt: null, isRefreshing: false, truncated: false, live: false };
   let records = new Map<string, AgentRecord>();
+  // Live updates mark the published list stale; it is rebuilt when read (getSnapshot), at most once per batch. Updates
+  // that cannot move a row (usage, context, a pending-request detail) replace it in place instead of re-sorting the list.
+  let stale = false, resort = false, notifyTimer: ReturnType<typeof setTimeout> | null = null;
+  const replacements = new Map<string, AgentRecord>();
+  let positions = new Map<string, number>();
   // Keep ordering metadata after an archive removes a visible row. Without it,
   // a delayed pre-archive snapshot can resurrect that row in the active view.
   const versions = new Map<string, { at: number | null; agent: AgentRecord | null }>();
@@ -105,16 +116,47 @@ export function createAgentDirectory(api: AgentDirectoryApi, options: DirectoryO
   let generation = 0;
   let activityGeneration = 0;
 
-  function publish(patch: Partial<ObservatoryState>) {
-    if (disposed) return;
-    state = { ...state, ...patch };
+  function notify() {
+    if (notifyTimer !== null) { clearTimeout(notifyTimer); notifyTimer = null; }
     for (const listener of listeners) listener();
   }
-  function publishRecords(patch: Partial<ObservatoryState> = {}) {
+  function publish(patch: Partial<ObservatoryState>) {
+    if (disposed) return;
+    settle();
+    state = { ...state, ...patch };
+    notify();
+  }
+  function sortedRecords(): { agents: AgentRecord[]; overflow: boolean } {
     const sorted = [...records.values()].sort(compareAgents);
     const overflow = sorted.length > maxAgents;
     if (overflow) records = new Map(sorted.slice(0, maxAgents).map((agent) => [agent.id, agent]));
-    publish({ agents: overflow ? sorted.slice(0, maxAgents) : sorted, ...(overflow ? { truncated: true } : {}), ...patch });
+    const agents = overflow ? sorted.slice(0, maxAgents) : sorted;
+    positions = new Map(agents.map((agent, index) => [agent.id, index]));
+    replacements.clear(); resort = false; stale = false;
+    return { agents, overflow };
+  }
+  /** Brings the published list up to date with live updates received since it was built. */
+  function settle() {
+    if (!stale) return;
+    if (resort) { const { agents, overflow } = sortedRecords(); state = { ...state, agents, ...(overflow ? { truncated: true } : {}) }; return; }
+    const agents = state.agents.slice();
+    for (const [id, agent] of replacements) agents[positions.get(id)!] = agent;
+    replacements.clear(); stale = false;
+    state = { ...state, agents };
+  }
+  function publishRecords(patch: Partial<ObservatoryState> = {}) {
+    const { agents, overflow } = sortedRecords();
+    publish({ agents, ...(overflow ? { truncated: true } : {}), ...patch });
+  }
+  /** A live update: the list is rebuilt lazily and listeners hear about a batch of updates once. */
+  function changed(id: string, previous: AgentRecord | undefined, value: AgentRecord | null) {
+    const index = positions.get(id);
+    const inPlace = !resort && value !== null && previous !== undefined && index !== undefined && state.agents[index]?.id === id
+      && agentAttentionPriority(previous) === agentAttentionPriority(value) && previous.lastActivityAt === value.lastActivityAt && previous.title === value.title;
+    if (inPlace) replacements.set(id, value); else resort = true;
+    stale = true;
+    if (notifyDelay === 0) { notify(); return; }
+    if (notifyTimer === null) notifyTimer = setTimeout(() => { notifyTimer = null; if (!disposed) notify(); }, notifyDelay);
   }
   function stopTimer() {
     if (timer !== null) clearTimeout(timer);
@@ -195,11 +237,12 @@ export function createAgentDirectory(api: AgentDirectoryApi, options: DirectoryO
     if (at !== null && previousAt !== null && at < previousAt) return;
     rememberVersion(id, candidate, at ?? previousAt);
     const value = visible(candidate);
+    const shown = records.get(id);
     if (value) records.set(id, value);
     else records.delete(id);
     revision += 1;
     if (inFlight) journal.set(id, { revision, value, at });
-    publishRecords();
+    if (value || shown) changed(id, shown, value);
   }
 
   function overlayLive(snapshot: Map<string, AgentRecord>, since: number) {
@@ -320,7 +363,7 @@ export function createAgentDirectory(api: AgentDirectoryApi, options: DirectoryO
   }
 
   return {
-    getSnapshot: (): ObservatoryState => state,
+    getSnapshot: (): ObservatoryState => { settle(); return state; },
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -347,6 +390,7 @@ export function createAgentDirectory(api: AgentDirectoryApi, options: DirectoryO
       generation += 1;
       inFlight = null;
       stopTimer();
+      if (notifyTimer !== null) { clearTimeout(notifyTimer); notifyTimer = null; }
       release();
       listeners.clear();
       journal.clear();

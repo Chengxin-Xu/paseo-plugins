@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View, type FlatList as NativeFlatList } from "react-native";
-import type { PluginSurfaceProps, PluginWorkspacePanelProps, PluginAgentPanelProps } from "@getpaseo/plugin/client";
+import { usePaseo, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { applyArchiveReadOrigin, applyReadReceipt, completionReadState, isUnreadCompletion, knownCompletionAt, matchesStatus, type AgentRecord, type AgentStatus } from "../shared/model";
+import { applyArchiveReadOrigin, applyReadReceipt, completionReadState, heldBySnooze, isUnreadCompletion, knownCompletionAt, matchesAgentStatus, matchesStatus, stopUnseen, waitingKind, type AgentRecord, type AgentStatus } from "../shared/model";
+import { applyLiveExtras, threadAttention } from "../shared/attention";
 import { enrichAgents, type BackgroundState } from "../shared/background";
 import { buildDashboardRows, groupDashboardRows, needsAttention } from "../shared/dashboard-model";
 import type { TelemetrySnapshot } from "../shared/telemetry";
 import { nextRangeChange, nextWindowExit, withinRange, rangeLabels, type TimeRange } from "../shared/time-range";
 import type { AnalyticsSnapshot } from "../shared/analytics";
 import { decisionSignals } from "../shared/decision-signals";
-import { isCompletionSnoozed, nextSnoozeExpiry, type CompletionSnooze, type ViewPreferences } from "../shared/preferences";
+import { defaultObservatorySettings, isCompletionSnoozed, nextSnoozeExpiry, snoozeToken, type CompletionSnooze, type ViewPreferences } from "../shared/preferences";
 import type { ReadReceipt } from "../shared/read-state";
 import type { StatsRange } from "../shared/stats";
 import { useObservatory } from "./use-observatory";
@@ -20,8 +21,13 @@ import { useViewPreferences } from "./use-view-preferences";
 import { readReceiptQueryKey, useReadReceipts } from "./use-read-receipts";
 import { useAgentActivity } from "./use-agent-activity";
 import { backgroundQueryKey, useBackground } from "./use-background";
+import { liveExtrasQueryKey, useLiveExtras } from "./use-live-extras";
+import { useHeartbeatCheck, useHeartbeats } from "./use-schedules";
+import { archiveReadCandidates, confirmArchive, heartbeatGuard, type ArchiveOffer } from "../shared/schedules";
 import { useStats } from "./use-stats";
 import { useTokenLive, useTokens } from "./use-tokens";
+import { useQuota } from "./use-quota";
+import { QuotaChip } from "./quota-card";
 import { AgentDetail } from "./agent-detail";
 import { AnalyticsDashboard } from "./analytics-dashboard";
 import { InsightsHub } from "./insights";
@@ -33,15 +39,17 @@ import { TokenBoard } from "./token-board";
 import { tokenTotal } from "../shared/tokens";
 import { ViewTabs, type ViewTab } from "./view-tabs";
 import { Swimlane } from "./swimlane";
-import { SessionList, countRunningDescendants, countUnreadDescendants, groupTitles, type SessionItem } from "./session-list";
+import { SessionList, countRunningDescendants, groupTitles, type SessionItem } from "./session-list";
 import { LiveDot, PhaseLegend, StatusChip, hueColor } from "./status";
 import { FilterSheet, ProjectSheet, RangeSheet, readFilterNames, sessionScopeNames, type FilterState, type SessionScope } from "./filters";
-import { ActionMenu, Banner, Chip, ChipBar, EmptyState, IconButton, SearchField, Sheet, Skeleton, Spacer, SplitView, SyncStatus, Toolbar, fontSize, hueFor, space, useCompactLayout, type MenuAction } from "./kit";
-import { checkoutName, statusNames, useClock } from "./ui";
+import { ActionMenu, Banner, Button, Chip, ChipBar, EmptyState, IconButton, SearchField, Sheet, Skeleton, Spacer, SplitView, SyncStatus, Toolbar, fontSize, hairline, hueFor, radius, space, useCompactLayout, type MenuAction } from "./kit";
+import { checkoutName, statusNames, Switch, useClock } from "./ui";
+import { tint, tintAlpha } from "./status";
 import type { ScheduleFocus } from "./schedule-focus";
 
 type DashboardProps = PluginSurfaceProps & { workspaceId?: string; initialAgentId?: string; archiveMode?: boolean; onOpenArchive?: () => void; onOpenOverview?: () => void;
-  /** Opens 定时运行 on one schedule (from an Agent's 定时任务 card). */ onOpenSchedules?: (focus: ScheduleFocus) => void };
+  /** Opens 定时运行 on one schedule (from an Agent's 定时任务 card). */ onOpenSchedules?: (focus: ScheduleFocus) => void;
+  /** Paseo 0.11 screen params: `agent` selects one Agent, `focus: "attention"` shows 需要处理 (from the sidebar's popover). */ params?: Readonly<Record<string, string>> };
 type ScheduleLink = { onOpenSchedules?: (focus: ScheduleFocus) => void };
 export type ObservatoryData = ReturnType<typeof useObservatory>;
 /** 会话 · 看板 · Token · 明细 (internal value "analytics") · 横评 · 事件 · 分析 */
@@ -66,25 +74,24 @@ export function DashboardSurface(props: DashboardProps) {
   const cache = useQueryClient();
   // Directory events from the owned observation refresh lifecycle data sooner than the fallback polls. A turn that just
   // ended may leave subagents working (后台执行中); the 看板 counts (read only while shown) follow too.
-  useAgentActivity(() => { for (const queryKey of [telemetryQueryKey(props.host.id), readReceiptQueryKey, backgroundQueryKey(props.host.id), ["agent-observatory", props.host.id, "stats"]]) void cache.invalidateQueries({ queryKey }); });
+  useAgentActivity(() => { for (const queryKey of [telemetryQueryKey(props.host.id), readReceiptQueryKey, backgroundQueryKey(props.host.id), liveExtrasQueryKey(props.host.id), ["agent-observatory", props.host.id, "stats"]]) void cache.invalidateQueries({ queryKey }); });
   return <DashboardView key={props.host.id} {...props} readReceipts={readReceipts.data?.receipts} archiveOrigins={readReceipts.data?.archiveOrigins} readReceiptError={readReceipts.error?.message ?? readReceipts.data?.error ?? undefined} analytics={analytics.data} analyticsLoading={analytics.isPending} analyticsError={analytics.error?.message} data={data} telemetry={telemetry.data} telemetryError={telemetry.error?.message} background={background.data} onAnalyticsVisible={setObserving} onRefresh={() => { void data.refresh(); void telemetry.refetch(); if (observing) void analytics.refetch(); void readReceipts.refetch(); void cache.invalidateQueries({ queryKey: backgroundQueryKey(props.host.id) }); }} />;
 }
 export function ArchivedSurface(props: DashboardProps) { return <DashboardSurface {...props} archiveMode />; }
 export function WorkspaceDashboard(props: PluginWorkspacePanelProps & ScheduleLink) { return <DashboardSurface {...props} />; }
-export function AgentDashboard(props: PluginAgentPanelProps & ScheduleLink) { return <DashboardSurface {...props} initialAgentId={props.agentId} />; }
 
 const projectKey = (agent: AgentRecord) => agent.projectId || agent.projectRootPath || agent.projectName;
 const checkoutKey = (agent: AgentRecord) => agent.worktreePath || agent.checkoutKind;
 const finished = (agent: AgentRecord) => ["completed", "closed", "canceled"].includes(agent.status);
 
-export function DashboardView({ theme, layout, host, navigation, workspaceId, initialAgentId, data, telemetry, telemetryError, background, analytics, analyticsLoading, analyticsError, readReceipts, archiveOrigins, readReceiptError, archiveMode = false, onOpenArchive, onOpenOverview, onOpenSchedules, onRefresh, onAnalyticsVisible }: DashboardProps & {
+export function DashboardView({ theme, layout, host, navigation, workspaceId, initialAgentId, params, data, telemetry, telemetryError, background, analytics, analyticsLoading, analyticsError, readReceipts, archiveOrigins, readReceiptError, archiveMode = false, onOpenArchive, onOpenOverview, onOpenSchedules, onRefresh, onAnalyticsVisible }: DashboardProps & {
   data: ObservatoryData; readReceipts?: ReadReceipt[]; archiveOrigins?: Array<{agentId:string;archivedAt:string;lastUserMessageAt:string|null}>; readReceiptError?: string; analytics?: AnalyticsSnapshot; analyticsLoading?: boolean; analyticsError?: string; telemetry?: TelemetrySnapshot; telemetryError?: string;
   /** Provider subagents still working after their parent's turn (后台执行中). */ background?: BackgroundState;
   onRefresh: () => void; onAnalyticsVisible?: (visible: boolean) => void;
 }) {
   const { colors } = theme;
   const { compact, width: surfaceWidth, onLayout } = useCompactLayout(layout.compact);
-  const toast = useToast();
+  const toast = useToast(), paseo = usePaseo();
   const viewStorageKey = `${host.id}:${workspaceId ?? "global"}:${archiveMode ? "archives" : "overview"}`;
   const preferences = useViewPreferences(viewStorageKey);
   const hydrated = useRef(false);
@@ -112,6 +119,9 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const [sheet, setSheet] = useState<"filters" | "project" | "range" | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 归档已读完成 (opus-B18): the first tap marks the rows, the second archives exactly those still eligible.
+  const [archiveMarks, setArchiveMarks] = useState<ReadonlySet<string> | null>(null), [archivingMarked, setArchivingMarked] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [hubPushed, setHubPushed] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("30d");
@@ -125,9 +135,16 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const tokenTab = !archiveMode && tab === "tokens";
   // 看板 shows today's tokens as a shortcut into the Token view.
   const tokens = useTokens(host.id, statsRange, tokenTab || (!archiveMode && tab === "board")), tokenLive = useTokenLive(host.id, tokenTab, "full", liveWindow);
+  // 额度 on the Token page, and its tightest window on 看板's header.
+  const quota = useQuota(host.id, !archiveMode && (tokenTab || tab === "board"));
   // Running rows show their live output speed; read only while the session list shows something running.
   const runningCount = useMemo(() => data.agents.filter(agent => agent.status === "running" && !agent.archivedAt).length + (background?.agents.length ?? 0), [data.agents, background]);
   const rowLive = useTokenLive(host.id, !archiveMode && tab === "agents" && runningCount > 0, "agents");
+  // Todo progress of running turns and the host's notes (the one-line reasons), read while something runs or waits for you.
+  const liveWanted = useMemo(() => !archiveMode && data.agents.some(agent => !agent.archivedAt && (agent.status === "running" || agent.requiresAttention === true || agent.pendingPermissionCount > 0)), [archiveMode, data.agents]);
+  const liveExtras = useLiveExtras(host.id, liveWanted);
+  // Heartbeats that will wake an Agent: 「22:35 唤醒」 on its row and a card in its detail (opus-B8).
+  const heartbeats = useHeartbeats(host.id, tab === "agents" || tab === "activity" || !!selectedId), checkHeartbeats = useHeartbeatCheck(host.id);
   const rates = useMemo(() => new Map((rowLive.data?.agents ?? []).flatMap(agent => agent.agentId && agent.outputPerSec > 0 ? [[agent.agentId, agent.outputPerSec] as const] : [])), [rowLive.data]);
   useEffect(() => { setWorkspace(workspaceId ?? "all"); }, [workspaceId]);
   useEffect(() => { onAnalyticsVisible?.(observing); }, [observing, onAnalyticsVisible]);
@@ -142,7 +159,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   useEffect(() => () => { if (scrollSave.current) clearTimeout(scrollSave.current); }, []);
   const snoozes = preferences.snapshot?.snoozes ?? noSnoozes;
   // Analysis sessions the observatory starts itself (智能分析 runners) are reached from their reports, not listed as work.
-  const loadedAgents = useMemo(() => { const receipts = new Map((readReceipts ?? []).map(receipt => [receipt.agentId, receipt])); const origins = new Map((archiveOrigins ?? []).map(origin => [origin.agentId, origin])); return enrichAgents(data.agents.filter(agent => agent.labels["observatory.role"] !== "insight"), telemetry, background).map(agent => applyReadReceipt(applyArchiveReadOrigin(agent, origins.get(agent.id)), receipts.get(agent.id))); }, [data.agents, telemetry, background, readReceipts, archiveOrigins]);
+  const loadedAgents = useMemo(() => { const receipts = new Map((readReceipts ?? []).map(receipt => [receipt.agentId, receipt])); const origins = new Map((archiveOrigins ?? []).map(origin => [origin.agentId, origin])); return applyLiveExtras(enrichAgents(data.agents.filter(agent => agent.labels["observatory.role"] !== "insight"), telemetry, background), liveExtras.data?.agents).map(agent => applyReadReceipt(applyArchiveReadOrigin(agent, origins.get(agent.id)), receipts.get(agent.id))); }, [data.agents, telemetry, background, readReceipts, archiveOrigins, liveExtras.data]);
   const agents = useMemo(() => loadedAgents.filter(agent => archiveMode ? !!agent.archivedAt : !agent.archivedAt), [loadedAgents, archiveMode]);
   // Range, snooze and event-window filters change only at exact boundaries; between them the
   // derived lists keep their identity while displayed relative times still tick with `now`.
@@ -168,25 +185,37 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const checkouts = useMemo(() => [...new Map(agents.map(a => [checkoutKey(a), checkoutName(a)] as const)).entries()].sort((a, b) => a[1].localeCompare(b[1])), [agents]);
   const providers = useMemo(() => [...new Set(agents.map(a => a.provider))].sort(), [agents]);
   const snoozedAt = useCallback((agent: AgentRecord) => isCompletionSnoozed(agent, snoozes, filterNow), [snoozes, filterNow]);
-  const attentionOf = useCallback((agent: AgentRecord) => needsAttention(agent, snoozedAt(agent)), [snoozedAt]);
-  const counts = useMemo(() => { let attention = 0, approvals = 0, running = 0, unread = 0, snoozed = 0, idle = 0; for (const agent of harvestScope) { if (attentionOf(agent)) attention++; if (!agent.archivedAt && (agent.pendingPermissionCount > 0 || agent.status === "waiting")) approvals++; if (matchesStatus(agent.status, "running")) running++; if (agent.status === "idle" && !agent.archivedAt && !agent.pendingPermissionCount) idle++; if (isUnreadCompletion(agent)) { if (snoozedAt(agent)) snoozed++; else unread++; } } return { attention, approvals, running, unread, snoozed, idle }; }, [harvestScope, attentionOf, snoozedAt]);
+  // Host-wide settings (shared with the sidebar badge): child Agents' results count only when asked to (opus-F15).
+  const settings = preferences.snapshot?.settings ?? defaultObservatorySettings;
+  const attentionOf = useCallback((agent: AgentRecord) => needsAttention(agent, snoozedAt(agent), { childCompletions: settings.childCompletions }), [snoozedAt, settings.childCompletions]);
+  // 待回复 counts the Agents waiting on your answer to a question; 待审批 the ones waiting on a permission or plan (opus-F12).
+  const liveTally = useCallback((list: readonly AgentRecord[]) => { let attention = 0, approvals = 0, running = 0, unread = 0, snoozed = 0, idle = 0; for (const agent of list) { if (attentionOf(agent)) attention++; const waiting = agent.archivedAt ? null : waitingKind(agent); if (waiting && waiting !== "question") approvals++; if (matchesStatus(agent.status, "running")) running++; if (!agent.archivedAt && (waiting === "question" || (agent.status === "idle" && !agent.pendingPermissionCount))) idle++; if (isUnreadCompletion(agent)) { if (heldBySnooze(agent, snoozedAt(agent))) snoozed++; else unread++; } } return { attention, approvals, running, unread, snoozed, idle }; }, [attentionOf, snoozedAt]);
+  const counts = useMemo(() => liveTally(harvestScope), [harvestScope, liveTally]);
+  // 看板's live pills open the list with every time range: they count the same way over the same Agents (opus-F14).
+  const boardCounts = useMemo(() => liveTally(agents.filter(agent => !workspaceId || agent.workspaceId === workspaceId)), [agents, workspaceId, liveTally]);
   // Search and state filters reveal matching descendants (see buildDashboardRows); place filters keep the tree as is.
   const revealing = !!query.trim() || status !== "all" || readFilter !== "all" || focus !== "all";
   const filtered = revealing || workspace !== (workspaceId ?? "all") || project !== "all" || checkout !== "all" || provider !== "all" || sessionScope !== "all";
-  const { rows } = useMemo(() => buildDashboardRows(scoped.filter(agent => readFilter !== "unread" || showSnoozed || !snoozedAt(agent)), { query, status, view, sort, expanded, readFilter, focus: focus === "attention" ? attentionOf : undefined }), [scoped, query, status, view, sort, expanded, readFilter, showSnoozed, snoozedAt, focus, attentionOf]);
+  // The 未读 list leaves out what the 未读 chip counts as 稍后, by the same rule: a stop not seen yet is never held back (P3-1).
+  const { rows } = useMemo(() => buildDashboardRows(scoped.filter(agent => readFilter !== "unread" || showSnoozed || !heldBySnooze(agent, snoozedAt(agent))), { query, status, view, sort, expanded, readFilter, focus: focus === "attention" ? attentionOf : undefined }), [scoped, query, status, view, sort, expanded, readFilter, showSnoozed, snoozedAt, focus, attentionOf]);
   const items = useMemo(() => {
     const grouped = sort === "attention" && !archiveMode;
     const sections = grouped ? groupDashboardRows(rows, attentionOf) : [{ group: "recent" as const, rows, threads: 0 }];
     const result: SessionItem[] = [];
     for (const section of sections) {
       if (grouped) result.push({ kind: "section", key: `section:${section.group}`, group: section.group, title: groupTitles[section.group], count: section.threads });
-      for (const row of section.rows) result.push({ kind: "row", key: row.node.agent.id, row, childUnread: row.node.children.length ? countUnreadDescendants(row) : 0, childRunning: row.node.children.length ? countRunningDescendants(row) : 0, snoozed: isUnreadCompletion(row.node.agent) && snoozedAt(row.node.agent) });
+      // A collapsed thread in 需要处理 for its descendants says why on its parent row (P3-3); unread ones not counted there show apart.
+      for (const row of section.rows) {
+        const thread = row.node.children.length ? threadAttention(row.node, attentionOf) : null;
+        result.push({ kind: "row", key: row.node.agent.id, row, childUnread: thread?.unread ?? 0, childAttention: thread?.count ?? 0, childPhase: thread?.phase ?? null,
+          childRunning: row.node.children.length ? countRunningDescendants(row) : 0, snoozed: isUnreadCompletion(row.node.agent) && snoozedAt(row.node.agent) });
+      }
     }
     return result;
   }, [rows, sort, archiveMode, attentionOf, snoozedAt]);
   useEffect(() => { if (pendingScroll.current === null || !items.length) return; const offset = pendingScroll.current; pendingScroll.current = null; scrollOffset.current = offset; if (offset > 0) setTimeout(() => list.current?.scrollToOffset({ offset, animated: false }), 0); }, [items.length]);
   const selected = selectedId ? agents.find(agent => agent.id === selectedId) : undefined;
-  const scopeIds = useMemo(() => new Set(scoped.filter(agent => matchesStatus(agent.status, status) && (readFilter === "all" || completionReadState(agent) === readFilter) && (focus === "all" || attentionOf(agent))).map(a => a.id)), [scoped, status, readFilter, focus, attentionOf]);
+  const scopeIds = useMemo(() => new Set(scoped.filter(agent => matchesAgentStatus(agent, status) && (readFilter === "all" || completionReadState(agent) === readFilter) && (focus === "all" || attentionOf(agent))).map(a => a.id)), [scoped, status, readFilter, focus, attentionOf]);
   const eventSince = range === "all" ? -Infinity : filterNow - (range === "24h" ? 1 : range === "7d" ? 7 : 30) * 86400_000;
   const events = useMemo(() => (telemetry?.events ?? []).filter(event => scopeIds.has(event.agentId) && Date.parse(event.at) >= eventSince), [telemetry, scopeIds, eventSince]);
   const signals = useMemo(() => { const labels = new Map<string, string>(); for (const signal of decisionSignals(agents, telemetry?.events ?? [], now)) { if (signal.kind === "quiet") labels.set(signal.agentId, "久无更新"); else if (signal.kind === "repeated_failure") labels.set(signal.agentId, `失败 ${signal.count} 次`); } return labels; }, [agents, telemetry, now]);
@@ -209,7 +238,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   function selectAgent(agentId: string) {
     const agent = agents.find(candidate => candidate.id === agentId);
     if (agent) {
-      if (!harvestQueue.length && isUnreadCompletion(agent)) { const queue = harvestScope.filter(item => isUnreadCompletion(item) && !isCompletionSnoozed(item, snoozes, Date.now())).map(item => ({ id: item.id, token: knownCompletionAt(item)! })); setHarvestQueue(queue); setQueuePosition(Math.max(0, queue.findIndex(item => item.id === agentId))); }
+      if (!harvestQueue.length && isUnreadCompletion(agent) && !stopUnseen(agent)) { const queue = harvestScope.filter(item => isUnreadCompletion(item) && !stopUnseen(item) && !isCompletionSnoozed(item, snoozes, Date.now())).map(item => ({ id: item.id, token: knownCompletionAt(item)! })); setHarvestQueue(queue); setQueuePosition(Math.max(0, queue.findIndex(item => item.id === agentId))); }
       setSelectedId(agentId); return;
     }
     setSelectedId(null);
@@ -225,14 +254,15 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   selectRef.current = selectAgent;
   const selectRow = useCallback((agentId: string) => selectRef.current(agentId), []);
   const openFromView = (agentId: string) => { setTab("agents"); selectAgent(agentId); };
-  const nextHarvest = (currentId: string) => { const start = harvestQueue.findIndex(item => item.id === currentId); for (let offset = 1; offset <= harvestQueue.length; offset++) { const index = (Math.max(0, start) + offset) % harvestQueue.length; const item = harvestQueue[index]!; const next = agents.find(agent => agent.id === item.id); if (item.id !== currentId && next && isUnreadCompletion(next) && knownCompletionAt(next) === item.token && !isCompletionSnoozed(next, snoozes, Date.now())) { setQueuePosition(index); setSelectedId(item.id); return; } } setSelectedId(null); setHarvestQueue([]); toast.show("这一批未读结果已处理完", { variant: "success" }); };
-  const snoozeAgent = async (agent: AgentRecord) => { const token = knownCompletionAt(agent); if (!token) return; await preferences.mutate({ snooze: { agentId: agent.id, completionAt: token, until: new Date(Date.now() + 3600000).toISOString() } }); toast.show("已延后 1 小时，有新结果仍会提醒"); nextHarvest(agent.id); };
+  const nextHarvest = (currentId: string) => { const start = harvestQueue.findIndex(item => item.id === currentId); for (let offset = 1; offset <= harvestQueue.length; offset++) { const index = (Math.max(0, start) + offset) % harvestQueue.length; const item = harvestQueue[index]!; const next = agents.find(agent => agent.id === item.id); if (item.id !== currentId && next && isUnreadCompletion(next) && !stopUnseen(next) && knownCompletionAt(next) === item.token && !isCompletionSnoozed(next, snoozes, Date.now())) { setQueuePosition(index); setSelectedId(item.id); return; } } setSelectedId(null); setHarvestQueue([]); toast.show("这一批未读结果已处理完", { variant: "success" }); };
+  // A result or a reply that asks you (待回复): the snooze is tied to it, a newer one shows again (opus-F1).
+  const snoozeAgent = async (agent: AgentRecord) => { const token = snoozeToken(agent); if (!token) return; await preferences.mutate({ snooze: { agentId: agent.id, completionAt: token, until: new Date(Date.now() + 3600000).toISOString() } }); toast.show("已延后 1 小时，有新结果仍会提醒"); if (harvestQueue.length) nextHarvest(agent.id); };
   // From the 看板 hero: show exactly the sessions behind the tapped live count.
   const showScope = (target: SessionScopeTarget) => {
     resetFilters(); setRange("all"); setSelectedId(null); setTab("agents");
     if (target === "unread") setReadFilter("unread"); else setStatus(target === "approval" ? "waiting" : target);
   };
-  const refresh = () => { onRefresh(); if (statsTab) void stats.refetch(); if (tokenTab) { void tokens.refetch(); void tokenLive.refetch(); } };
+  const refresh = () => { onRefresh(); if (statsTab) void stats.refetch(); if (tokenTab) { void tokens.refetch(); void tokenLive.refetch(); void quota.refetch(); } };
   const detailQueue = harvestQueue.length ? { index: queuePosition + 1, total: harvestQueue.length } : undefined;
   const detailClosed = () => { setSelectedId(null); setHarvestQueue([]); setEvidenceTarget(null); };
   const openScope = (next: { focus?: "attention"; status?: "running" | "idle"; readFilter?: "unread"; snoozed?: boolean }) => {
@@ -242,6 +272,16 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   };
   // Counts are only meaningful once a snapshot exists.
   const known = data.agents.length > 0 || (!data.loading && !data.error);
+  // Opened from the sidebar's popover (screen params): select that Agent, or show 需要处理. Applied once the saved view is
+  // restored and the directory has been read, so neither overrides it; `t` makes a repeated tap on the same entry count.
+  const handledRequest = useRef<string | null>(null);
+  const request = params?.agent || params?.focus === "attention" ? `${params.agent ?? ""}|${params.focus ?? ""}|${params.t ?? ""}` : null;
+  useEffect(() => {
+    if (!request || handledRequest.current === request || !preferences.snapshot || !hydrated.current || !known) return;
+    handledRequest.current = request;
+    if (params?.focus === "attention") { resetFilters(); setRange("all"); setTab("agents"); setFocus("attention"); }
+    if (params?.agent) { setTab("agents"); setHarvestQueue([]); selectAgent(params.agent); }
+  }, [request, preferences.snapshot, known]);
   const filterState: FilterState = { status, readFilter, sessionScope, checkout, workspace, provider };
   const changeFilters = (patch: Partial<FilterState>) => { if (patch.status !== undefined) setStatus(patch.status); if (patch.readFilter !== undefined) { setReadFilter(patch.readFilter); setShowSnoozed(false); } if (patch.sessionScope !== undefined) setSessionScope(patch.sessionScope); if (patch.checkout !== undefined) setCheckout(patch.checkout); if (patch.workspace !== undefined) { setWorkspace(patch.workspace); const chosen = agents.find(agent => agent.workspaceId === patch.workspace); if (chosen) setProject(projectKey(chosen)); } if (patch.provider !== undefined) setProvider(patch.provider); };
   const workspaceDefault = workspaceId ?? "all";
@@ -261,12 +301,43 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     data.error && data.agents.length ? <Banner key="sync" theme={theme} tone="danger" message={`同步失败：${String(data.error)}。显示的是上次结果。`} action={{ label: "重试", onPress: onRefresh }} /> : null,
     data.truncated ? <Banner key="truncated" theme={theme} message="会话较多，只加载了一部分；计数只覆盖已加载的会话。" /> : null,
     telemetryError ? <Banner key="telemetry" theme={theme} tone="warning" message="事件记录暂不可用，会话状态仍会实时更新。" /> : null,
-    telemetry?.persistenceError ? <Banner key="persist" theme={theme} tone="warning" message={`事件无法保存：${telemetry.persistenceError}`} /> : null,
+    // The server says in one Chinese sentence whether saving failed or the saved history could not be read back (opus-F74).
+    telemetry?.persistenceError ? <Banner key="persist" theme={theme} tone="warning" message={telemetry.persistenceError} /> : null,
     readReceiptError ? <Banner key="receipts" theme={theme} tone="warning" message={`已读状态同步异常：${readReceiptError}`} /> : null,
     preferences.error ? <Banner key="preferences" theme={theme} tone="warning" message={`视图无法保存：${preferences.error}`} /> : null,
   ].filter(Boolean);
+  // 归档已读完成 (opus-B18): completed sessions whose result was read, with nothing running above or below them and no heartbeat
+  // or limit to come back for. Paseo completes an Agent's heartbeats when it is archived, so only a heartbeat read that covered every
+  // schedule file may show a session has none (codex-F16); a failed, erroneous or incomplete read offers nothing and says why.
+  const heartbeatState = useMemo(() => heartbeatGuard(heartbeats.data, !!heartbeats.error), [heartbeats.data, heartbeats.error]);
+  // Paseo archives an Agent's children with it (and completes their heartbeats): with the list cut short not every child is known.
+  const archiveOffer = useMemo((): ArchiveOffer => archiveMode ? { candidates: [], withheld: 0, sparedForChildren: 0 }
+    : archiveReadCandidates(agents, harvestScope, heartbeatState, { truncated: data.truncated }), [archiveMode, agents, harvestScope, heartbeatState, data.truncated]);
+  const archivable = archiveOffer.candidates;
+  const archiveMarked = async () => {
+    if (!archiveMarks || archivingMarked) return;
+    setArchivingMarked(true);
+    // The heartbeats are read again for this tap: one created since the first tap keeps its Agent, and a read that cannot be trusted
+    // archives nothing. Only rows still eligible stay in the batch (one that started a new turn meanwhile stays out).
+    const plan = confirmArchive(archiveMarks, agents, harvestScope, await checkHeartbeats(), { truncated: data.truncated });
+    if (!plan.ok) { setArchivingMarked(false); toast.error(`没有归档：${plan.reason}`); return; }
+    const queue = [...plan.ids], total = queue.length;
+    let done = 0, failed = 0;
+    const worker = async () => { while (queue.length) { const id = queue.shift()!; try { await paseo.agents.ref(id).archive(); done++; } catch { failed++; } } };
+    try { await Promise.all(Array.from({ length: Math.min(4, total) }, worker)); }
+    finally {
+      setArchivingMarked(false); setArchiveMarks(null);
+      // Why the rest stayed: a heartbeat of their own, or an Agent below them that archiving would take along.
+      const kept = [plan.spared ? `${plan.spared} 个有心跳` : null, plan.sparedForChildren ? `${plan.sparedForChildren} 个的子 Agent 还没处理完` : null].filter(Boolean).join("，");
+      const spared = kept ? `；${kept}，已留下` : "";
+      if (failed) toast.error(`已归档 ${done} 个，${failed} 个失败，可以再试一次${spared}`);
+      else if (total) toast.show(`已归档 ${done} 个已读完成的会话${spared}`, { variant: "success" });
+      else toast.show(kept ? `${kept}，没有归档` : "这些会话已有新动静，没有归档");
+      void data.refresh();
+    }
+  };
   const detail = selected
-    ? <AgentDetail key={`${host.id}:${selected.id}`} agent={selected} agents={loadedAgents} theme={theme} compact={compact} navigation={navigation} onSelectAgent={selectAgent} onClose={detailClosed} telemetry={telemetry} onReadNext={harvestQueue.length ? receipt => nextHarvest(receipt.agentId) : undefined} onSnooze={preferences.ready ? snoozeAgent : undefined} queue={detailQueue} onOpenSchedules={onOpenSchedules} initialEvidenceRef={evidenceTarget?.agentId === selected.id ? evidenceTarget.ref : undefined} />
+    ? <AgentDetail key={`${host.id}:${selected.id}`} hostId={host.id} heartbeats={heartbeats.data?.byAgent.get(selected.id)} agent={selected} agents={loadedAgents} theme={theme} compact={compact} navigation={navigation} onSelectAgent={selectAgent} onClose={detailClosed} telemetry={telemetry} onReadNext={harvestQueue.length ? receipt => nextHarvest(receipt.agentId) : undefined} onSnooze={preferences.ready ? snoozeAgent : undefined} queue={detailQueue} onOpenSchedules={onOpenSchedules} initialEvidenceRef={evidenceTarget?.agentId === selected.id ? evidenceTarget.ref : undefined} />
     : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" title="选择一个会话" message="结果、时间线和子任务会显示在这里" /></View>;
   const empty = data.loading ? <Skeleton theme={theme} rows={6} />
     : data.error ? <EmptyState theme={theme} icon="WifiOff" title="暂时无法读取会话" message="恢复连接后会自动重试" action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />
@@ -283,7 +354,13 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
       ...(view === "tree" ? [{ key: "expand", label: expanded.size ? "收起全部子 Agent" : "展开全部子 Agent", icon: "ChevronsUpDown", onPress: () => setExpanded(expanded.size ? new Set() : new Set(scoped.map(agent => agent.id))) }] : []),
     ] : []),
     ...(listTab ? [{ key: "export", label: "导出快照", icon: "Download", hint: "复制当前筛选下的会话与观测记录", onPress: () => void exportSnapshot() }] : []),
+    ...(sessionsTab && archivable.length ? [{ key: "archive-read", label: `归档已读完成（${archivable.length}）`, icon: "Archive",
+      hint: `只归档结果已经看过、没在运行、也没有心跳的完成会话（它的子 Agent 也要这样，归档会连带它们）；会先标出来，再点一次确认${archiveOffer.sparedForChildren ? `；另有 ${archiveOffer.sparedForChildren} 个的子 Agent 还没处理完，没有列入` : ""}`,
+      onPress: () => setArchiveMarks(new Set(archivable.map(agent => agent.id))) }]
+      // Read sessions are waiting, but the heartbeat read (or a cut session list) cannot show they are safe: disabled, with the reason.
+      : sessionsTab && archiveOffer.withheld && archiveOffer.reason ? [{ key: "archive-read", label: "归档已读完成", icon: "Archive", disabled: true, hint: `暂不可用：${archiveOffer.reason}`, onPress: () => {} }] : []),
     ...(sessionsTab ? [{ key: "legend", label: "状态图例", icon: "Palette", tone: "violet" as const, hint: "每种颜色和标记代表什么", onPress: () => setLegendOpen(true) }] : []),
+    ...(!archiveMode ? [{ key: "settings", label: "观测设置", icon: "Settings2", hint: "需要处理的计算方式，对这台主机上所有页面和侧栏角标生效", onPress: () => setSettingsOpen(true) }] : []),
     { key: "refresh", label: "刷新", icon: "RefreshCw", disabled: data.isRefreshing, onPress: refresh },
   ];
   // Each view has its own colours. Phones show the unselected views as coloured icons only.
@@ -299,7 +376,8 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const iconTabs = compact && surfaceWidth > 0 && surfaceWidth < 560;
   const statsProps = { theme, compact, stats: stats.data, loading: stats.isPending, error: stats.error?.message, range: statsRange, onRange: setStatsRange, onRefresh: refresh };
   const searching = sessionsTab && compact && (searchOpen || !!query);
-  const sessionList = <SessionList items={items} theme={theme} compact={compact} selectedId={selectedId} expanded={expanded} forceExpanded={revealing} now={now} signals={signals} rates={rates} empty={empty} listRef={list} onScrollEnd={onScrollEnd} onToggle={toggle} onSelect={selectRow} />;
+  const sessionList = <SessionList items={items} theme={theme} compact={compact} selectedId={selectedId} expanded={expanded} forceExpanded={revealing} now={now} signals={signals} rates={rates}
+    heartbeats={heartbeats.data?.byAgent} marked={archiveMarks ?? undefined} empty={empty} listRef={list} onScrollEnd={onScrollEnd} onToggle={toggle} onSelect={selectRow} />;
   const pushDetail = compact && !!selected && listTab;
   const chrome = !(compact && tab === "insights" && hubPushed);
   return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>
@@ -333,22 +411,39 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
         {savedViews.map(saved => <Chip key={saved.id} theme={theme} label={saved.name} icon="Bookmark" onPress={() => applyView(saved.view)} />)}
       </ChipBar> : null}
       {banners.length ? <View style={{ gap: space.sm, paddingHorizontal: space.md, paddingTop: sessionsTab ? 0 : space.sm, paddingBottom: space.sm }}>{banners}</View> : null}
+      {sessionsTab && archiveMarks ? <View accessibilityRole="alert" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm, marginHorizontal: space.md, marginBottom: space.sm, padding: space.md,
+        borderRadius: radius.lg, borderWidth: hairline, borderColor: tint(hueColor(theme, "red"), 0.5), backgroundColor: tint(hueColor(theme, "red"), tintAlpha(theme)) }}>
+        <Text style={{ flexGrow: 1, flexShrink: 1, minWidth: 180, color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>将归档列表里标红的 {archiveMarks.size} 个已读完成会话。确认时会再查一次心跳，有心跳的会留下；归档后可在「已归档会话」里恢复。</Text>
+        <Button theme={theme} size="sm" label="取消" disabled={archivingMarked} onPress={() => setArchiveMarks(null)} />
+        <Button theme={theme} size="sm" variant="danger" icon="Archive" label={`确认归档 ${archiveMarks.size} 个`} busy={archivingMarked} onPress={() => void archiveMarked()} />
+      </View> : null}
       {sessionsTab ? <SplitView theme={theme} compact={compact} showDetail={false} list={sessionList} detail={detail} />
         : tab === "activity" ? <>
           {!compact && events.length ? <Swimlane theme={theme} events={events} agents={agents} now={now} compact={false} onSelect={selectAgent} inset={space.lg} /> : null}
           <SplitView theme={theme} compact={compact} showDetail={false} list={<ActivityFeed events={events} theme={theme} telemetry={telemetry} onSelect={selectAgent} now={now} selectedId={selectedId} agents={agents} swimlane={compact} />} detail={detail} />
         </>
-        : tab === "board" ? <StatsBoard {...statsProps} onOpenScope={showScope} onOpenAgent={openFromView} onOpenBreakdown={() => { setDimension("models"); setTab("analytics"); }}
+        : tab === "board" ? <StatsBoard {...statsProps} live={known ? boardCounts : undefined} quota={<QuotaChip theme={theme} quota={quota.data} onPress={() => setTab("tokens")} />} onOpenScope={showScope} onOpenAgent={openFromView} onOpenBreakdown={() => { setDimension("models"); setTab("analytics"); }}
           tokens={tokens.data?.daily.length ? { today: tokenTotal(tokens.data.daily.at(-1)!), onOpen: () => setTab("tokens") } : undefined} />
         : tab === "analytics" ? <StatsBreakdown {...statsProps} dimension={dimension} onDimension={setDimension}
           observed={<AnalyticsDashboard theme={theme} hostId={host.id} compact={compact} agents={agents} analytics={analytics} loading={analyticsLoading} error={analyticsError} onSelectAgent={openFromView} onSelectProject={selectProject} />} />
         : tab === "compare" ? <StatsCompare {...statsProps} />
         : tab === "tokens" ? <TokenBoard theme={theme} compact={compact} range={statsRange} onRange={setStatsRange} onRefresh={refresh} tokens={tokens.data} loading={tokens.isPending} error={tokens.error?.message}
+          quota={{ data: quota.data, loading: quota.isPending, error: quota.error?.message, onRefresh: () => { void quota.refetch(); } }}
           live={tokenLive.data} liveError={tokenLive.error?.message} liveWindow={liveWindow} onLiveWindow={setLiveWindow} onOpenAgent={openFromView} />
         : <InsightsHub theme={theme} compact={compact} agents={agents} onSelectAgent={openFromView} onOpenEvidence={target => { setEvidenceTarget(target); openFromView(target.agentId); }} onPush={setHubPushed} />}
     </>}
     <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
     <Sheet title="状态图例" open={legendOpen} onClose={() => setLegendOpen(false)}><PhaseLegend theme={theme} /></Sheet>
+    <Sheet title="观测设置" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>子 Agent 完成也计入「需要处理」</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>默认不计入：上级 Agent 已经拿到子 Agent 的结果。子 Agent 出错、撞额度、空轮或没收尾、等审批或提问时照常计入；它们的未读仍显示在上级那一行。</Text>
+        </View>
+        <Switch theme={theme} label="子 Agent 完成也计入需要处理" value={settings.childCompletions} disabled={!preferences.ready}
+          onChange={value => { void preferences.mutate({ settings: { childCompletions: value } }).catch(() => toast.error("设置没有保存，请重试")); }} />
+      </View>
+    </Sheet>
     <ProjectSheet theme={theme} open={sheet === "project"} onClose={() => setSheet(null)} projects={projects} total={ranged.length} value={project} onChange={value => { setProject(value); setWorkspace(workspaceDefault); setCheckout("all"); }} />
     <RangeSheet theme={theme} open={sheet === "range"} onClose={() => setSheet(null)} value={range} onChange={setRange} />
     <FilterSheet theme={theme} open={sheet === "filters"} onClose={() => setSheet(null)} archiveMode={archiveMode} state={filterState} checkouts={checkouts} workspaces={workspaces} providers={providers} showWorkspace={!workspaceId}

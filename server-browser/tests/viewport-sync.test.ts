@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 
 test('window matching overrides stale Playwright metrics and stays exact with frame polling', {timeout:30000}, async()=>{
   const dataRoot=await mkdtemp(path.join(tmpdir(),'paseo-viewport-sync-'));

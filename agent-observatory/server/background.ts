@@ -1,7 +1,7 @@
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { getBackground, type BackgroundAgent, type BackgroundResponse } from "../shared/background";
-import { createProviderSubagentBridge } from "./provider-subagents";
+import type { ProviderBridge } from "./provider-subagents";
 import { contentRevision } from "./revision";
 import type { StatsDirectory } from "./stats-directory";
 
@@ -32,13 +32,17 @@ async function pool<T>(items: readonly T[], limit: number, task: (item: T) => Pr
 /**
  * Provider subagents per parent Agent, for 后台执行中. Live from the host's `agent.provider_subagents.update` session
  * events; bootstrapped and repaired from the per-Agent list. That list makes the host load an unloaded Agent (ACP
- * providers replay it and it looks freshly updated), so only Agents the directory shows as loaded — anything but
- * `closed` — are ever asked.
+ * providers replay it and it looks freshly updated), so only Agents seen live by this plugin process are ever asked:
+ * a lifecycle hook or a subagent event since it started, and no `agent.closed` since. The directory's status alone does not
+ * prove it: an unloaded Agent reports its persisted last status, which stays `running` / `idle` after the daemon was killed
+ * or a close timed out.
  */
 export class BackgroundTracker {
   private readonly parents = new Map<string, Map<string, Run>>();
   /** Each loaded parent's latest user message as of the last walk: a subagent created before it was resumed since. */
   private readonly asked = new Map<string, number>();
+  /** Agents this process has seen live (hooks, subagent events), most recent last. */
+  private readonly seen = new Set<string>();
   private stream: ReturnType<EventStream["observeEvents"]> | null = null;
   private opened: Promise<void> = Promise.resolve();
   private live = false;
@@ -71,6 +75,16 @@ export class BackgroundTracker {
     return this.opened;
   }
 
+  /** The Agent is loaded in the host right now: it just reported a lifecycle event. */
+  markLive(agentId: string): void {
+    if (!agentId || agentId.length > 256) return;
+    this.seen.delete(agentId); this.seen.add(agentId);
+    while (this.seen.size > 4_000) this.seen.delete(this.seen.values().next().value!);
+  }
+  /** The host closed (unloaded) the Agent; asking about it again would load it. */
+  markClosed(agentId: string): void { this.seen.delete(agentId); }
+  isLive(agentId: string): boolean { return this.seen.has(agentId); }
+
   receive(message: unknown): void {
     const event = record(message);
     if (this.closed || event.type !== "agent.provider_subagents.update") return;
@@ -78,6 +92,8 @@ export class BackgroundTracker {
     if (payload.kind === "upsert") {
       const subagent = record(payload.subagent), parentId = text(subagent.parentAgentId, 256), id = text(subagent.id, 512), status = statusOf(subagent.status);
       if (!parentId || !id || !status) return;
+      // The host streams subagents of loaded parents only.
+      this.markLive(parentId);
       const previous = this.parents.get(parentId)?.get(id), at = time(subagent.updatedAt) ?? now;
       // A restart seen live is exact. A first sight starts at its creation unless it was created before the parent's
       // latest message (then it was resumed and its start is unknown).
@@ -88,6 +104,7 @@ export class BackgroundTracker {
     } else if (payload.kind === "timeline") {
       const parentId = text(payload.parentAgentId, 256), id = text(payload.subagentId, 512);
       if (!parentId || !id) return;
+      this.markLive(parentId);
       const run = this.parents.get(parentId)?.get(id), at = time(payload.timestamp) ?? now;
       // Output from an unknown subagent is work in progress; a late row after its end does not restart it.
       if (!run) this.put(parentId, id, "running", at, null, null, false);
@@ -120,7 +137,7 @@ export class BackgroundTracker {
     if (this.syncing) return this.syncing;
     const now = this.now();
     const listed = new Map(agents.map(agent => [agent.id, agent]));
-    const loaded = new Map(agents.filter(agent => !agent.archivedAt && agent.status !== "closed").map(agent => [agent.id, agent]));
+    const loaded = new Map(agents.filter(agent => !agent.archivedAt && agent.status !== "closed" && this.seen.has(agent.id)).map(agent => [agent.id, agent]));
     this.asked.clear();
     for (const agent of loaded.values()) this.asked.set(agent.id, time(agent.lastUserMessageAt) ?? 0);
     // Closing or archiving an Agent cancels or drops its subagents. Forget parents the walk shows closed or archived,
@@ -211,11 +228,7 @@ export function settleWithin(work: Promise<unknown>, ms: number): Promise<void> 
 }
 
 /** 后台执行中 for the session list (`observatory.background.get`) and the 看板 counts. */
-export function registerBackground(server: PluginServerContext, { directory }: { directory: StatsDirectory }) {
-  const bridge = createProviderSubagentBridge({
-    send(message) { if (!process.send) throw new Error("当前环境没有 Paseo 宿主通道"); process.send(message); },
-    listen(listener) { process.on("message", listener); return () => process.off("message", listener); },
-  });
+export function registerBackground(server: PluginServerContext, { directory, bridge }: { directory: StatsDirectory; bridge: Pick<ProviderBridge, "request"> }) {
   const tracker = new BackgroundTracker(async parentAgentId => {
     const payload = await bridge.request({ type: "agent.provider_subagents.list.request", parentAgentId }, "agent.provider_subagents.list.response");
     return Array.isArray(payload.subagents) ? payload.subagents as ListedSubagent[] : [];
@@ -226,5 +239,5 @@ export function registerBackground(server: PluginServerContext, { directory }: {
     await settleWithin(tracker.sync(directory.agents, directory.refreshedAt), 4_000);
     return tracker.read(input);
   });
-  return { tracker, async close() { await tracker.close(); bridge.dispose(); } };
+  return { tracker, async close() { await tracker.close(); } };
 }

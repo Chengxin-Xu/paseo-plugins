@@ -4,10 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { TelemetryStore, type TelemetryObservation } from "../server/telemetry";
-import { mergeTelemetry, telemetryResponseSchema, telemetrySnapshotSchema } from "../shared/telemetry";
+import { eventLabel, mergeTelemetry, telemetryResponseSchema, telemetrySnapshotSchema } from "../shared/telemetry";
 
 const epoch = Date.parse("2026-09-16T12:00:00.000Z");
 const agent = { id: "agent-1", title: "Ship dashboard" };
+/** Storage messages are shown as they are (a banner, 明细 → 观测): a whole Chinese sentence, only a safe code in Latin. */
+function chineseNotice(message: string | null, code?: string) {
+  assert.ok(message, "a notice is set");
+  assert.match(message, /[\u3400-\u9fff]/);
+  assert.match(message, /。$/, "a whole sentence");
+  assert.doesNotMatch(message.replace(/[A-Z0-9_]{2,32}/g, ""), /[A-Za-z]{2,}/, "no English words besides the code");
+  if (code) assert.ok(message.includes(`（${code}）`), `the code ${code} is named`);
+}
 
 async function fixture(options: { maxAgents?: number; maxEvents?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "observatory-telemetry-"));
@@ -239,7 +247,7 @@ test("bounds records and the event ledger and scopes snapshot copies to one agen
     scoped.agents[0].completedTurns = 999;
     scoped.events[0].label = "modified";
     assert.equal((await f.store.snapshot("agent-4")).agents[0].completedTurns, 0);
-    assert.equal((await f.store.snapshot("agent-4")).events[0].label, "Agent created");
+    assert.equal((await f.store.snapshot("agent-4")).events[0].label, "新建 Agent");
     assert.equal((await f.store.snapshot("missing")).agents.length, 0);
   } finally { await f.dispose(); }
 });
@@ -267,7 +275,8 @@ test("recovers corrupt persistence and preserves one bounded quarantine file", a
   const store = new TelemetryStore({ directory, now: () => epoch, writeDelayMs: 60_000 });
   try {
     const initial = await store.snapshot();
-    assert.match(initial.persistenceError ?? "", /invalid/);
+    chineseNotice(initial.persistenceError);
+    assert.match(initial.persistenceError ?? "", /无法读取，已重新开始记录/, "a restore notice, not a save failure");
     assert.equal(initial.agents.length, 0);
     await store.record({ type: "created", agent });
     await store.flush();
@@ -286,7 +295,9 @@ test("persistence failures keep live collection available and a later flush reco
     await store.record({ type: "created", agent });
     await store.flush();
     assert.equal((await store.snapshot()).agents.length, 1);
-    assert.match((await store.snapshot()).persistenceError ?? "", /could not be saved/);
+    const notice = (await store.snapshot()).persistenceError;
+    chineseNotice(notice);
+    assert.match(notice ?? "", /^事件暂时无法写入磁盘（[A-Z0-9_]+），仍在内存里继续记录。$/);
     await rm(directory);
     await store.flush();
     assert.equal((await store.snapshot()).persistenceError, null);
@@ -301,7 +312,8 @@ test("rejects oversized persistence before parsing and does not retain an oversi
   await truncate(file, 64 * 1024 * 1024 + 1);
   const store = new TelemetryStore({ directory, now: () => epoch, writeDelayMs: 60_000 });
   try {
-    assert.match((await store.snapshot()).persistenceError ?? "", /invalid/);
+    chineseNotice((await store.snapshot()).persistenceError);
+    assert.match((await store.snapshot()).persistenceError ?? "", /超过 64 MB/);
     await store.record({ type: "created", agent });
     await store.flush();
     assert.deepEqual(await readdir(directory), ["telemetry.json"]);
@@ -421,4 +433,206 @@ test("lazy coverage writes run on their own timer and survive a reload", async (
     restored = new TelemetryStore({ directory, now: () => now + 1000, writeDelayMs: 60_000 });
     assert.equal((await restored.analyticsSnapshot()).coverageIntervals?.[0].end, new Date(now).toISOString());
   } finally { await restored?.close(); await store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a turn's stop reason is kept (never text), cleared by the next turn, and a close mid-turn marks it unfinished", async () => {
+  const f = await fixture();
+  try {
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    f.advance(1_000);
+    const resetAt = new Date(epoch + 5 * 3_600_000).toISOString();
+    await f.store.record({ type: "turn_ended", agent, turnId: "t1", outcome: "completed", asks: null, stop: { kind: "quota", resetAt, at: "1999-01-01T00:00:00.000Z" } });
+    let summary = (await f.store.snapshot("agent-1")).agents[0]!;
+    assert.deepEqual(summary.stop, { kind: "quota", resetAt, at: new Date(epoch + 1_000).toISOString() }, "stamped with the observed end");
+    assert.equal((await f.store.snapshot("agent-1")).events[0]!.label, "完成一轮");
+    await f.store.record({ type: "turn_started", agent, turnId: "t2" });
+    summary = (await f.store.snapshot("agent-1")).agents[0]!;
+    assert.equal(summary.stop, null);
+    f.advance(1_000);
+    await f.store.record({ type: "closed", agent });
+    summary = (await f.store.snapshot("agent-1")).agents[0]!;
+    assert.equal(summary.stop?.kind, "unfinished", "closed while the turn was open");
+    assert.equal((await f.store.snapshot("agent-1")).events[0]!.type, "turn_started", "closing adds no event");
+    // A close after a finished turn changes nothing.
+    await f.store.record({ type: "turn_started", agent, turnId: "t3" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t3", outcome: "completed", asks: false, stop: null });
+    await f.store.record({ type: "closed", agent });
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop, null);
+  } finally { await f.dispose(); }
+});
+
+test("a backfilled missed end can carry a stop reason", async () => {
+  const f = await fixture();
+  try {
+    const userAt = new Date(epoch - 60_000).toISOString();
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    await f.store.recordReply("agent-1", new Date(epoch + 1).toISOString(), null, { kind: "unfinished", resetAt: null, at: new Date(epoch + 5_000).toISOString() });
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop?.kind, "unfinished");
+    await f.store.recordReply("agent-1", userAt, { at: new Date(epoch + 10_000).toISOString(), asks: false });
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop?.kind, "unfinished", "an older prompt's reply does not clear a newer stop");
+  } finally { await f.dispose(); }
+});
+
+test("a reply's merge or pull request link is kept (only the link), survives later replies without one and is replaced by a new one (opus-B16)", async () => {
+  const f = await fixture();
+  try {
+    const mr = { url: "https://git.example.com/team/app/-/merge_requests/42", label: "!42", kind: "mr" as const };
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t1", outcome: "completed", asks: false, link: mr });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.link, mr);
+    await f.store.record({ type: "turn_started", agent, turnId: "t2" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t2", outcome: "completed", asks: false, link: null });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.link, mr, "a later reply without a link does not unmake the request");
+    const pr = { url: "https://forge.example.org/team/app/pull/7", label: "#7", kind: "pr" as const };
+    await f.store.recordReply("agent-1", new Date(epoch + 1).toISOString(), { at: new Date(epoch + 2_000).toISOString(), asks: false, link: pr });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.link, pr);
+    await f.store.record({ type: "turn_started", agent, turnId: "t3" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t3", outcome: "completed", asks: false, link: { url: "javascript:alert(1)", label: "!1", kind: "mr" } });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.link, pr, "a malformed link is never stored");
+    // A link with credentials before the host (a push URL) is stored and shown without them.
+    await f.store.record({ type: "turn_started", agent, turnId: "t4" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t4", outcome: "completed", asks: false, link: { url: "https://oauth2:QX7-token-0123@git.example.test/team/app/-/merge_requests/43", label: "!43", kind: "mr" } });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.link, { url: "https://git.example.test/team/app/-/merge_requests/43", label: "!43", kind: "mr" });
+  } finally { await f.dispose(); }
+});
+
+test("events stored by 2.12 and earlier read in Chinese; Chinese labels stay as they are (gemini-F9)", () => {
+  assert.equal(eventLabel({ type: "created", label: "Agent created" }), "新建 Agent");
+  assert.equal(eventLabel({ type: "turn_started", label: "Turn started" }), "开始一轮");
+  assert.equal(eventLabel({ type: "turn_failed", label: "Turn failed" }), "一轮失败");
+  assert.equal(eventLabel({ type: "permission_requested", label: "Waiting for approval or input" }), "等你审批或回答");
+  assert.equal(eventLabel({ type: "permission_resolved", label: "Request declined or cleared" }), "请求被拒绝或撤销");
+  assert.equal(eventLabel({ type: "permission_resolved", label: "Request approved" }), "请求已批准");
+  assert.equal(eventLabel({ type: "turn_completed", label: "完成重复请求验证" }), "完成重复请求验证");
+});
+
+test("a turn's 快捷回复 category is kept with its final reply only, cleared by the next turn, and backfilled like 待回复 (opus-B26)", async () => {
+  const f = await fixture();
+  const summary = async () => (await f.store.snapshot("agent-1")).agents[0]!;
+  try {
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t1", outcome: "completed", asks: true, nudge: "go-ahead" });
+    assert.equal((await summary()).replyNudge, "go-ahead");
+    await f.store.record({ type: "turn_started", agent, turnId: "t2" });
+    assert.equal((await summary()).replyNudge, null, "a new turn clears it with 待回复");
+    await f.store.record({ type: "turn_ended", agent, turnId: "t2", outcome: "completed", asks: false, nudge: "made-up" as never });
+    assert.equal((await summary()).replyNudge, null, "only a known category is stored");
+    await f.store.record({ type: "turn_started", agent, turnId: "t3" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t3", outcome: "completed", asks: null, nudge: "keep-going" });
+    assert.equal((await summary()).replyNudge, null, "no final reply, nothing it invites");
+    f.advance(1_000);
+    const userAt = new Date(epoch + 2_000).toISOString();
+    await f.store.recordReply("agent-1", userAt, { at: new Date(epoch + 3_000).toISOString(), asks: false, nudge: "keep-going" });
+    assert.equal((await summary()).replyNudge, "keep-going", "a backfilled reply carries its category");
+    await f.store.recordReply("agent-1", new Date(epoch + 9_000).toISOString(), null);
+    assert.equal((await summary()).replyNudge, null, "a newer prompt without a reply clears it");
+    await f.store.close();
+    assert.equal((await readFile(join(f.directory, "telemetry.json"), "utf8")).includes("继续"), false, "never any text");
+  } finally { await f.dispose(); }
+});
+
+test("a guessed reset is kept on both paths; a stop as stored never carries an acknowledgement from a turn's end (grok-F2)", async () => {
+  const f = await fixture();
+  try {
+    const resetAt = new Date(epoch + 4 * 3_600_000).toISOString();
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t1", outcome: "completed", asks: null,
+      stop: { kind: "quota", resetAt, resetGuessed: true, at: "1999-01-01T00:00:00.000Z", seenAt: "1999-01-01T00:00:00.000Z" } });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.stop, { kind: "quota", resetAt, resetGuessed: true, at: new Date(epoch).toISOString() });
+    await f.store.record({ type: "turn_started", agent, turnId: "t2" });
+    await f.store.record({ type: "turn_ended", agent, turnId: "t2", outcome: "completed", asks: null, stop: { kind: "quota", resetAt, resetGuessed: false, at: new Date(epoch).toISOString() } });
+    assert.equal("resetGuessed" in (await f.store.snapshot("agent-1")).agents[0]!.stop!, false, "only a guess is marked");
+    f.advance(5_000);
+    await f.store.recordReply("agent-1", new Date(epoch + 1_000).toISOString(), { at: new Date(epoch + 2_000).toISOString(), asks: false },
+      { kind: "quota", resetAt, resetGuessed: true, at: new Date(epoch + 2_000).toISOString() });
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop?.resetGuessed, true, "the backfill keeps it too");
+  } finally { await f.dispose(); }
+});
+
+test("a close mid-turn is marked as such and 知道了 on exactly that stop is saved; a new turn replaces it (opus-F34)", async () => {
+  const f = await fixture();
+  try {
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    f.advance(30_000);
+    await f.store.record({ type: "closed", agent });
+    const stop = (await f.store.snapshot("agent-1")).agents[0]!.stop!;
+    assert.deepEqual(stop, { kind: "unfinished", resetAt: null, at: new Date(epoch + 30_000).toISOString(), closedMidTurn: true });
+    const { revision } = await f.store.read();
+    assert.equal(await f.store.ackStop("agent-1", new Date(epoch + 29_999).toISOString()), false, "another stop");
+    assert.equal(await f.store.ackStop("unknown", stop.at), false);
+    assert.equal((await f.store.read({ revision })).mode, "unchanged");
+    f.advance(60_000);
+    assert.equal(await f.store.ackStop("agent-1", stop.at), true);
+    const seen = (await f.store.snapshot("agent-1")).agents[0]!.stop!;
+    assert.equal(seen.seenAt, new Date(epoch + 90_000).toISOString());
+    assert.equal(stop.seenAt, undefined, "a snapshot handed out earlier is not changed under its reader");
+    assert.equal((await f.store.read({ revision })).mode, "delta", "polling clients see it");
+    f.advance(60_000);
+    assert.equal(await f.store.ackStop("agent-1", stop.at), true, "again: already seen");
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop?.seenAt, seen.seenAt, "the first acknowledgement stands");
+    // Written out before answering: a restart right after keeps it.
+    const reloaded = new TelemetryStore({ directory: f.directory, now: () => epoch, writeDelayMs: 60_000 });
+    assert.equal((await reloaded.snapshot("agent-1")).agents[0]!.stop?.seenAt, seen.seenAt);
+    await reloaded.close();
+    await f.store.record({ type: "turn_started", agent, turnId: "t2" });
+    assert.equal((await f.store.snapshot("agent-1")).agents[0]!.stop, null);
+    assert.equal(await f.store.ackStop("agent-1", stop.at), false, "nothing to acknowledge after a new turn");
+  } finally { await f.dispose(); }
+});
+
+test("a backfilled stop of the open turn survives the close, and a tail read cannot undo a first-hand close (opus-F34)", async () => {
+  const f = await fixture();
+  try {
+    const userAt = new Date(epoch - 1_000).toISOString();
+    // The end was missed (a plugin reload): the backfill read the turn's tail, so that turn did end; a later close changes nothing.
+    await f.store.record({ type: "turn_started", agent, turnId: "t1" });
+    await f.store.recordReply("agent-1", userAt, null, { kind: "silent", resetAt: null, at: new Date(epoch + 5_000).toISOString() });
+    f.advance(10_000);
+    await f.store.record({ type: "closed", agent });
+    assert.deepEqual((await f.store.snapshot("agent-1")).agents[0]!.stop, { kind: "silent", resetAt: null, at: new Date(epoch + 5_000).toISOString() });
+    // A close of an open turn, then (the session loaded again) the tail read of that same prompt: the close stands.
+    const other = { id: "agent-2", title: "Index" };
+    await f.store.record({ type: "turn_started", agent: other, turnId: "o1" });
+    const prompt = new Date(epoch + 9_000).toISOString();
+    await f.store.record({ type: "closed", agent: other });
+    const closed = (await f.store.snapshot("agent-2")).agents[0]!.stop!;
+    await f.store.ackStop("agent-2", closed.at);
+    await f.store.recordReply("agent-2", prompt, null, { kind: "unfinished", resetAt: null, at: new Date(epoch + 40_000).toISOString() });
+    const kept = (await f.store.snapshot("agent-2")).agents[0]!.stop!;
+    assert.deepEqual([kept.at, kept.closedMidTurn, typeof kept.seenAt], [closed.at, true, "string"]);
+    // A limit notice as the reply proves that turn ended after all (only its hook was missed): it replaces the close.
+    await f.store.recordReply("agent-2", prompt, { at: new Date(epoch + 41_000).toISOString(), asks: false }, { kind: "quota", resetAt: null, at: new Date(epoch + 41_000).toISOString() });
+    assert.deepEqual((await f.store.snapshot("agent-2")).agents[0]!.stop, { kind: "quota", resetAt: null, at: new Date(epoch + 41_000).toISOString() });
+    // So does an ordinary closing reply: that turn was done, nothing stopped it.
+    const third = { id: "agent-3", title: "Docs" };
+    await f.store.record({ type: "turn_started", agent: third, turnId: "d1" });
+    await f.store.record({ type: "closed", agent: third });
+    assert.equal((await f.store.snapshot("agent-3")).agents[0]!.stop?.closedMidTurn, true);
+    await f.store.recordReply("agent-3", prompt, { at: new Date(epoch + 42_000).toISOString(), asks: false });
+    const done = (await f.store.snapshot("agent-3")).agents[0]!;
+    assert.deepEqual([done.stop, done.outcome, done.turnEndedAt], [null, "completed", new Date(epoch + 42_000).toISOString()]);
+  } finally { await f.dispose(); }
+});
+
+test("storage notices are whole Chinese sentences: saving failed, or what was saved could not be read (opus-F74)", async () => {
+  // Every notice the store can set, from its source: none is English.
+  const source = await readFile(new URL("../server/telemetry.ts", import.meta.url), "utf8");
+  const notices = [...source.matchAll(/(?:setError\(|persistenceError = )(?:quarantine \? )?(["`])((?:(?!\1).)+)\1(?: : (["`])((?:(?!\3).)+)\3)?/g)]
+    .flatMap(match => [match[2], match[4]]).filter((text): text is string => !!text);
+  assert.ok(notices.length >= 8, `found ${notices.length}`);
+  for (const notice of notices) chineseNotice(notice.replace(/\$\{errorCode\(error\)\}/g, "EACCES"));
+  // Saved analytics that cannot be restored: a notice of its own, the lifecycle history stays.
+  const directory = await mkdtemp(join(tmpdir(), "observatory-analytics-notice-"));
+  const first = new TelemetryStore({ directory, now: () => epoch, writeDelayMs: 60_000 });
+  await first.record({ type: "created", agent });
+  await first.close();
+  const saved = JSON.parse(await readFile(join(directory, "telemetry.json"), "utf8"));
+  await writeFile(join(directory, "telemetry.json"), JSON.stringify({ ...saved, analytics: { version: "broken" } }), "utf8");
+  const store = new TelemetryStore({ directory, now: () => epoch, writeDelayMs: 60_000 });
+  try {
+    const snapshot = await store.snapshot();
+    chineseNotice(snapshot.persistenceError);
+    assert.match(snapshot.persistenceError ?? "", /统计数据无法读取.*会话事件历史保留不变/);
+    assert.equal(snapshot.agents.length, 1);
+  } finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });

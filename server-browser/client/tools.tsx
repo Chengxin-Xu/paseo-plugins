@@ -1,10 +1,11 @@
 import type { PluginSurfaceProps } from '@getpaseo/plugin/client';
 import { Icon, Modal } from '@getpaseo/plugin/client/react-native';
-import { useMemo, useState, type ReactNode } from 'react';
-import { Pressable, Switch, Text, View } from 'react-native';
-import type { BrowserFrameQuality, BrowserProfile, BrowserReading, BrowserSession, BrowserWorkspace } from '../shared/browser';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Pressable, Switch, Text, TextInput, View } from 'react-native';
+import type { BrowserOrphan, BrowserFrameQuality, BrowserProfile, BrowserReading, BrowserService, BrowserSession, BrowserWorkspace } from '../shared/browser';
 import { controlLooks, projectName } from './agent-tabs-model';
-import { Badge, Banner, Button, IconButton, MetaLine, ProjectMark, Row, SearchField, Segmented, Sheet, compactNumber, fontSize, formatDuration, hairline, hue, radius, relativeTime, space, toneColor, type Tone } from './kit';
+import { Badge, Banner, Button, IconButton, MetaLine, ProjectMark, Row, SearchField, Segmented, Sheet, StatusDot, TextField, aria, compactNumber, fontSize, formatDuration, hairline, hue, radius, relativeTime, space, toneColor, type Tone } from './kit';
+import { Breathe, Ping } from './motion';
 import { StateGlyph } from './looks';
 import { BrowserActivityList } from './overview';
 import { pageHost, readable, type Look } from './overview-model';
@@ -33,16 +34,18 @@ function Group({ theme, label, icon, tone, children }: { theme: Theme; label: st
 const agentAtWork: Look = { label: 'Agent 正在操作', tone: 'info', icon: 'LoaderCircle', motion: 'spin' };
 const wrap = { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.sm } as const;
 
-/** `manual`: controls usable right now; `agentMode`: the Agent holds control (explains why they are not). */
-export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, maxTabs, agentTabId, onSelect, onCloseTab, onPin, onNewTab }: {
+/** `manual`: controls usable right now; `agentMode`: the Agent holds control (explains why they are not). `services`: this workspace's own, opened in a new tab. */
+export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, maxTabs, agentTabId, onSelect, onCloseTab, onPin, onNewTab, services }: {
   theme: Theme; open: boolean; onClose: () => void; tabs: BrowserSession['tabs']; manual: boolean; agentMode: boolean; maxTabs: number; agentTabId?: string | null;
   onSelect: (tabId: string) => void; onCloseTab: (tabId: string) => void; onPin: (tabId: string, pinned: boolean) => void; onNewTab: () => void;
+  services?: { items: BrowserService[]; loading: boolean; error: string | null; onOpen: (service: BrowserService) => void };
 }) {
   const { colors } = theme;
   return <ListSheet title={`标签页 ${tabs.length}`} open={open} onClose={onClose}>
-    {tabs.map((tab) => <Pressable key={tab.id} testID={`server-browser-tab-${tab.id}`} accessibilityRole="tab" accessibilityLabel={`标签页 ${tab.title || '新标签页'}`} accessibilityState={{ selected: tab.active, disabled: !manual }} aria-selected={tab.active}
+    {tabs.map((tab) => <View key={tab.id} style={{ flexDirection: 'row', alignItems: 'center', borderRadius: radius.md, backgroundColor: tab.active ? colors.surface2 : 'transparent' }}>
+      <Pressable testID={`server-browser-tab-${tab.id}`} accessibilityRole="tab" accessibilityLabel={`标签页 ${tab.title || '新标签页'}`} accessibilityState={{ selected: tab.active, disabled: !manual }} aria-selected={tab.active} aria-disabled={!manual}
       disabled={!manual} onPress={() => onSelect(tab.id)}
-      style={(state) => ({ flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 52, paddingLeft: space.md, paddingRight: space.xs, borderRadius: radius.md, backgroundColor: tab.active ? colors.surface2 : (state as Interaction).hovered || state.pressed ? colors.surface1 : 'transparent' })}>
+      style={(state) => ({ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 52, paddingLeft: space.md, paddingRight: space.xs, borderRadius: radius.md, backgroundColor: (state as Interaction).hovered || state.pressed ? colors.surface1 : 'transparent' })}>
       <View style={{ width: 16, alignItems: 'center' }}>{agentTabId === tab.id ? <StateGlyph theme={theme} look={agentAtWork} size={14} /> : <Icon name={tab.pinned ? 'Pin' : 'Globe'} size={14} color={tab.pinned ? hue(theme, 'teal') : tab.active ? toneColor(theme, 'info', 'mark') : colors.foregroundMuted} />}</View>
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
         <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: tab.active ? '500' : '400' }}>{tab.title || '新标签页'}</Text>
@@ -52,22 +55,98 @@ export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, m
           <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} parts={[pageHost(tab.url)]} /></View>
         </View>
       </View>
+      </Pressable>
       <IconButton theme={theme} icon={tab.pinned ? 'PinOff' : 'Pin'} label={tab.pinned ? '取消固定标签页' : '固定标签页'} size="sm" disabled={!manual} testID={`server-browser-pin-tab-${tab.id}`} onPress={() => onPin(tab.id, !tab.pinned)} />
       <IconButton theme={theme} icon="X" label={tab.pinned ? '已固定，先取消固定再关闭' : '关闭标签页'} size="sm" disabled={!manual || tab.pinned} testID={`server-browser-close-tab-${tab.id}`} onPress={() => onCloseTab(tab.id)} />
-    </Pressable>)}
+    </View>)}
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.xs }}>
       <Button theme={theme} label="新建标签页" icon="Plus" size="sm" disabled={!manual || tabs.length >= maxTabs} testID="server-browser-new-tab" onPress={onNewTab} />
       {agentMode ? <View style={{ flex: 1 }}><MetaLine theme={theme} parts={['切换到手动后可切换或关闭']} numberOfLines={2} /></View> : null}
     </View>
+    {services && (services.items.length || services.loading || services.error) ? <View style={{ gap: space.xxs, paddingTop: space.sm, marginTop: space.xs, borderTopWidth: hairline, borderTopColor: colors.border }}>
+      <View style={{ paddingHorizontal: space.md, paddingVertical: space.xs }}><Label theme={theme} icon="Server" tone="green">本工作区服务</Label></View>
+      <ServiceList theme={theme} items={services.items} loading={services.loading} error={services.error} disabled={!manual || tabs.length >= maxTabs} onOpen={services.onOpen} />
+    </View> : null}
   </ListSheet>;
+}
+
+/**
+ * The workspace's own services (paseo.json, type service) on the daemon host: a running one opens in a new tab of the
+ * shared browser, which is the only way a phone can see a dev server that listens on the server's localhost.
+ */
+export function ServiceList({ theme, items, loading, error, disabled, onOpen }: { theme: Theme; items: BrowserService[]; loading: boolean; error: string | null; disabled: boolean; onOpen: (service: BrowserService) => void }) {
+  const { colors } = theme;
+  if (error) return <View style={{ paddingHorizontal: space.sm }}><Banner theme={theme} tone="danger" message={error} /></View>;
+  if (!items.length) return <View style={{ paddingHorizontal: space.md, paddingVertical: space.sm }}><MetaLine theme={theme} numberOfLines={3} parts={[loading ? '正在读取服务…' : '这个工作区没有服务。在 paseo.json 里把脚本设为 service 并启动后，会出现在这里。']} /></View>;
+  return <>{items.map((service) => {
+    const open = service.running && !!service.url && !disabled;
+    const tone: Tone = !service.running ? 'gray' : service.health === 'unhealthy' ? 'warning' : 'success';
+    const state = !service.running ? '未运行' : service.health === 'unhealthy' ? '无响应' : service.health === 'healthy' ? '运行中' : '已启动';
+    return <Pressable key={service.name} testID={`server-browser-service-${service.name}`} accessibilityRole="button" accessibilityLabel={`打开服务 ${service.name}，${state}`} disabled={!open} {...aria({ disabled: !open })} onPress={() => onOpen(service)}
+      style={(press) => ({ flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 48, paddingHorizontal: space.md, borderRadius: radius.md, opacity: service.running ? 1 : 0.55, backgroundColor: open && ((press as Interaction).hovered || press.pressed) ? colors.surface1 : 'transparent' })}>
+      <View style={{ width: 16, height: 16, alignItems: 'center', justifyContent: 'center' }}>
+        {service.running ? <Ping size={8} color={toneColor(theme, tone, 'mark')} active={service.health !== 'unhealthy'} /> : null}
+        <StatusDot theme={theme} tone={tone} size={8} />
+      </View>
+      <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+        <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: '500', flexShrink: 1 }}>{service.name}</Text>
+        <MetaLine theme={theme} parts={[service.port ? `端口 ${service.port}` : null, state]} />
+      </View>
+      {open ? <Icon name="ArrowUpRight" size={15} color={toneColor(theme, 'success', 'mark')} /> : null}
+    </Pressable>;
+  })}</>;
+}
+
+export function ServicesSheet({ theme, open, onClose, items, loading, error, manual, agentMode, onOpen, onRefresh }: {
+  theme: Theme; open: boolean; onClose: () => void; items: BrowserService[]; loading: boolean; error: string | null; manual: boolean; agentMode: boolean; onOpen: (service: BrowserService) => void; onRefresh: () => void;
+}) {
+  return <ListSheet title="本工作区服务" open={open} onClose={onClose}>
+    <ServiceList theme={theme} items={items} loading={loading} error={error} disabled={!manual} onOpen={onOpen} />
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.xs }}>
+      <Button theme={theme} label="刷新" icon="RefreshCw" size="sm" busy={loading} testID="server-browser-services-refresh" onPress={onRefresh} />
+      <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} numberOfLines={2} parts={[agentMode ? '切换到手动后可打开' : '在新标签页打开，地址是服务器本机的端口']} /></View>
+    </View>
+  </ListSheet>;
+}
+
+export type TakeoverAction = { kind: 'back' | 'forward' | 'reload' } | { kind: 'navigate'; url: string };
+const takeoverVerbs: Record<TakeoverAction['kind'], string> = { back: '后退', forward: '前进', reload: '刷新', navigate: '打开网址' };
+/**
+ * From Agent mode, one navigation in two steps the viewer can see: Agent violet → your amber. The address field never takes
+ * focus while the sheet slides in; `editable` asks for the address here (phones have no address bar in Agent mode).
+ */
+/** stale: the page shown when the sheet opened has changed (another document or tab); the confirmation no longer applies. */
+export function TakeoverSheet({ theme, open, onClose, request, editable = false, stale = false, busy, onConfirm }: {
+  theme: Theme; open: boolean; onClose: () => void; request: TakeoverAction; editable?: boolean; stale?: boolean; busy: boolean; onConfirm: (then: TakeoverAction) => void;
+}) {
+  const { colors } = theme, agentHue = controlLooks.agent.hue, manualHue = controlLooks.manual.hue, verb = takeoverVerbs[request.kind];
+  const [url, setUrl] = useState(request.kind === 'navigate' ? request.url : '');
+  useEffect(() => { setUrl(request.kind === 'navigate' ? request.url : ''); }, [request]);
+  const mark = (name: string, tint: typeof agentHue | typeof manualHue) => <View style={{ width: 36, height: 36, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', backgroundColor: hue(theme, tint, 'soft'), borderWidth: hairline, borderColor: hue(theme, tint, 'line') }}><Icon name={name} size={18} color={hue(theme, tint)} /></View>;
+  return <Sheet title={`切到手动并${verb}？`} open={open} onClose={onClose}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+      {mark(controlLooks.agent.icon, agentHue)}
+      <Breathe><Icon name="ArrowRight" size={16} color={colors.foregroundMuted} /></Breathe>
+      {mark(controlLooks.manual.icon, manualHue)}
+      <Text style={{ flex: 1, flexShrink: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.body, lineHeight: 21 }}>Agent 正在控制浏览器。确认后先切到手动，等 Agent 做完当前这一步再{verb}。</Text>
+    </View>
+    {request.kind === 'navigate' && editable ? <TextField theme={theme} label="网址" value={url} onChangeText={setUrl} placeholder="输入网址" /> : request.kind === 'navigate' ? <MetaLine theme={theme} numberOfLines={2} parts={[request.url]} /> : null}
+    {stale ? <Banner theme={theme} tone="danger" icon="TriangleAlert" message={`打开这个确认之后，网页已经换了页面。这次确认已失效，不会切到手动，也不会${verb}；请关闭后看清当前页面再操作。`} />
+      : <MetaLine theme={theme} numberOfLines={3} parts={['如果这期间 Agent 换了页面，就只切到手动、不执行这一步，免得误操作']} />}
+    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: space.sm }}>
+      <Button theme={theme} label={stale ? '关闭' : '取消'} variant="ghost" onPress={onClose} />
+      <Button theme={theme} label={`切到手动并${verb}`} icon={controlLooks.manual.icon} tone={manualHue} busy={busy} disabled={stale || (request.kind === 'navigate' && !url.trim())} testID="server-browser-takeover-confirm"
+        onPress={() => onConfirm(request.kind === 'navigate' ? { kind: 'navigate', url: url.trim() } : request)} />
+    </View>
+  </Sheet>;
 }
 
 const qualities: readonly { value: BrowserFrameQuality; label: string; icon: string; tone: Tone }[] = [{ value: 'smooth', label: '流畅', icon: 'Zap', tone: 'cyan' }, { value: 'balanced', label: '均衡', icon: 'Scale', tone: 'cyan' }, { value: 'sharp', label: '清晰', icon: 'Sparkles', tone: 'cyan' }];
 export function qualityLabel(value: BrowserFrameQuality): string { return qualities.find((item) => item.value === value)?.label ?? value; }
-export function ViewSheet({ theme, open, onClose, quality, onQuality, manual, agentMode, onMatch, onFitWidth, onPreset, paused, onTogglePause, onRefresh, metrics, viewport, scale }: {
+export function ViewSheet({ theme, open, onClose, quality, onQuality, manual, agentMode, onMatch, onFitWidth, onPreset, paused, onTogglePause, onRefresh, metrics, viewport, scale, devicePreset, viewerCount }: {
   theme: Theme; open: boolean; onClose: () => void; quality: BrowserFrameQuality; onQuality: (value: BrowserFrameQuality) => void; manual: boolean; agentMode: boolean;
-  onMatch: () => void; onFitWidth: () => void; onPreset: (size: { width: number; height: number }) => void; paused: boolean; onTogglePause: () => void; onRefresh: () => void;
-  metrics: FrameMetrics | null; viewport: { width: number; height: number } | null; scale: number;
+  onMatch: () => void; onFitWidth: () => void; onPreset: (preset: 'desktop' | 'iphone' | 'pixel' | 'ipad') => void; paused: boolean; onTogglePause: () => void; onRefresh: () => void;
+  devicePreset?: string; viewerCount?: number; metrics: FrameMetrics | null; viewport: { width: number; height: number } | null; scale: number;
 }) {
   return <Sheet title="画面" open={open} onClose={onClose}>
     <Group theme={theme} label="画质" icon="Gauge" tone="cyan"><Segmented theme={theme} value={quality} options={qualities} onChange={onQuality} accessibilityLabel="画质" /></Group>
@@ -75,10 +154,18 @@ export function ViewSheet({ theme, open, onClose, quality, onQuality, manual, ag
       <View style={wrap}>
         <Button theme={theme} label="匹配窗口" icon="Scan" size="sm" disabled={!manual} testID="server-browser-viewport-match" onPress={onMatch} />
         <Button theme={theme} label="完整宽度" icon="Columns2" size="sm" disabled={!manual} testID="server-browser-fit-width" onPress={onFitWidth} />
-        <Button theme={theme} label="手机 390 × 760" icon="Smartphone" size="sm" disabled={!manual} testID="server-browser-viewport-phone" onPress={() => onPreset({ width: 390, height: 760 })} />
-        <Button theme={theme} label="电脑 1440 × 900" icon="Monitor" size="sm" disabled={!manual} testID="server-browser-viewport-desktop" onPress={() => onPreset({ width: 1440, height: 900 })} />
       </View>
       {agentMode ? <MetaLine theme={theme} parts={['切换到手动后可调整']} /> : null}
+    </Group>
+    <Group theme={theme} label="设备仿真" icon="MonitorSmartphone" tone="violet">
+      <View style={wrap}>
+        <Button theme={theme} label="iPhone 15 Pro" icon="Smartphone" size="sm" disabled={!manual} testID="server-browser-viewport-phone" onPress={() => onPreset('iphone')} />
+        <Button theme={theme} label="桌面 Chrome" icon="Monitor" size="sm" disabled={!manual} testID="server-browser-viewport-desktop" onPress={() => onPreset('desktop')} />
+        <Button theme={theme} label="Pixel 7" icon="Smartphone" size="sm" disabled={!manual} testID="server-browser-device-pixel" onPress={() => onPreset('pixel')} />
+        <Button theme={theme} label="iPad Pro 11" icon="Tablet" size="sm" disabled={!manual} testID="server-browser-device-ipad" onPress={() => onPreset('ipad')} />
+      </View>
+      <MetaLine theme={theme} numberOfLines={3} parts={[viewport ? `${viewport.width} × ${viewport.height}` : null, devicePreset === 'iphone' ? 'iPhone · DPR 3 · 触摸' : devicePreset === 'pixel' ? 'Pixel · DPR 2.625 · 触摸' : devicePreset === 'ipad' ? 'iPad · DPR 2 · 触摸' : devicePreset === 'desktop' ? '桌面 · DPR 1 · 鼠标' : '自定义尺寸', '预设同步尺寸、像素比、触摸和浏览器身份；保留登录状态']} />
+      <Badge theme={theme} tone="info" icon="Users" label={`${viewerCount ?? 0} 个客户端正在观看`} />
     </Group>
     <Group theme={theme} label="传输" icon="ArrowDownUp" tone="blue">
       <View testID="server-browser-frame-metrics" style={{ gap: space.xs }}>
@@ -234,4 +321,77 @@ export function WorkspacePickerSheet({ theme, open, onClose, workspaces, running
       subtitle={workspace.projectTitle || '未命名项目'} onPress={() => { setFilter(''); onSelect(workspace.id); }} />)}
     {!choices.length ? <View style={{ padding: space.lg }}><MetaLine theme={theme} parts={['没有匹配的工作区']} /></View> : null}
   </ListSheet>;
+}
+
+
+export function DialogSheet({ theme, open, onClose, dialog, manual, busy, onTakeOver, onRespond }: {
+  theme: Theme; open: boolean; onClose: () => void; dialog: NonNullable<BrowserSession['dialog']>; manual: boolean; busy: boolean;
+  onTakeOver: () => void; onRespond: (accept: boolean, promptText?: string) => void;
+}) {
+  const [value, setValue] = useState(dialog.defaultValue);
+  useEffect(() => setValue(dialog.defaultValue), [dialog.id, dialog.defaultValue]);
+  return <Sheet title="网页对话框" open={open} onClose={onClose}>
+    <Banner theme={theme} tone="warning" icon="MessageSquareWarning" message={dialog.type === 'prompt' ? '网页正在等待输入' : dialog.type === 'confirm' || dialog.type === 'beforeunload' ? '网页正在等待确认' : '网页提示'} />
+    <Text selectable style={{ color: theme.colors.foreground, fontSize: fontSize.body, lineHeight: 22 }}>{dialog.message || '网页没有提供提示内容'}</Text>
+    {dialog.type === 'prompt' ? <TextInput testID="server-browser-dialog-input" accessibilityLabel="网页对话框输入" value={value} onChangeText={setValue} editable={manual && !busy} maxLength={10000} placeholder="输入回复" placeholderTextColor={theme.colors.foregroundMuted} style={{ color: theme.colors.foreground, backgroundColor: theme.colors.surface1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: radius.md, padding: space.md, minHeight: 44 }} /> : null}
+    {!manual ? <Banner theme={theme} tone="info" message="Agent 正在控制浏览器，可由 Agent 回应，或先手动接管。" action={{ label: '手动接管', onPress: onTakeOver }} /> : null}
+    <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: space.sm }}>
+      {dialog.type !== 'alert' ? <Button theme={theme} label="取消" disabled={!manual || busy} testID="server-browser-dialog-cancel" onPress={() => onRespond(false)} /> : null}
+      <Button theme={theme} label="确认" variant="primary" disabled={!manual || busy} testID="server-browser-dialog-confirm" onPress={() => onRespond(true, dialog.type === 'prompt' ? value : undefined)} />
+    </View>
+    <MetaLine theme={theme} numberOfLines={2} parts={['关闭面板不会回答网页；对话框会保留至明确回应或浏览器关闭。']} />
+  </Sheet>;
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+/**
+ * Leftovers of gone workspaces: browsers still running (stop them) and saved Profiles (logins, cookies, cache) that only
+ * go away when deleted here. Deleting asks once more in place, naming what is lost; no sheet on top of a sheet.
+ */
+export function OrphansSheet({ theme, open, onClose, items, loading, error, stopping, deleting, onRefresh, onStop, onDelete }: {
+  theme: Theme; open: boolean; onClose: () => void; items: BrowserOrphan[]; loading: boolean; error: string | null; stopping: string | null; deleting: string | null; onRefresh: () => void; onStop: (id: string) => void; onDelete: (id: string) => void;
+}) {
+  const { colors } = theme;
+  const [confirming, setConfirming] = useState<string | null>(null);
+  useEffect(() => { if (!open) setConfirming(null); }, [open]);
+  const running = items.filter((item) => item.kind !== 'profile'), saved = items.filter((item) => item.kind === 'profile');
+  const total = saved.reduce((sum, item) => sum + (item.profileBytes ?? 0), 0);
+  const name = (item: BrowserOrphan) => <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+    <Text numberOfLines={2} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: '500', flexShrink: 1 }}>{item.label || '已移除的工作区'}</Text>
+    <MetaLine theme={theme} numberOfLines={2} parts={[item.label ? null : item.workspaceId, item.profileBytes ? formatBytes(item.profileBytes) : null, item.lastUsedAt ? `最近使用 ${relativeTime(item.lastUsedAt)}` : null]} />
+  </View>;
+  return <Sheet title="孤儿浏览器" open={open} onClose={onClose}>
+    <MetaLine theme={theme} numberOfLines={3} parts={['工作区归档或移除后留下的浏览器。停止会结束进程；删除资料会清除它保存的登录状态、Cookie 和缓存。']} />
+    {error ? <Banner theme={theme} tone="danger" message={error} /> : null}
+    {!items.length && !loading && !error ? <Badge theme={theme} tone="success" icon="CircleCheck" label="没有孤儿浏览器，也没有留下的资料" /> : null}
+    {running.length ? <Group theme={theme} label={`仍在运行 ${running.length}`} icon="Monitor" tone="amber">
+      {running.map((item) => <View key={item.workspaceId} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.xs }}>
+        <View style={{ width: 14, height: 14, alignItems: 'center', justifyContent: 'center' }}><Ping size={8} color={toneColor(theme, 'warning', 'mark')} /><StatusDot theme={theme} tone="warning" /></View>
+        {name(item)}
+        <Badge theme={theme} tone="warning" icon="Cpu" label={item.pid ? `进程 ${item.pid}` : '待回收'} />
+        <Button theme={theme} label="停止" icon="Power" variant="danger" size="sm" busy={stopping === item.workspaceId} disabled={!!stopping || !!deleting} testID={`server-browser-stop-orphan-${item.workspaceId}`} onPress={() => onStop(item.workspaceId)} />
+      </View>)}
+    </Group> : null}
+    {saved.length ? <Group theme={theme} label={`留下的浏览器资料 ${saved.length} · ${formatBytes(total)}`} icon="HardDrive" tone="red">
+      {saved.map((item) => <View key={item.workspaceId} style={{ gap: space.sm, paddingVertical: space.xs }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+          <Icon name="KeyRound" size={14} color={toneColor(theme, 'danger', 'mark')} />
+          {name(item)}
+          {confirming === item.workspaceId ? null : <Button theme={theme} label="删除资料" icon="Trash2" tone="danger" size="sm" disabled={!!deleting || !!stopping} testID={`server-browser-delete-orphan-${item.workspaceId}`} onPress={() => setConfirming(item.workspaceId)} />}
+        </View>
+        {confirming === item.workspaceId ? <View style={{ gap: space.sm }}>
+          <Banner theme={theme} tone="danger" icon="TriangleAlert" message="删除后，这个工作区浏览器保存的登录状态、Cookie、历史、缓存和 Agent 截图都会清除，不能恢复。" />
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: space.sm }}>
+            <Button theme={theme} label="取消" variant="ghost" size="sm" onPress={() => setConfirming(null)} />
+            <Button theme={theme} label="确认删除" icon="Trash2" variant="danger" size="sm" busy={deleting === item.workspaceId} disabled={!!deleting} testID={`server-browser-delete-orphan-confirm-${item.workspaceId}`} onPress={() => onDelete(item.workspaceId)} />
+          </View>
+        </View> : null}
+      </View>)}
+    </Group> : null}
+    <View style={{ flexDirection: 'row' }}><Button theme={theme} label="刷新列表" icon="RefreshCw" busy={loading} onPress={onRefresh} /></View>
+  </Sheet>;
 }

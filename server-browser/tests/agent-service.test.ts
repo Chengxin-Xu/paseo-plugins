@@ -12,7 +12,7 @@ type Provider = { provider: string; enabled?: boolean; status: string; models?: 
 const session = (workspaceId: string): BrowserSession => ({ workspaceId, status: 'running', title: '', url: '', mode: 'agent', width: 1120, height: 720, tabs: [], agentId: null, error: null, agentBusy: false });
 
 /** A daemon with one workspace, the given profiles and providers; it records every Agent the service creates. */
-function fixture(profiles: Profile[], providers: Provider[], existing: { id: string; workspaceId: string; status: string; archivedAt?: string | null }[] = []) {
+function fixture(profiles: Profile[], providers: Provider[], existing: { id: string; workspaceId: string; status: string; archivedAt?: string | null; updatedAt?: string }[] = [], saved: string | null = null) {
   const created: { config: Record<string, any>; title?: string; labels?: Record<string, string> }[] = [];
   const sent: string[] = [];
   const actions: BrowserAction[] = [];
@@ -33,6 +33,7 @@ function fixture(profiles: Profile[], providers: Provider[], existing: { id: str
     start: async (id: string) => session(id),
     state: async (id: string) => session(id),
     setAgentId: async (_id: string, agentId: string | null) => { linked.push(agentId); },
+    getAgentId: async () => saved,
     action: async (id: string, action: BrowserAction) => { actions.push(action); return session(id); },
   } as unknown as BrowserManager;
   return { service: new BrowserAgentService(manager), paseo, created, sent, actions, linked };
@@ -82,4 +83,27 @@ test('an existing browser Agent for the workspace is reused and a vanished profi
   assert.equal(reuse.created.length, 0);
   const missing = fixture([{ id: 'p', name: 'P', provider: 'claude', model: 'm' }], [ready('claude', ['m'])]);
   await assert.rejects(missing.service.create(missing.paseo, 'ws-1', 'gone'), /Profile 已不存在/);
+});
+
+test('an archived browser Agent is replaced; failed metadata never creates a duplicate',async()=>{
+  const target=fixture([], [ready('codex',['model'])],[{id:'old',workspaceId:'ws-1',status:'idle',archivedAt:'2026-01-01T00:00:00Z'}]);
+  const result=await target.service.create(target.paseo,'ws-1');
+  assert.equal(result.created,true);assert.equal(target.created.length,1);assert.deepEqual(target.linked,['agent-1']);
+  const failed=fixture([], [ready('codex',['model'])]);
+  failed.paseo.agents.list=async()=>{throw new Error('metadata unavailable');};
+  await assert.rejects(failed.service.create(failed.paseo,'ws-1'),/metadata unavailable/);
+  assert.equal(failed.created.length,0);assert.deepEqual(failed.linked,[]);
+});
+
+test('an unloaded (closed) browser Agent is reused, not duplicated: after a daemon restart every session is closed',async()=>{
+  const closed=fixture([], [ready('codex',['model'])],[{id:'unloaded',workspaceId:'ws-1',status:'closed',archivedAt:null}],'unloaded');
+  const result=await closed.service.create(closed.paseo,'ws-1');
+  assert.deepEqual({agentId:result.agentId,created:result.created},{agentId:'unloaded',created:false});
+  assert.equal(closed.created.length,0);assert.deepEqual(closed.sent,[],'reusing never sends a setup message');
+  // Duplicates left by older versions: the linked one wins, else the most recently updated.
+  const agents=[{id:'older',workspaceId:'ws-1',status:'closed',archivedAt:null,updatedAt:'2026-10-01T00:00:00Z'},{id:'newer',workspaceId:'ws-1',status:'closed',archivedAt:null,updatedAt:'2026-10-11T00:00:00Z'},{id:'linked',workspaceId:'ws-1',status:'closed',archivedAt:null,updatedAt:'2026-09-01T00:00:00Z'}];
+  const linked=fixture([], [ready('codex',['model'])],agents,'linked');
+  assert.equal((await linked.service.create(linked.paseo,'ws-1')).agentId,'linked');
+  const latest=fixture([], [ready('codex',['model'])],agents,'gone');
+  assert.equal((await latest.service.create(latest.paseo,'ws-1')).agentId,'newer');
 });

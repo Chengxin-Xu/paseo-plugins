@@ -19,19 +19,47 @@ export interface TokenData {
   hours: Map<string, HourBucket>; days: Map<string, HourBucket>; sessionHours: Map<string, SessionHour>;
   projectHours: Map<string, ProjectHour>; sessions: Map<string, SessionMeta>; recordHours: Map<number, RecordHour>;
   recent: Map<string, LedgerCall>; mutable: Map<string, LedgerCall>; earliestAt: number | null; latestAt: number | null;
+  /**
+   * Codex subagent threads (`session_meta.source.subagent`): child thread id → parent thread id. Calls keep their own
+   * thread's session id (their dedupe keys and stored buckets never change); reads attribute a child to its root
+   * session, which also covers threads counted before the parent was known.
+   */
+  threads: Map<string, string>;
 }
 export function emptyData(): TokenData {
   return { hours: new Map(), days: new Map(), sessionHours: new Map(), projectHours: new Map(), sessions: new Map(), recordHours: new Map(),
-    recent: new Map(), mutable: new Map(), earliestAt: null, latestAt: null };
+    recent: new Map(), mutable: new Map(), earliestAt: null, latestAt: null, threads: new Map() };
 }
 export const sessionKey = (source: TokenSource, sessionId: string): string => `${source}:${sessionId}`;
+/** Enough for every subagent thread a heavy host keeps (about 200 in October 2026); the oldest links go first. */
+export const MAX_THREADS = 20_000;
+/** Records a subagent thread's parent; true when the map changed. */
+export function noteThread(data: TokenData, child: string, parent: string): boolean {
+  if (!child || !parent || child === parent || data.threads.get(child) === parent) return false;
+  data.threads.delete(child); data.threads.set(child, parent);
+  while (data.threads.size > MAX_THREADS) data.threads.delete(data.threads.keys().next().value!);
+  return true;
+}
+/** The session a call belongs to for attribution: a Codex subagent thread's top-level parent (a few hops, cycle-safe). */
+export function rootSession(data: Pick<TokenData, "threads">, source: TokenSource, sessionId: string): string {
+  if (source !== "codex" || !data.threads.size) return sessionId;
+  let id = sessionId;
+  for (let hop = 0; hop < 8; hop++) {
+    const parent = data.threads.get(id);
+    if (!parent || parent === sessionId) break;
+    id = parent;
+  }
+  return id;
+}
 export const bucketKey = (at: number, source: TokenSource, model: string | null): string => JSON.stringify([at, source, model]);
 export const sessionHourKey = (row: SessionHour): string => JSON.stringify([row.at, row.source, row.sessionId, row.model]);
 export const projectHourKey = (row: ProjectHour): string => JSON.stringify([row.at, row.cwd]);
 export const projectName = (cwd: string): string => (basename(cwd) || "未知").slice(0, 240);
 const countKeys = Object.keys(emptyTokenCounts()) as (keyof TokenCounts)[];
+/** Model calls a ledger record stands for: one, or a Grok turn's `modelCalls`. */
+export const modelCalls = (call: Pick<LedgerCall, "calls">): number => call.calls !== undefined && call.calls > 1 ? Math.floor(call.calls) : 1;
 export function callCounts(call: LedgerCall): TokenCounts {
-  return { calls: 1, input: call.input, cacheWrite: call.cacheWrite, cacheRead: call.cacheRead, output: call.output, reasoning: call.reasoning,
+  return { calls: modelCalls(call), input: call.input, cacheWrite: call.cacheWrite, cacheRead: call.cacheRead, output: call.output, reasoning: call.reasoning,
     genMs: call.start === null ? 0 : call.at - call.start, genOutput: call.start === null ? 0 : call.output };
 }
 function increment(target: TokenCounts, delta: TokenCounts, sign: number): void {
@@ -44,10 +72,14 @@ export const binSpeed = (bin: number): number => Math.pow(1.04, bin);
 export const RECORD_DEPTH = 3;
 const sortRecords = (items: CallRecord[], kind: "fastest" | "biggest"): CallRecord[] => items.sort((a, b) =>
   (kind === "fastest" ? b.tps - a.tps : b.output - a.output) || a.at - b.at).slice(0, RECORD_DEPTH);
+/**
+ * A call's place in the hour's records. 最快的一次 needs a timed response of some length. 最长的一次输出 is one model call's output:
+ * a record standing for several calls is not one, nor is a Grok record at all (usage.json sums each turn per model; r3-F5).
+ */
 function callRecord(call: LedgerCall, kind: "fastest" | "biggest"): CallRecord | null {
   const ms = call.start === null ? 0 : call.at - call.start;
-  return kind === "fastest" && (ms < 1000 || call.output < 100) ? null : {
-    key: call.key, at: call.at, model: call.model, output: call.output, tps: ms ? call.output / ms * 1000 : 0 };
+  if (kind === "fastest" ? ms < 1000 || call.output < 100 : modelCalls(call) > 1 || call.source === "grok") return null;
+  return { key: call.key, at: call.at, model: call.model, output: call.output, tps: ms ? call.output / ms * 1000 : 0 };
 }
 function record(data: TokenData, call: LedgerCall, sign: number): void {
   const at = hourOf(call.at), row = data.recordHours.get(at) ?? { at, speeds: {}, fastest: [], biggest: [] };
@@ -135,13 +167,13 @@ function apply(data: TokenData, call: LedgerCall, sign: number, now: number): vo
     meta.firstAt = Math.min(meta.firstAt, call.at); meta.lastAt = Math.max(meta.lastAt, call.at);
     if (call.cwd) { meta.cwd = call.cwd; meta.project = projectName(call.cwd); }
     const model = call.model ?? "unknown";
-    Object.defineProperty(meta.models, model, { value: Math.max(0, (Object.hasOwn(meta.models, model) ? meta.models[model] : 0) + sign), enumerable: true, configurable: true, writable: true });
-    meta.subagentCalls = Math.max(0, meta.subagentCalls + (call.subagent ? sign : 0));
+    Object.defineProperty(meta.models, model, { value: Math.max(0, (Object.hasOwn(meta.models, model) ? meta.models[model] : 0) + sign * delta.calls), enumerable: true, configurable: true, writable: true });
+    meta.subagentCalls = Math.max(0, meta.subagentCalls + (call.subagent ? sign * delta.calls : 0));
     const attribution: SessionHour = { at: hour, source: call.source, model: call.model, sessionId: call.sessionId, cwd: call.cwd,
       firstAt: call.at, lastAt: call.at, subagentCalls: 0, ...emptyTokenCounts() };
     const sk = sessionHourKey(attribution), row = data.sessionHours.get(sk) ?? attribution;
     increment(row, delta, sign); row.firstAt = Math.min(row.firstAt, call.at); row.lastAt = Math.max(row.lastAt, call.at);
-    row.subagentCalls = Math.max(0, row.subagentCalls + (call.subagent ? sign : 0));
+    row.subagentCalls = Math.max(0, row.subagentCalls + (call.subagent ? sign * delta.calls : 0));
     if (row.calls) data.sessionHours.set(sk, row); else data.sessionHours.delete(sk);
   }
   const project: ProjectHour = { at: hour, cwd: call.cwd, lastAt: call.at, ...emptyTokenCounts() }, pk = projectHourKey(project);

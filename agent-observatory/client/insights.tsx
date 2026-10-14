@@ -12,7 +12,9 @@ import { PaneLabel, StateDot, monoFont } from "./ui";
 import { PhasePill, Spinner, hueColor } from "./status";
 import { isForeground } from "./use-foreground";
 import { InsightSettingsSheet, runnerLabelOf } from "./insight-settings";
-import { SendToAgentSheet } from "./insight-actions";
+import { SendToAgentSheet, findingSource, isFindingMessage } from "./insight-actions";
+import { DeferredList, useDeferredQueue, type DeferredQueue } from "./deferred";
+import type { DeferredView } from "../shared/deferred-rpc";
 import { InsightsOverview } from "./insights-overview";
 
 const queryPrefix = ["agent-observatory", "insights"] as const;
@@ -131,11 +133,13 @@ function EvidenceSnippet({ theme, reference, source, onOpen }: { theme: PluginTh
   </View>;
 }
 
-function Finding({ theme, finding, index, evidence, feedback, onFeedback, pending, onOpenEvidence, onSend }: { theme: PluginTheme; finding: InsightReport["findings"][number]; index: number; evidence: readonly InsightEvidence[];
-  feedback?: FindingFeedback; onFeedback: (status: FindingFeedback["status"]) => void; pending: boolean; onOpenEvidence?: (ref: string) => void; onSend?: () => void }) {
+function Finding({ theme, finding, index, evidence, feedback, onFeedback, pending, onOpenEvidence, onSend, queue }: { theme: PluginTheme; finding: InsightReport["findings"][number]; index: number; evidence: readonly InsightEvidence[];
+  feedback?: FindingFeedback; onFeedback: (status: FindingFeedback["status"]) => void; pending: boolean; onOpenEvidence?: (ref: string) => void; onSend?: () => void; queue?: DeferredQueue }) {
   const { colors } = theme;
   const [open, setOpen] = useState(index === 0 || finding.severity === "high");
   const sources = useMemo(() => new Map(evidence.map(source => [source.ref, source])), [evidence]);
+  // This finding sent to the Agent through the ledger: on its way (排队中, 待确认) or just out, beside its 发给这个 Agent.
+  const sent = (view: DeferredView) => view.source === findingSource(finding);
   return <View style={{ borderTopWidth: hairline, borderTopColor: colors.border }}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"}分析发现 ${finding.title}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)}
       style={state => ({ flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: space.md, opacity: state.pressed ? 0.75 : 1 })}>
@@ -159,6 +163,7 @@ function Finding({ theme, finding, index, evidence, feedback, onFeedback, pendin
         {feedback ? <MetaLine theme={theme} parts={[`已保存 ${relativeTime(feedback.updatedAt)}`]} /> : null}
       </View>
     </View> : null}
+    {queue?.views.some(sent) ? <View style={{ paddingLeft: 18, paddingBottom: space.md }}><DeferredList theme={theme} queue={queue} only={sent} /></View> : null}
   </View>;
 }
 
@@ -173,8 +178,8 @@ function ListSection({ theme, title, items }: { theme: PluginTheme; title: strin
   </View>;
 }
 
-function Report({ theme, job, onFeedback, feedbackPending, onOpenEvidence, onSend, onOpenSession }: { theme: PluginTheme; job: InsightJob; onFeedback: (findingId: string, status: FindingFeedback["status"]) => void; feedbackPending: boolean;
-  onOpenEvidence?: (target: EvidenceTarget) => void; onSend?: (finding: InsightReport["findings"][number]) => void; onOpenSession?: (agentId: string) => void }) {
+function Report({ theme, job, onFeedback, feedbackPending, onOpenEvidence, onSend, onOpenSession, queue }: { theme: PluginTheme; job: InsightJob; onFeedback: (findingId: string, status: FindingFeedback["status"]) => void; feedbackPending: boolean;
+  onOpenEvidence?: (target: EvidenceTarget) => void; onSend?: (finding: InsightReport["findings"][number]) => void; onOpenSession?: (agentId: string) => void; queue?: DeferredQueue }) {
   const toast = useToast();
   if (!job.report) return null;
   const report = job.report;
@@ -195,7 +200,7 @@ function Report({ theme, job, onFeedback, feedbackPending, onOpenEvidence, onSen
     </View>
     {report.findings.length ? <View>
       <PaneLabel theme={theme}>观察与建议</PaneLabel>
-      {report.findings.map((finding, index) => <Finding key={`${job.id}:${finding.id}`} theme={theme} finding={finding} index={index} evidence={job.evidence ?? []} feedback={job.findingFeedback?.[finding.id]} pending={feedbackPending} onFeedback={status => onFeedback(finding.id, status)} onOpenEvidence={onOpenEvidence ? ref => onOpenEvidence({ agentId: job.agentId, ref }) : undefined} onSend={onSend ? () => onSend(finding) : undefined} />)}
+      {report.findings.map((finding, index) => <Finding key={`${job.id}:${finding.id}`} theme={theme} finding={finding} index={index} evidence={job.evidence ?? []} feedback={job.findingFeedback?.[finding.id]} pending={feedbackPending} onFeedback={status => onFeedback(finding.id, status)} onOpenEvidence={onOpenEvidence ? ref => onOpenEvidence({ agentId: job.agentId, ref }) : undefined} onSend={onSend ? () => onSend(finding) : undefined} queue={queue} />)}
     </View> : null}
     <ListSection theme={theme} title="值得保留的做法" items={report.strengths} />
     <ListSection theme={theme} title="下一步" items={report.nextActions} />
@@ -227,6 +232,8 @@ export function InsightsPanel({ agent, theme, navigation, initialJobId, onOpenEv
   const busy = startJob.isPending || !!active;
   const [menuOpen, setMenuOpen] = useState(false), [pickOpen, setPickOpen] = useState(false);
   const [sendFinding, setSendFinding] = useState<InsightReport["findings"][number] | null>(null);
+  // Findings sent to this Agent through the ledger: queued for the end of its turn, waiting for the user, or just out.
+  const deferred = useDeferredQueue(agent.id);
   const menu: MenuAction[] = [
     { key: "runner", label: "换个模型分析", icon: "Shuffle", hint: "只影响这一次，不改分析设置", disabled: busy, onPress: () => setPickOpen(true) },
     ...(selectedReport ? [{ key: "full", label: "完整复盘", icon: "ScanLine", hint: "重新读取全部轨迹，建立新的跟进基线", disabled: busy, onPress: () => start("full") }] : []),
@@ -258,9 +265,11 @@ export function InsightsPanel({ agent, theme, navigation, initialJobId, onOpenEv
     </View> : null}
     {attempt?.nextAutoAt && Date.parse(attempt.nextAutoAt) > Date.now() ? <MetaLine theme={theme} parts={[`自动分析冷却到 ${new Date(attempt.nextAutoAt).toLocaleString("zh-CN", { hour12: false })}`, "手动复盘仍可用"]} /> : null}
     {selectedReport && detail.query.isPending ? <Skeleton theme={theme} rows={3} /> : null}
-    {job?.report ? <Report key={job.id} theme={theme} job={job} onFeedback={(findingId, status) => detail.updateFeedback.mutate({ findingId, status })} feedbackPending={detail.updateFeedback.isPending} onOpenEvidence={onOpenEvidence}
+    {/* Findings sent from another report (or under a title since changed): beside the report, as their own findings' are beside them. */}
+    <DeferredList theme={theme} queue={deferred} only={view => isFindingMessage(view) && !job?.report?.findings.some(finding => findingSource(finding) === view.source)} />
+    {job?.report ? <Report key={job.id} queue={deferred} theme={theme} job={job} onFeedback={(findingId, status) => detail.updateFeedback.mutate({ findingId, status })} feedbackPending={detail.updateFeedback.isPending} onOpenEvidence={onOpenEvidence}
       onSend={agent.archivedAt ? undefined : setSendFinding} onOpenSession={navigation ? agentId => { try { navigation.openAgent({ agentId }); } catch (error) { toast.error(error instanceof Error ? error.message : "会话打开失败"); } } : undefined} /> : null}
-    {!jobs.length && !query.isPending ? <EmptyState theme={theme} icon="Sparkles" title="还没有分析报告" message="分析会读取这个会话的执行轨迹，给出带证据引用的复盘" /> : null}
+    {!jobs.length && !query.isPending ? <EmptyState theme={theme} icon="Sparkles" title="还没有分析报告" message="分析会把这个会话的执行轨迹摘录发给所选模型，给出带证据引用的复盘；常见凭据先打码，但不保证全部遮住" /> : null}
     {query.isPending ? <Skeleton theme={theme} rows={2} /> : null}
     {navigation && job?.report ? <View style={{ alignItems: "flex-start", marginLeft: -space.sm }}><Button theme={theme} label="回到会话查看原始证据" icon="ArrowUpRight" variant="ghost" size="sm" onPress={() => { try { navigation.openAgent({ agentId: agent.id }); } catch (error) { toast.error(error instanceof Error ? error.message : "会话打开失败"); } }} /></View> : null}
     {showAutoSetting ? <View style={{ borderTopWidth: hairline, borderTopColor: theme.colors.border, paddingTop: space.sm }}><AnalysisSettingsRow theme={theme} state={query.data} /></View> : null}

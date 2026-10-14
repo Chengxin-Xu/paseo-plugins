@@ -8,8 +8,9 @@ import { looks, type LookKey, type RowStatus } from "../shared/vivid-model";
 import { usePalette } from "./activity";
 import { densityMetrics, useDensity, useFoldRow } from "./density";
 import { foldRuntime } from "./fold-runtime";
-import { hue, isDarkTheme, withAlpha } from "./kit";
+import { aria, hue, isDarkTheme, withAlpha } from "./kit";
 import { Flash, Pop, useChangeCount } from "./motion";
+import { PinnedPrompt, usePromptPin } from "./prompt-pin";
 import { StatusMark, StatusPill } from "./vivid";
 import { cuiTextEscape, pmonoViewEscape } from "./web";
 
@@ -79,6 +80,8 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
   const bar = useMemo(() => parts.map((part) => [part.look, data.counts.find(([look]) => look === part.look)?.[1] ?? 0] as const), [data.counts, parts]);
   const duration = done ? formatFoldDuration(data.durationMs) : null;
   const toggle = useCallback(() => foldRuntime.toggle(agentId, data.segment, !data.expanded), [agentId, data.expanded, data.segment]);
+  // 0.6.0 (grok-B2): the question of this turn, when this summary stands for the newest stretch of activity.
+  const pin = usePromptPin(agentId, { segment: data.segment });
 
   const text = useMemo(
     () => ({
@@ -107,7 +110,8 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
 
   return (
     <View {...pmonoViewEscape} style={card}>
-      <Pressable accessibilityRole="button" accessibilityLabel={label} {...({ "aria-expanded": data.expanded } as object)} onPress={toggle} style={row}>
+      {pin ? <PinnedPrompt agentId={agentId} pin={pin} theme={theme} mode={palette.mode} metrics={metrics} /> : null}
+      <Pressable accessibilityRole="button" accessibilityLabel={label} {...aria({ expanded: data.expanded })} onPress={toggle} style={row}>
         <FoldTile theme={theme} tone={tone} size={metrics.tile} pulse={changes} />
         <Text {...cuiTextEscape} numberOfLines={1} style={text.title}>{foldTitle(data)}</Text>
         {!layout.compact && bar.length > 0 ? <LookBar theme={theme} mode={palette.mode} parts={bar} /> : null}

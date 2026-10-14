@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { PluginRpcContract, RpcOutput } from "@getpaseo/plugin";
 import type { input as ZodInput } from "zod";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -48,6 +49,7 @@ function fakePaseo() {
       { id: "profile-1", name: "日常", provider: "claude", model: "m1", modeId: "plan", thinkingOptionId: "high", featureValues: { fast: true }, env: { SECRET_TOKEN: "do-not-leak" } },
     ] } })) },
     workspaces: {
+      list: vi.fn(async () => ({ requestId: "r", entries: [] as { id: string; worktreeSlug: string }[], pageInfo: { nextCursor: null, prevCursor: null, hasMore: false } })),
       create: vi.fn(async (options: Record<string, unknown>) => once(options.idempotencyKey, () => {
         log.workspaces.push(options);
         const id = `wks_${(++sequence).toString(16).padStart(16, "0")}`;
@@ -83,7 +85,7 @@ describe("board RPCs", () => {
   it("registers every contract and serves dashboard deltas through validated RPCs", async () => {
     const paseo = fakePaseo();
     const { call, handlers, cleanup } = host(paseo);
-    expect([...handlers.keys()].sort()).toEqual(["project-notes.dashboard", "project-notes.launch", "project-notes.launch-options", "project-notes.launch-status", "project-notes.projects", "project-notes.read", "project-notes.write"]);
+    expect([...handlers.keys()].sort()).toEqual(["project-notes.client-chunk.get", "project-notes.composer.attachments", "project-notes.composer.capabilities", "project-notes.composer.search", "project-notes.dashboard", "project-notes.deferred.cancel", "project-notes.deferred.enqueue", "project-notes.deferred.list", "project-notes.deferred.resume", "project-notes.deferred.send", "project-notes.history", "project-notes.launch", "project-notes.launch-options", "project-notes.launch-status", "project-notes.projects", "project-notes.prompt.environment", "project-notes.read", "project-notes.write"]);
     const empty = await call(readDashboardRpc, {});
     if (empty.unchanged) throw new Error("expected data");
     expect(empty.boards).toEqual([]);
@@ -106,7 +108,7 @@ describe("board RPCs", () => {
     for (const listener of paseo.projectListeners) listener();
     await call(projectsRpc, {});
     expect(paseo.projects.list).toHaveBeenCalledTimes(2);
-    cleanup();
+    await cleanup();
     expect(paseo.projectListeners.size).toBe(0);
   });
 
@@ -138,7 +140,9 @@ describe("launch RPCs", () => {
     isolation: "worktree", baseBranch: "main", profileId: null, provider: "claude", model: "m1", modeId: "auto", thinkingOptionId: "high", ...overrides,
   });
   async function settle(call: ReturnType<typeof host>["call"], launchId: string) {
-    for (let attempt = 0; attempt < 50; attempt++) {
+    // By time, not by count: a loaded full run (plugins tested in parallel) can take longer than 50 short polls.
+    const end = performance.now() + 5_000;
+    while (performance.now() < end) {
       const receipt = await call(launchStatusRpc, { launchId });
       if (receipt && ["started", "rejected", "uncertain"].includes(receipt.stage)) return receipt;
       await new Promise(resolve => setTimeout(resolve, 5));
@@ -163,6 +167,39 @@ describe("launch RPCs", () => {
     expect(paseo.providers.waitForReady).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/git" }));
   });
 
+  it("offers the default model for a ready provider without selectable models", async () => {
+    const paseo = fakePaseo();
+    paseo.catalog = { entries: [
+      { ...ready("example"), models: [] },
+      { ...ready("hidden-only"), models: [{ id: "hidden", label: "Hidden", isSelectable: false }] },
+      { ...ready("loading"), status: "loading", models: [] },
+      { ...ready("unavailable"), status: "unavailable", models: [] },
+      { ...ready("disabled"), enabled: false, models: [] },
+    ] } as never;
+    const { call } = host(paseo);
+    const options = await call(launchOptionsRpc, { projectId: "prj_git" });
+    const defaultModel = { id: "default", label: "默认", isDefault: true, thinkingOptions: [], defaultThinkingOptionId: null };
+    expect(options.providers.map(provider => [provider.id, provider.models])).toEqual([
+      ["example", [defaultModel]], ["hidden-only", [defaultModel]], ["loading", []], ["unavailable", []],
+    ]);
+    expect(paseo.providers.waitForReady).not.toHaveBeenCalled();
+  });
+
+  it("launches a model-less profile through provider/default", async () => {
+    const paseo = fakePaseo();
+    paseo.catalog = { entries: [{ ...ready("example"), models: [] }] };
+    paseo.config.get.mockResolvedValue({ requestId: "r", config: { agentProfiles: [
+      { id: "profile-1", name: "默认配置", provider: "example", modeId: "plan", featureValues: { fast: true } },
+    ] } } as never);
+    const { call } = host(paseo);
+    expect((await call(launchOptionsRpc, { projectId: "prj_git" })).profiles[0]).toMatchObject({ model: null });
+    const itemId = await seed(call), launchId = "launch-default-profile";
+    await call(launchRpc, launchInput(itemId, { launchId, provider: "example", model: "default", profileId: "profile-1", modeId: "plan", thinkingOptionId: null }));
+    expect(await settle(call, launchId)).toMatchObject({ stage: "started" });
+    expect(paseo.log.agents[0]!.config).toEqual({ provider: "example/default", modeId: "plan", featureValues: { fast: true } });
+    expect(paseo.log.sends).toHaveLength(1);
+  });
+
   it("creates one workspace and agent per launch with 0.9 idempotency keys", async () => {
     const paseo = fakePaseo();
     const { call } = host(paseo);
@@ -180,7 +217,9 @@ describe("launch RPCs", () => {
       config: { provider: "claude/m1", modeId: "auto", thinkingOptionId: "high" },
       labels: { "project-notes.launch-id": "launch-test-0001", "project-notes.item-id": itemId },
     })]);
-    expect(paseo.log.sends).toEqual([["agent-1", "上线检查\n\n逐项核对", { messageId: "project-notes-launch-test-0001" }]]);
+    const attachments = [{ type: "text", mimeType: "text/plain", contextKind: "project-notes", title: `手记 #${itemId.slice(0, 8)} · 上线检查`, text: `来源：手记 #${itemId}\n项目：随手记\n标题：上线检查\n状态：待办\n重点：是` }];
+    expect(paseo.log.sends).toEqual([["agent-1", "上线检查\n\n逐项核对", { messageId: "project-notes-launch-test-0001", attachments }]]);
+    expect(paseo.log.workspaces[0]).not.toHaveProperty("firstAgentContext");
     // Double tap / retry: the same intent replays the receipt and creates nothing.
     expect(await call(launchRpc, launchInput(itemId))).toMatchObject({ stage: "started", replayed: true, agentId: "agent-1" });
     await expect(call(launchRpc, launchInput(itemId, { title: "另一件事" }))).rejects.toThrow(/已经用于不同内容/);
@@ -201,6 +240,22 @@ describe("launch RPCs", () => {
     expect(paseo.log.workspaces).toHaveLength(1);
     expect(paseo.log.workspaces[0]!.source).toEqual({ kind: "directory", projectId: "prj_git", path: "/repo/git" });
     expect(paseo.log.agents).toHaveLength(1);
+  });
+
+  it("keeps the edited task as the message and attaches metadata without the original note body", async () => {
+    const paseo = fakePaseo();
+    const { call } = host(paseo);
+    const created = await call(writeBoardRpc, { projectId: "prj_git", requestId: "launch-long-source", operation: { type: "create", fields: { ...fields, body: "中文😀".repeat(4000) } } });
+    const itemId = created.board.items[0]!.id;
+    await call(launchRpc, launchInput(itemId, { launchId: "launch-source-context", sourceProjectId: "prj_git", prompt: "只执行这个经过修改的任务", title: "新的工作区标题" }));
+    expect(await settle(call, "launch-source-context")).toMatchObject({ stage: "started" });
+    const options = paseo.log.sends[0]![2] as { attachments: { title: string; text: string }[] };
+    expect(paseo.log.sends[0]![1]).toBe("只执行这个经过修改的任务");
+    expect(options.attachments[0]!.title).toBe(`手记 #${itemId.slice(0, 8)} · 上线检查`);
+    expect(Buffer.byteLength(options.attachments[0]!.text, "utf8")).toBeLessThanOrEqual(8192);
+    expect(options.attachments[0]!.text).not.toContain("中文😀");
+    expect(Buffer.from(options.attachments[0]!.text, "utf8").toString("utf8")).toBe(options.attachments[0]!.text);
+    expect(paseo.log.workspaces[0]).not.toHaveProperty("firstAgentContext");
   });
 
   it("rejects without creating anything when validation fails, and marks later failures uncertain", async () => {
@@ -265,6 +320,61 @@ describe("launch RPCs", () => {
     expect(await call(launchStatusRpc, { launchId: "launch-unknown-1" })).toBeNull();
   });
 
+  it("durably rejects an interrupted prepared launch only after read-only lookups find no resources", async () => {
+    const paseo = fakePaseo(), launches = join(home, "plugin-data", "project-notes", "launches");
+    await (await import("node:fs/promises")).mkdir(launches, { recursive: true });
+    const launchId = "launch-prepared-empty", file = join(launches, `${launchId}.json`);
+    await writeFile(file, JSON.stringify({ launchId, inputHash: "x", projectId: "prj_git", isolation: "worktree", stage: "prepared", workspaceId: null, agentId: null, error: null }));
+    const { call } = host(paseo);
+    expect(await call(launchStatusRpc, { launchId })).toMatchObject({ stage: "rejected", workspaceId: null, agentId: null, error: expect.stringContaining("尚未创建") });
+    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ stage: "rejected" });
+    expect(await host(paseo).call(launchStatusRpc, { launchId })).toMatchObject({ stage: "rejected" });
+    expect(paseo.agents.list).toHaveBeenCalledTimes(1);
+    expect(paseo.workspaces.list).toHaveBeenCalledTimes(1);
+    expect(paseo.workspaces.create).not.toHaveBeenCalled();
+    expect(paseo.log.sends).toEqual([]);
+  });
+
+  it.each(["agent", "workspace", "offline", "incomplete"])("keeps prepared recovery uncertain when lookup is %s", async scenario => {
+    const paseo = fakePaseo(), launches = join(home, "plugin-data", "project-notes", "launches");
+    await (await import("node:fs/promises")).mkdir(launches, { recursive: true });
+    const launchId = `launch-prepared-${scenario}`, file = join(launches, `${launchId}.json`);
+    await writeFile(file, JSON.stringify({ launchId, inputHash: "x", stage: "prepared", workspaceId: null, agentId: null, error: null }));
+    if (scenario === "agent") paseo.agents.list.mockResolvedValueOnce({ requestId: "r", entries: [{ agent: { id: "found-agent", workspaceId: "wks_found", labels: { "project-notes.launch-id": launchId } } }], pageInfo: { nextCursor: null, prevCursor: null, hasMore: false } });
+    if (scenario === "workspace") paseo.workspaces.list.mockResolvedValueOnce({ requestId: "r", entries: [{ id: "wks_found", worktreeSlug: `notes-${createHash("sha256").update(launchId).digest("hex").slice(0, 12)}` }], pageInfo: { nextCursor: null, prevCursor: null, hasMore: false } });
+    if (scenario === "offline") paseo.workspaces.list.mockRejectedValueOnce(new Error("offline"));
+    if (scenario === "incomplete") paseo.workspaces.list.mockResolvedValueOnce({ requestId: "r", entries: [], pageInfo: { nextCursor: null, prevCursor: null, hasMore: true } });
+    const result = await host(paseo).call(launchStatusRpc, { launchId });
+    expect(result).toMatchObject({ stage: "uncertain", workspaceId: scenario === "agent" || scenario === "workspace" ? "wks_found" : null, agentId: scenario === "agent" ? "found-agent" : null });
+    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ stage: scenario === "agent" || scenario === "workspace" ? "uncertain" : "prepared" });
+    expect(paseo.workspaces.create).not.toHaveBeenCalled();
+    expect(paseo.log.sends).toEqual([]);
+  });
+
+  it("recovers an uncertain agent after a lost create reply, persists IDs, and never sends", async () => {
+    const paseo = fakePaseo();
+    const { call } = host(paseo);
+    const itemId = await seed(call);
+    const launchId = "launch-lost-agent-reply";
+    paseo.workspaces.create.mockImplementationOnce(async () => ({ id: "wks_2222222222222222", agents: { create: vi.fn(async () => { throw new Error("创建响应丢失"); }) } }) as never);
+    await call(launchRpc, launchInput(itemId, { launchId }));
+    expect(await settle(call, launchId)).toMatchObject({ stage: "uncertain", agentId: null });
+    // The daemon's catalogue can lag behind the failed request. A later explicit query retries the read.
+    expect(await call(launchStatusRpc, { launchId })).toMatchObject({ stage: "uncertain", agentId: null });
+    paseo.agents.list.mockRejectedValueOnce(new Error("暂时离线"));
+    expect(await call(launchStatusRpc, { launchId })).toMatchObject({ stage: "uncertain", agentId: null });
+    paseo.agents.list.mockResolvedValueOnce({ requestId: "r", entries: [{ agent: { id: "recovered-agent", workspaceId: "wks_2222222222222222", labels: { "project-notes.launch-id": launchId } } }], pageInfo: { nextCursor: null, prevCursor: null, hasMore: false } });
+    const found = await call(launchStatusRpc, { launchId });
+    expect(found).toMatchObject({ stage: "uncertain", agentId: "recovered-agent", workspaceId: "wks_2222222222222222", error: expect.stringContaining("创建响应丢失") });
+    const saved = JSON.parse(await readFile(join(home, "plugin-data", "project-notes", "launches", `${launchId}.json`), "utf8"));
+    expect(saved).toMatchObject({ stage: "uncertain", agentId: "recovered-agent" });
+    const reads = paseo.agents.list.mock.calls.length;
+    expect(await host(paseo).call(launchStatusRpc, { launchId })).toMatchObject({ stage: "uncertain", agentId: "recovered-agent" });
+    expect(paseo.agents.list).toHaveBeenCalledTimes(reads);
+    expect(paseo.workspaces.create).toHaveBeenCalledTimes(1);
+    expect(paseo.log.sends).toEqual([]);
+  });
+
   it("stops an active launch when the plugin unloads", async () => {
     const paseo = fakePaseo();
     let release!: () => void;
@@ -273,9 +383,32 @@ describe("launch RPCs", () => {
     const itemId = await seed(call);
     await call(launchRpc, launchInput(itemId, { launchId: "launch-unload-1" }));
     await vi.waitFor(() => expect(paseo.workspaces.create).toHaveBeenCalled());
-    cleanup();
+    let stopped = false;
+    const stopping = Promise.resolve(cleanup()).then(() => { stopped = true; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(stopped).toBe(false);
     release();
-    const receipt = await settle(call, "launch-unload-1");
+    await stopping;
+    const receipt = await call(launchStatusRpc, { launchId: "launch-unload-1" });
     expect(receipt).toMatchObject({ stage: "uncertain", workspaceId: "wks_1111111111111111", error: expect.stringMatching(/插件正在重载/) });
+    expect(paseo.log.sends).toEqual([]);
+  });
+
+  it("waits for prepared validation to finish and writes rejected before plugin cleanup resolves", async () => {
+    const paseo = fakePaseo();
+    let release!: () => void;
+    paseo.providers.snapshot.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(paseo.catalog); }));
+    const { call, cleanup } = host(paseo), itemId = await seed(call), launchId = "launch-unload-prepared";
+    await call(launchRpc, launchInput(itemId, { launchId }));
+    await vi.waitFor(() => expect(paseo.providers.snapshot).toHaveBeenCalled());
+    let stopped = false;
+    const stopping = Promise.resolve(cleanup()).then(() => { stopped = true; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(stopped).toBe(false);
+    release(); await stopping;
+    expect(await call(launchStatusRpc, { launchId })).toMatchObject({ stage: "rejected", error: expect.stringContaining("尚未创建") });
+    const stored = JSON.parse(await readFile(join(home, "plugin-data", "project-notes", "launches", `${launchId}.json`), "utf8"));
+    expect(stored.stage).toBe("rejected");
+    expect(paseo.workspaces.create).not.toHaveBeenCalled();
   });
 });

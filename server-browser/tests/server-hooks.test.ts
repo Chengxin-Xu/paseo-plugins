@@ -20,14 +20,21 @@ function host(){
     before:(name:string,handler:Handler)=>{before.set(name,handler);return()=>{};},
     registerSettings(){},registerProvider(){},
   } as unknown as PluginServerContext;
-  const restored:string[][]=[],frames:unknown[][]=[],directories:[string,string][]=[];
+  const restored:string[][]=[],frames:unknown[][]=[],directories:[string,string][]=[],retired:string[]=[],orphanCalls:unknown[][]=[],unretired:string[]=[],inputs:unknown[][]=[];
   const manager={
     restore:async(ids:string[])=>{restored.push(ids);},
     setWorkspaceDirectory:(id:string,directory:string)=>{directories.push([id,directory]);},
     frame:async(...args:unknown[])=>{frames.push(args);return {sessionRevision:'r',frame:null};},
+    getAgentId:async()=>null,setAgentAvailability:()=>{},
+    retireWorkspace:async(id:string)=>{retired.push(id);},
+    unretire:async(id:string)=>{unretired.push(id);},
+    deleteOrphan:async(id:string,ids:string[])=>{orphanCalls.push(['delete',id,ids]);if(ids.includes(id))throw new Error('该工作区仍可用');},
+    input:async(id:string,request:unknown)=>{inputs.push([id,request]);return {status:'applied',applied:1,continuation:'scope',session:session(id)};},
+    listOrphans:async(ids:string[])=>{orphanCalls.push(['list',ids]);return [{workspaceId:'orphan',status:'running',pid:123,desiredRunning:true}];},
+    stopOrphan:async(id:string,ids:string[])=>{orphanCalls.push(['stop',id,ids]);if(ids.includes(id))throw new Error('该工作区仍然可用');},
     state:async(id:string)=>session(id),dataRoot:'/nonexistent/server-browser-hooks-test',close:async()=>{},
   } as unknown as BrowserManager;
-  return {server,rpc,events,before,manager,restored,frames,directories};
+  return {server,rpc,events,before,manager,restored,frames,directories,retired,orphanCalls,unretired,inputs};
 }
 const openRequest={agentId:'agent-1',workspaceId:'one',provider:'claude',cwd:'/work/one',reason:'resume',purpose:'interactive',env:{}};
 
@@ -55,14 +62,14 @@ test('agent session open returns at once, even while the workspace listing hangs
 });
 
 test('panel RPCs still validate the workspace, share the cached listing and see lifecycle invalidation',async()=>{
-  const {server,rpc,events,manager,frames,directories}=host();
+  const {server,rpc,events,manager,frames,directories,retired}=host();
   let listCalls=0,entries=[workspace('one')];
   const paseo={workspaces:{list:async()=>{listCalls++;return {entries,pageInfo:{hasMore:false}};}}};
   contribute(server,{manager,directory:new WorkspaceDirectory(60_000)});
   const frame=rpc.get('browser.frame')!;
   for(let index=0;index<20;index++)await frame({workspaceId:'one',after:null,quality:'sharp',maxWidth:780,maxHeight:1200,sessionRevision:'rev'},{paseo});
   assert.equal(listCalls,1,'twenty frame polls validate against one listing');
-  assert.deepEqual(frames[0],['one',null,'sharp',{maxWidth:780,maxHeight:1200,sessionRevision:'rev'}]);
+  assert.deepEqual(frames[0],['one',null,'sharp',{maxWidth:780,maxHeight:1200,sessionRevision:'rev',viewerId:undefined}]);
   assert(directories.some(([id,directory])=>id==='one'&&directory==='/work/one'),'a validated workspace records its directory');
   await assert.rejects(Promise.resolve(frame({workspaceId:'other',after:null},{paseo})),/已不可用/);
   assert.equal(listCalls,2,'an unknown workspace is confirmed with one fresh listing');
@@ -71,8 +78,53 @@ test('panel RPCs still validate the workspace, share the cached listing and see 
   await frame({workspaceId:'new',after:null},{paseo});
   assert.equal(listCalls,3);
   entries=[workspace('new')];
-  events.get('workspace.archived')!({workspace:{id:'one'}},{paseo});
+  await events.get('workspace.archived')!({workspace:{id:'one'}},{paseo});
+  assert.deepEqual(retired,['one'],'archiving retires browser resources, beyond invalidating the workspace list');
   await assert.rejects(Promise.resolve(frame({workspaceId:'one',after:null},{paseo})),/已不可用/,'an archived workspace stops validating immediately');
+});
+
+test('orphan cleanup bypasses normal workspace validation but supplies the current allowlist',async()=>{
+  const {server,rpc,events,manager,orphanCalls,retired,unretired}=host();
+  let entries=[workspace('one')];
+  const paseo={workspaces:{list:async()=>({entries,pageInfo:{hasMore:false}})}};
+  contribute(server,{manager});
+  const list=await rpc.get('browser.orphans')!({},{paseo}) as {items:{workspaceId:string}[]};
+  assert.equal(list.items[0].workspaceId,'orphan');
+  assert.deepEqual(await rpc.get('browser.orphan.stop')!({workspaceId:'orphan'},{paseo}),{stopped:true});
+  await assert.rejects(Promise.resolve(rpc.get('browser.orphan.stop')!({workspaceId:'one'},{paseo})),/仍然可用/);
+  assert.deepEqual(await rpc.get('browser.orphan.delete')!({workspaceId:'orphan'},{paseo}),{deleted:true});
+  await assert.rejects(Promise.resolve(rpc.get('browser.orphan.delete')!({workspaceId:'one'},{paseo})),/仍可用/);
+  assert.deepEqual(orphanCalls,[['list',['one']],['stop','orphan',['one']],['stop','one',['one']],['delete','orphan',['one']],['delete','one',['one']]]);
+  entries=[];
+  await events.get('workspace.archived')!({workspace:{id:'one'}},{paseo});
+  assert.deepEqual(retired,['one']);
+  await assert.rejects(Promise.resolve(rpc.get('browser.state')!({workspaceId:'one'},{paseo})),/已不可用/,'an archived workspace stops validating');
+  // Restored under the same id (no workspace.created event): an id missing from the cached listing is confirmed with a
+  // fresh one, which brings its browser back at once.
+  entries=[workspace('one')];
+  assert.equal(((await rpc.get('browser.state')!({workspaceId:'one'},{paseo})) as BrowserSession).workspaceId,'one');
+  assert.deepEqual(unretired,['one']);
+});
+
+test('live input reaches the manager after workspace validation; services come from a fresh workspace descriptor',async()=>{
+  const {server,rpc,manager,inputs}=host();
+  let scripts:unknown[]=[];
+  const descriptor=()=>({...workspace('one'),scripts});
+  let listCalls=0;
+  const paseo={workspaces:{list:async()=>{listCalls++;return {entries:[descriptor()],pageInfo:{hasMore:false}};}},agents:{list:async()=>({entries:[],pageInfo:{hasMore:false}})}};
+  contribute(server,{manager,directory:new WorkspaceDirectory(60_000)});
+  const request={workspaceId:'one',viewerId:'viewer',seq:1,target:{tabId:'t',viewRevision:'v',inputScope:'s'},events:[{kind:'text',text:'abc'}]};
+  const result=await rpc.get('browser.input')!(request,{paseo}) as {status:string;continuation:string};
+  assert.deepEqual([result.status,result.continuation],['applied','scope']);
+  assert.deepEqual(inputs,[['one',request]]);
+  await assert.rejects(Promise.resolve(rpc.get('browser.input')!({...request,workspaceId:'gone'},{paseo})),/已不可用/);
+  scripts=[{scriptName:'web',type:'service',hostname:'web--demo.localhost',port:5173,proxyUrl:null,lifecycle:'running',health:'healthy',exitCode:null,terminalId:null,localProxyUrl:'http://web--demo.localhost:6767'},
+    {scriptName:'docs',type:'service',hostname:'docs--demo.localhost',port:null,proxyUrl:null,lifecycle:'stopped',health:null,exitCode:null,terminalId:null,localProxyUrl:'http://docs--demo.localhost:6767'},
+    {scriptName:'test',type:'script',hostname:'test',port:null,proxyUrl:null,lifecycle:'running',health:null,exitCode:null,terminalId:'t1'}];
+  const before=listCalls;
+  const services=await rpc.get('browser.services')!({workspaceId:'one'},{paseo}) as {items:unknown[]};
+  assert.equal(listCalls,before+1,'services read a fresh listing, not the 60 s cache');
+  assert.deepEqual(services.items,[{name:'web',port:5173,running:true,health:'healthy',url:'http://127.0.0.1:5173/'},{name:'docs',port:null,running:false,health:null,url:'http://docs--demo.localhost:6767'}]);
 });
 
 test('an unchanged overview answers with its revision only',async()=>{

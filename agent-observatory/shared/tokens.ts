@@ -1,6 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { STATS_RANGES } from "./stats";
+import { STATS_RANGES, statsTimeZoneSchema } from "./stats";
 
 /**
  * Token ledger (Token 页 / 实时流速 / per-Agent tokens in 复盘).
@@ -10,8 +10,18 @@ import { STATS_RANGES } from "./stats";
  * way ccusage / TokenTracker do:
  * - Claude Code, and custom providers that extend it: `$CLAUDE_CONFIG_DIR/projects/<cwd>/<session>.jsonl` and
  *   `<session>/subagents/*.jsonl`; one line per content block, deduplicated by `message.id` + `requestId`.
- * - Codex, and custom providers that extend it: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, `event_msg` /
- *   `token_count` (`last_token_usage`, deduplicated by `total_token_usage`).
+ * - Codex, and custom providers that extend it: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` and archived sessions'
+ *   `$CODEX_HOME/archived_sessions/rollout-*.jsonl` (2.13; a moved rollout keeps its read position), `event_msg` /
+ *   `token_count` (`last_token_usage`, deduplicated by `total_token_usage`). A subagent thread's rollout
+ *   (`session_meta.source.subagent`) counts for the session that spawned it, as Claude Code's `subagents/` logs do.
+ * - Grok CLI (2.14), and ACP providers that run it: `$GROK_HOME/sessions/<encoded cwd>/<session>/usage.json`, the
+ *   per-turn totals Grok writes when a turn ends (what `grok usage` prints). One record is one turn of one model and
+ *   stands for its `modelCalls` model calls; turns copied into a resumed or forked session are deduplicated by their
+ *   content. Grok logs no per-call start, so its turns have no response time and stay out of the output speed. The
+ *   observatory's own Grok analyses (a `paseo-insight-*` temporary directory, deleted after each run) are not counted.
+ * - Pi (2.14): `$PI_CODING_AGENT_SESSION_DIR`, else `$PI_CODING_AGENT_DIR/sessions` (`~/.pi/agent/sessions`),
+ *   `--<cwd>--/<time>_<session>.jsonl`, counted as Pi totals a session: assistant messages, tool results that carry
+ *   usage, and compaction / branch summaries; deduplicated by response id (a `/fork` or `/clone` copies messages).
  * The directories are the standard ones plus any a custom provider sets in its config or launcher (server/tokens/roots).
  * Everything on the host is counted (not only Paseo-started sessions); sessions are matched to Paseo agents through
  * `persistence.sessionId`. Only counters, model names, working directories and session ids are retained — never
@@ -19,8 +29,12 @@ import { STATS_RANGES } from "./stats";
  *
  * Normalisation: `input` is fresh input only (neither written to nor read from the prompt cache); `cacheWrite` and
  * `cacheRead` are the cached parts, so input + cacheWrite + cacheRead is everything the model read and
- * input + cacheWrite + cacheRead + output is the total. Codex reports cached tokens inside `input_tokens`; they are
- * split out. `reasoning` is the part of `output` the provider reports as reasoning (Codex only).
+ * input + cacheWrite + cacheRead + output is the total. Codex and Grok report cached tokens inside their input count;
+ * they are split out. `reasoning` is the part of `output` the provider reports as reasoning.
+ *
+ * Days and hours (2.14) are the device's, as on the statistics pages (shared/stats): its IANA `timeZone` when the server
+ * knows that zone, each UTC hour converted with its own offset (exact across daylight-saving changes), else the fixed
+ * `utcOffsetMinutes`. The ledger itself is kept by UTC hour.
  */
 const count = z.number().int().nonnegative();
 const duration = z.number().nonnegative().finite();
@@ -28,9 +42,15 @@ const iso = z.iso.datetime();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const rate = z.number().nonnegative().finite();
 
-export const TOKEN_SOURCES = ["claude", "codex"] as const;
+export const TOKEN_SOURCES = ["claude", "codex", "grok", "pi"] as const;
 export type TokenSource = typeof TOKEN_SOURCES[number];
-export const tokenSourceNames: Record<TokenSource, string> = { claude: "Claude Code", codex: "Codex" };
+export const tokenSourceNames: Record<TokenSource, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok CLI", pi: "Pi" };
+/** Provider breakdown row of the sessions no Paseo agent matches (run in a terminal, or the agent was deleted). */
+export const TOKEN_UNMATCHED = "__unmatched__";
+/** Log roots watched at once: the standard ones plus custom providers' config directories (server/tokens/roots). */
+export const MAX_TOKEN_ROOTS = 16;
+/** Codex's folder of archived sessions (a rollout moves there when its session is archived); shown apart in the coverage line. */
+export const isArchivedLogRoot = (path: string): boolean => /[\\/]archived_sessions[\\/]?$/.test(path);
 
 export const tokenCountsSchema = z.object({
   /** Model responses (API calls). */
@@ -77,6 +97,8 @@ export const tokenSnapshotSchema = z.object({
   generatedAt: iso,
   range: z.enum(STATS_RANGES),
   utcOffsetMinutes: z.number().int(),
+  /** The IANA zone the days and hours were grouped in (2.14); null (or absent from older servers) for the fixed offset. */
+  timeZone: statsTimeZoneSchema.nullable().optional(),
   from: day, to: day,
   totals: tokenCountsSchema,
   /** The equally long period right before `from`. */
@@ -90,6 +112,13 @@ export const tokenSnapshotSchema = z.object({
   models: z.array(tokenRowSchema).max(24),
   sources: z.array(tokenRowSchema).max(TOKEN_SOURCES.length),
   projects: z.array(tokenRowSchema).max(24),
+  /**
+   * By Paseo provider (2.13): a session counts for the provider of the agent whose `persistence.sessionId` it is, so
+   * custom providers that share one log directory are told apart. Ranked by total tokens (beyond 24 one "__other__"
+   * row), then one TOKEN_UNMATCHED row (未关联会话) for the sessions no agent matches. Absent while the agent directory
+   * has not been read (everything would look unmatched).
+   */
+  providers: z.array(tokenRowSchema).max(26).optional(),
   /** Top sessions by total tokens in the range. */
   sessions: z.array(tokenSessionSchema).max(20),
   records: z.object({
@@ -107,7 +136,7 @@ export const tokenSnapshotSchema = z.object({
     earliestAt: iso.nullable(), latestAt: iso.nullable(),
     /** First import of existing logs; counts grow while it runs. */
     backfill: z.object({ done: z.boolean(), files: count, filesDone: count, bytes: count, bytesDone: count }),
-    roots: z.array(z.object({ source: z.enum(TOKEN_SOURCES), path: z.string().max(1024), files: count, error: z.string().max(240).nullable() })).max(8),
+    roots: z.array(z.object({ source: z.enum(TOKEN_SOURCES), path: z.string().max(1024), files: count, error: z.string().max(240).nullable() })).max(MAX_TOKEN_ROOTS),
     /** A budget cut the import (2.12): too many logs, too many bytes, an oversized dedupe index, or a scan stopped early. */
     truncated: z.object({ files: z.boolean(), bytes: z.boolean(), index: z.boolean(), scan: z.boolean() }).optional(),
   }),
@@ -140,7 +169,9 @@ export const tokenResponseSchema = z.discriminatedUnion("mode", [
 export type TokenResponse = z.infer<typeof tokenResponseSchema>;
 export const getTokens = defineRpc({
   name: "observatory.tokens.get",
-  input: z.object({ range: z.enum(STATS_RANGES), utcOffsetMinutes: offset, revision: revision.optional() }),
+  // `timeZone` is optional (2.14) as on observatory.stats.get: older clients, and zones this server does not know or whose
+  // current offset disagrees with the device's, fall back to the fixed offset.
+  input: z.object({ range: z.enum(STATS_RANGES), utcOffsetMinutes: offset, timeZone: statsTimeZoneSchema.optional(), revision: revision.optional() }),
   output: tokenResponseSchema,
 });
 export type TokenState = TokenSnapshot & { revision?: string };
@@ -194,6 +225,8 @@ export const getTokenLive = defineRpc({
   input: z.object({
     windowMinutes: z.union([z.literal(30), z.literal(60)]),
     utcOffsetMinutes: offset,
+    /** The device's IANA zone for `today`'s local midnight (2.14), as on observatory.tokens.get. */
+    timeZone: statsTimeZoneSchema.optional(),
     /** "agents" returns empty series (for the session list's running rows); "full" everything. */
     detail: z.enum(["full", "agents"]),
   }),

@@ -199,11 +199,38 @@ describe("planFolds: scope, notices, loaded rows and ambiguity", () => {
     expect(summaryOf(folded.roles, rows[1]!)).toMatchObject({ steps: 2, counts: [["shell", 1], ["read", 1]] });
   });
 
+  it("follows the client's own decision for a repeat notice over the index's (0.6.0-local.3)", () => {
+    // The index could not see the row's result (another page) and kept the notice; the client saw both say the same.
+    const rows = [boundary(1), tool(2), tool(3, "completed", "shell", { notice: { ref: "call-2", foreground: false } }), tool(4, "completed", "read"), boundary(5)];
+    expect(kinds(planFolds(rows, options({ enabled: false })).roles, rows)).toEqual(["|", "-", "-", "-", "|"]);
+    const merged = planFolds(rows, options({ enabled: false, noticeMerged: (key) => (key === rows[2]!.key ? true : undefined) }));
+    expect(kinds(merged.roles, rows)).toEqual(["|", "-", "hide", "-", "|"]);
+    // And the other way: the client keeps a notice whose result its row does not show.
+    const kept = [boundary(1), tool(2), tool(3, "completed", "shell", { notice: { ref: "call-2", foreground: true } }), boundary(4)];
+    expect(kinds(planFolds(kept, options({ enabled: false, noticeMerged: () => false })).roles, kept)).toEqual(["|", "-", "-", "|"]);
+  });
+
   it("keeps a background notice as its own row: folded with its run but not a step", () => {
     const rows = [boundary(1), tool(2), tool(3), tool(4, "completed", "shell", { notice: { ref: "call-0", foreground: false } }), boundary(5)];
     const { roles } = planFolds(rows, options());
     expect(kinds(roles, rows)).toEqual(["|", "fold", "hide", "hide", "|"]);
     expect(summaryOf(roles, rows[1]!).steps).toBe(2);
+  });
+
+  it("shows a failed background notice in red: counted as a failure of its finished run, kept while the run is live (0.6.0)", () => {
+    const failed = tool(4, "failed", "agent", { notice: { ref: "call-0", foreground: false } });
+    const rows = [boundary(1), tool(2), tool(3), failed, boundary(5)];
+    const done = planFolds(rows, options());
+    expect(kinds(done.roles, rows)).toEqual(["|", "fold", "hide", "hide", "|"]);
+    expect(summaryOf(done.roles, rows[1]!)).toMatchObject({ steps: 2, failed: 1 });
+    // A stopped sub-agent (Claude Code's "killed") is no failure.
+    const stopped = planFolds([boundary(1), tool(2), tool(3), tool(4, "canceled", "agent", { notice: { ref: "call-0", foreground: false } }), boundary(5)], options());
+    expect(summaryOf(stopped.roles, rows[1]!)).toMatchObject({ steps: 2, failed: 0 });
+    // While the run goes on, the failure stays on screen like a failed step.
+    const live = [boundary(1), tool(2), tool(3), tool(4), failed, tool(5), tool(6), tool(7, "running")];
+    const running = planFolds(live, options({ agentRunning: true }));
+    expect(kinds(running.roles, live)).toEqual(["|", "fold", "hide", "-", "-", "-", "-", "-"]);
+    expect(summaryOf(running.roles, live[1]!)).toMatchObject({ mode: "earlier", hidden: 2, failed: 0 });
   });
 
   it("counts and anchors only rows Paseo has loaded", () => {
@@ -293,5 +320,65 @@ describe("fold texts", () => {
     const summary = { mode: "done" as const, steps: 12, hidden: 12, expanded: false, counts: [["think", 2], ["shell", 5]] as Array<[string, number]>, failed: 1, canceled: 0, durationMs: 80_000 };
     expect(foldAccessibilityLabel(summary)).toBe("展开 12 步：思考 2、命令 5，失败 1，用时 1 分 20 秒");
     expect(foldAccessibilityLabel({ ...summary, mode: "earlier", hidden: 7, expanded: true, failed: 0 })).toBe("收起 前面 7 步：思考 2、命令 5");
+  });
+});
+
+describe("planFolds: cards other plugins draw (0.5.0)", () => {
+  it("never merges the tool rows on the two sides of a Bots card the index marks as a boundary", () => {
+    // The plugin server records Bots' proposal and sign-in cards as boundaries (shared/plugin-cards.ts).
+    const rows = [boundary(1, "user_message"), tool(2, "completed", "read"), tool(3), boundary(4, "bots-proposal"), tool(5, "completed", "edit"), tool(6), boundary(7)];
+    const { roles, segments } = planFolds(rows, options());
+    expect(kinds(roles, rows)).toEqual(["|", "fold", "hide", "|", "fold", "hide", "|"]);
+    expect(segments.map((segment) => segment.keys)).toEqual([[toolKey("call-2"), toolKey("call-3")], [toolKey("call-5"), toolKey("call-6")]]);
+    expect(summaryOf(roles, rows[1]!)).toMatchObject({ steps: 2, counts: [["read", 1], ["shell", 1]] });
+    expect(summaryOf(roles, rows[4]!)).toMatchObject({ steps: 2, counts: [["edit", 1], ["shell", 1]] });
+  });
+
+  it("ends a segment at a tool row some other plugin drew, between rows this plugin drew", () => {
+    // An index without the boundary (another plugin's card, an older server): the card's row was never drawn here.
+    const card = tool(4, "completed", "mcp");
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), card, tool(5), tool(6), boundary(7)];
+    const present = (key: string) => key !== card.key;
+    const { roles, segments } = planFolds(rows, options({ present }));
+    expect(kinds(roles, rows)).toEqual(["|", "fold", "hide", "-", "fold", "hide", "|"]);
+    expect(segments).toHaveLength(2);
+    // Before 0.5.0 this was one segment: the summary above the card stood for the rows below it too.
+    expect(summaryOf(roles, rows[1]!).steps).toBe(2);
+    expect(summaryOf(roles, rows[4]!).steps).toBe(2);
+  });
+
+  it("keeps rows not drawn yet at either end of a run as members: unloaded history, rows still on their way", () => {
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), tool(4), tool(5), boundary(6)];
+    const loaded = new Set([toolKey("call-4"), toolKey("call-5")]);
+    const { roles, segments } = planFolds(rows, options({ present: (key) => loaded.has(key) }));
+    expect(segments).toHaveLength(1);
+    // The summary sits on the first loaded row and counts only loaded rows, as before.
+    expect(kinds(roles, rows)).toEqual(["|", "hide", "hide", "fold", "hide", "|"]);
+    expect(summaryOf(roles, rows[3]!).steps).toBe(2);
+  });
+
+  it("does not take a reasoning row it has not drawn for another plugin's (its key follows streaming text)", () => {
+    const thought = think(4);
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), thought, tool(5), tool(6), boundary(7)];
+    const { segments } = planFolds(rows, options({ present: (key) => key !== thought.key }));
+    expect(segments).toHaveLength(1);
+  });
+
+  it("gives a running segment's two recent places to rows on screen, not to a card at its end", () => {
+    const card = tool(8, "completed", "mcp");
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), tool(4), tool(5), tool(6), tool(7), card];
+    const present = (key: string) => key !== card.key;
+    const { roles } = planFolds(rows, options({ agentRunning: true, present }));
+    // Rows 6 and 7 stay visible (before 0.5.0 the card took one place and row 6 folded away).
+    expect(kinds(roles, rows)).toEqual(["|", "fold", "hide", "hide", "hide", "-", "-", "-"]);
+    expect(summaryOf(roles, rows[1]!)).toMatchObject({ mode: "earlier", hidden: 4 });
+  });
+
+  it("keeps a just-finished row Paseo has not drawn yet visible when it appears", () => {
+    const fresh = tool(7);
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), tool(4), tool(5), tool(6), fresh];
+    const { roles } = planFolds(rows, options({ agentRunning: true, present: (key) => key !== fresh.key }));
+    expect(roles.get(fresh.key!)).toBeUndefined();
+    expect(kinds(roles, rows)).toEqual(["|", "fold", "hide", "hide", "-", "-", "-"]);
   });
 });

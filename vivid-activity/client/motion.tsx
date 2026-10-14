@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AccessibilityInfo, Animated, Easing, Platform, StyleSheet, View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from "react-native";
 import { useForeground } from "./use-foreground";
 
@@ -27,17 +27,25 @@ const css = (web ? StyleSheet.create({
 } as never) : {}) as Record<"spin" | "spinSlow" | "ping" | "breathe" | "slide" | "flash" | "pop" | "enter" | "growY" | "growX" | "paused", StyleProp<ViewStyle>>;
 const shared = StyleSheet.create({ overlay: { ...StyleSheet.absoluteFillObject, pointerEvents: "none" } });
 
+// One system subscription shared by every animated mark: a long list would otherwise add a listener per row.
 let reduced = false;
+const reducedListeners = new Set<() => void>();
+let reducedSubscription: { remove?: () => void } | undefined;
+function subscribeReducedMotion(listener: () => void): () => void {
+  reducedListeners.add(listener);
+  if (!reducedSubscription) {
+    const publish = (next: boolean) => { if (next !== reduced) { reduced = next; for (const notify of reducedListeners) notify(); } };
+    reducedSubscription = AccessibilityInfo.addEventListener?.("reduceMotionChanged", publish) ?? {};
+    AccessibilityInfo.isReduceMotionEnabled?.().then(publish).catch(() => {});
+  }
+  return () => {
+    reducedListeners.delete(listener);
+    if (!reducedListeners.size) { reducedSubscription?.remove?.(); reducedSubscription = undefined; }
+  };
+}
 /** System "reduce motion" (prefers-reduced-motion on web). */
 export function useReducedMotion(): boolean {
-  const [value, setValue] = useState(reduced);
-  useEffect(() => {
-    let alive = true;
-    AccessibilityInfo.isReduceMotionEnabled?.().then(next => { reduced = next; if (alive) setValue(next); }).catch(() => {});
-    const subscription = AccessibilityInfo.addEventListener?.("reduceMotionChanged", next => { reduced = next; setValue(next); });
-    return () => { alive = false; subscription?.remove?.(); };
-  }, []);
-  return value;
+  return useSyncExternalStore(subscribeReducedMotion, () => reduced, () => reduced);
 }
 /** Whether looping motion may run right now; `static` means draw the resting frame only. */
 function useLoopState(active: boolean): "run" | "paused" | "static" {

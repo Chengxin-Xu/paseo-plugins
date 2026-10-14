@@ -1,25 +1,42 @@
 // @ts-expect-error -- prismjs does not declare default export for prism-core
-import Prism from "prismjs/components/prism-core";
-import "prismjs/components/prism-markup";
-import "prismjs/components/prism-css";
-import "prismjs/components/prism-clike";
-import "prismjs/components/prism-javascript";
-import "prismjs/components/prism-typescript";
-import "prismjs/components/prism-jsx";
-import "prismjs/components/prism-tsx";
-import "prismjs/components/prism-python";
-import "prismjs/components/prism-json";
-import "prismjs/components/prism-yaml";
-import "prismjs/components/prism-markdown";
-import "prismjs/components/prism-go";
-import "prismjs/components/prism-rust";
+import Prism from "prismjs/components/prism-core.min.js";
+import "prismjs/components/prism-markup.min.js";
+import "prismjs/components/prism-css.min.js";
+import "prismjs/components/prism-clike.min.js";
+import "prismjs/components/prism-javascript.min.js";
+import "prismjs/components/prism-typescript.min.js";
+import "prismjs/components/prism-jsx.min.js";
+import "prismjs/components/prism-tsx.min.js";
+import "prismjs/components/prism-python.min.js";
+import "prismjs/components/prism-json.min.js";
+import "prismjs/components/prism-yaml.min.js";
+import "prismjs/components/prism-markdown.min.js";
+import "prismjs/components/prism-go.min.js";
+import "prismjs/components/prism-rust.min.js";
 import { useEffect, useState } from "react";
 
+/**
+ * 本地补丁（0.6.0-local.3，codex-vivid-F6）：双引号字符串只从前面有偶数个反斜杠（包括 0 个）的引号开始，用后行断言判断，
+ * 不吃掉前一个字符。0.6.0-local.2 用 `(^|[^\\])` 加 Prism 的 lookbehind，要借前一个字符，可前一个字符若已经属于上一个
+ * token（相邻的字符串），就借不到：`"one""two"` 的第二段不上色，`'one'"two"'three'` 认出 `"'three'"`。转义的引号不当起点，
+ * 一串 `\"\"\"…` 就不会从每个引号重扫到结尾（codex-vivid-F1）。先匹配引号再往回看（断言里带上这个引号）：断言放在引号前面，
+ * 一长串反斜杠里的每个位置都要往回扫一遍，又成了平方级。后行断言在构造时试一下：不支持的旧引擎（Safari 16.3 及更早）
+ * 退回 0.6.0 之前的写法（只有转义引号开头的少数写法颜色不同；特制输入上慢，由分块高亮的时限兜住）。
+ */
+export const BASH_STRING = (() => {
+  try {
+    return new RegExp(String.raw`"(?<=(?:^|[^\\])(?:\\\\)*")(?:\\[\s\S]|[^"\\])*"|'[^']*'`);
+  } catch {
+    return /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/;
+  }
+})();
+
 // Lightweight regex grammar for Bash (avoids large stateful prism-bash dependency)
+// 本地补丁（0.6.0-local.2，codex-vivid-F1）：`${…}` 最多 256 个字符，`${${${…` 不再让每个起点都重扫到结尾。
 Prism.languages.bash = {
   comment: { pattern: /(^|[\t ])#.*/m, lookbehind: true, greedy: true },
-  string: { pattern: /"(?:\\[\s\S]|[^"\\])*"|'[^']*'/, greedy: true },
-  variable: /\$(?:\w+|\{[^}\r\n]*\}|[?$!#@*-])/,
+  string: { pattern: BASH_STRING, greedy: true },
+  variable: /\$(?:\w+|\{[^}\r\n]{0,256}\}|[?$!#@*-])/,
   keyword: /\b(?:if|then|else|elif|fi|for|while|until|do|done|case|esac|in|function|select|return|export|local)\b/,
   builtin: /\b(?:test|echo|cd|pwd|ls|cat|mkdir|rm|cp|mv|touch|grep|find|sed|awk|curl|git|node|npm|bun|deno)\b/,
   operator: /&&|\|\||[|&;<>]/,
@@ -272,6 +289,49 @@ function tokenizeToLines(code: string, grammar: Prism.Grammar, colors: ThemeSynt
   return lines;
 }
 
+/**
+ * 本地补丁（0.6.0-local.2，codex-vivid-F1 排查）：Prism 自带语法里有几十条正则在构造的输入上会平方级回溯（同一份高亮，4 000
+ * 字符要几十到一百多毫秒，2 万字符几秒，10 万字符几十秒），一旦开始就停不下来。所以超过一块的代码按整行切块高亮：每块至多
+ * HIGHLIGHT_CHUNK_CHARS 个字符（预览就是一块，和原来一样），尽量在空行处断开；每块之前看用时，过了 HIGHLIGHT_BUDGET_MS
+ * 剩下的行就原样显示，比一块还长的单行也原样显示。普通代码一块一两毫秒，10 万字符照样整篇上色；跨块的多行注释或字符串在
+ * 断开处颜色可能不对。
+ */
+export const HIGHLIGHT_CHUNK_CHARS = 4_000;
+export const HIGHLIGHT_BUDGET_MS = 100;
+
+function plainLine(line: string, colors: ThemeSyntaxColors): HighlightToken[] {
+  return line ? [{ content: line, color: colors.foreground }] : [];
+}
+
+/** Lines of `code` highlighted chunk by chunk within the time budget; `now` is the clock (tests pass their own). */
+export function tokenizeInChunks(code: string, grammar: Prism.Grammar, colors: ThemeSyntaxColors, now: () => number = Date.now): HighlightToken[][] {
+  if (code.length <= HIGHLIGHT_CHUNK_CHARS) return tokenizeToLines(code, grammar, colors);
+  const rows = code.split("\n");
+  const lines: HighlightToken[][] = [];
+  const started = now();
+  let index = 0;
+  while (index < rows.length && now() - started <= HIGHLIGHT_BUDGET_MS) {
+    if (rows[index]!.length > HIGHLIGHT_CHUNK_CHARS) {
+      lines.push(plainLine(rows[index]!, colors));
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    let size = rows[index]!.length;
+    let blank = -1;
+    while (end < rows.length && size + 1 + rows[end]!.length <= HIGHLIGHT_CHUNK_CHARS) {
+      size += 1 + rows[end]!.length;
+      if (!rows[end]!.trim() && size >= HIGHLIGHT_CHUNK_CHARS / 2) blank = end;
+      end += 1;
+    }
+    if (end < rows.length && blank > index) end = blank + 1;
+    lines.push(...tokenizeToLines(rows.slice(index, end).join("\n"), grammar, colors));
+    index = end;
+  }
+  for (; index < rows.length; index++) lines.push(plainLine(rows[index]!, colors));
+  return lines;
+}
+
 const tokenCache = new Map<string, { tokens: HighlightToken[][]; size: number }>();
 const TOKEN_CACHE_LIMIT = 40;
 let cachedChars = 0;
@@ -392,7 +452,7 @@ export function highlightCodeSync(
   } else {
     const grammar = Prism.languages[normalizedLanguage];
     if (!grammar) return null;
-    tokens = tokenizeToLines(code, grammar, colors);
+    tokens = tokenizeInChunks(code, grammar, colors);
   }
 
   cacheTokens(key, tokens, code.length);

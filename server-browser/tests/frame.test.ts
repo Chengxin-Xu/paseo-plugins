@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium, type Browser } from 'playwright-core';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 import { captureBrowserFrame, jpegSize } from '../server/frame';
 import type { BrowserContext, BrowserPage } from '../server/browser-types';
 
@@ -64,8 +64,27 @@ test('no budget, a fitting budget or pinch zoom keep the unscaled capture path',
     const frame=await captureBrowserFrame(context,page,80,limits);
     assert.equal(frame.scale,1);assert.equal(frame.width,1120);
     assert.equal(calls.filter(call=>call.method==='Page.captureScreenshot'&&call.params?.clip).length,0);
-    if(!limits)assert.equal(calls.filter(call=>call.method==='Runtime.evaluate').length,0,'desktop viewers without a budget pay no extra round trip');
+    if(!limits)assert.equal(calls.filter(call=>call.method==='Runtime.evaluate').length,1,'full frames measure CSS dimensions too, including DPR and scrollbar width');
   }
+});
+
+test('a screenshot pending when the page commits a new document starts again on a fresh session at once', async () => {
+  const listeners = new Set<() => void>();
+  let sessions = 0, detached = 0, attempts = 0;
+  const context = { newCDPSession: async () => {
+    const index = ++sessions;
+    return {
+      // Chromium never answers the first screenshot: the document it was taken of went away.
+      send: async (method: string) => method === 'Runtime.evaluate' ? { result: { value: { width: 800, height: 600, x: 0, y: 0, zoom: 1 } } }
+        : index === 1 ? (setTimeout(() => { for (const restart of [...listeners]) restart(); }, 30), new Promise(() => {})) : { data: jpegHeader(800, 600) },
+      detach: async () => { detached++; },
+    };
+  } } as unknown as BrowserContext;
+  const began = Date.now();
+  const frame = await captureBrowserFrame(context, page, 70, undefined, { onAttempt: () => { attempts++; }, watchCommits: restart => { listeners.add(restart); return () => { listeners.delete(restart); }; } });
+  assert.deepEqual({ width: frame.width, height: frame.height }, { width: 800, height: 600 });
+  assert(Date.now() - began < 1000, 'no wait for the 10 s limit');
+  assert.deepEqual({ sessions, detached, attempts, listening: listeners.size }, { sessions: 2, detached: 2, attempts: 2, listening: 0 });
 });
 
 test('real browser: scaled frames show the scrolled viewport, dedupe by id and omit an unchanged session', {timeout:60000}, async()=>{

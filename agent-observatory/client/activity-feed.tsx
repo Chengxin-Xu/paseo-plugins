@@ -3,7 +3,7 @@ import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { FlatList } from "@getpaseo/plugin/client/react-native";
 import type { AgentRecord } from "../shared/model";
-import type { TelemetryEvent, TelemetrySnapshot } from "../shared/telemetry";
+import { eventLabel, type TelemetryEvent, type TelemetrySnapshot } from "../shared/telemetry";
 import { EmptyState, MetaLine, Row, fontSize, hairline, hue, relativeTime, space } from "./kit";
 import { InfoButton, shortDuration } from "./ui";
 import { EventGlyph } from "./status";
@@ -30,7 +30,9 @@ function Pulse({ theme, events, now, telemetry }: { theme: PluginTheme; events: 
 
 /** Events that arrive while the feed is open slide in at the top. */
 const EventRow = memo(function EventRow({ event, theme, time, selected, fresh, onSelect }: { event: TelemetryEvent; theme: PluginTheme; time: string; selected: boolean; fresh: boolean; onSelect: (agentId: string) => void }) {
-  return <Enter active={fresh}><Row theme={theme} title={event.label} titleLines={1} selected={selected} onPress={() => onSelect(event.agentId)} accessibilityLabel={`查看 ${event.agentTitle}，${event.label}`}
+  // Events stored before 2.13 carry English labels; the type names them (gemini-F9).
+  const label = eventLabel(event);
+  return <Enter active={fresh}><Row theme={theme} title={label} titleLines={1} selected={selected} onPress={() => onSelect(event.agentId)} accessibilityLabel={`查看 ${event.agentTitle || "未命名 Agent"}，${label}`}
     leading={<EventGlyph theme={theme} type={event.type} />}
     trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{time}</Text>}
     subtitle={<MetaLine theme={theme} parts={[event.agentTitle || event.agentId, event.durationMs !== undefined ? `用时 ${shortDuration(event.durationMs)}` : null]} />} /></Enter>;

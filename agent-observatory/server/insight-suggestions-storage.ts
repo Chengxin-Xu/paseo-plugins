@@ -41,7 +41,8 @@ export class SuggestionStorage {
     } catch (error) {
       if ((error as { code?: string }).code === "ENOENT") return [];
       this.error = "建议记录无法恢复，原文件已保留，分析报告不受影响。";
-      await rename(this.file, `${this.file}.${randomUUID()}.backup`).catch(() => {});
+      // One backup, replaced by the next, so repeated damage never piles up copies.
+      await rename(this.file, `${this.file}.backup`).catch(() => {});
       return [];
     }
   }

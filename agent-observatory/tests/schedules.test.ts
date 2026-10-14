@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ScheduleIndex, type ScheduleDirectory, type ScheduleIndexOptions } from "../server/schedules";
+import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { ScheduleIndex, ScheduleRecorder, registerSchedules, type DirectoryWatcher, type ScheduleDirectory, type ScheduleIndexOptions, type ScheduleLedger } from "../server/schedules";
 import type { StatsDirectoryAgent } from "../server/stats-types";
-import { EMPTY_RUN_FILTER, cadenceLabel, cadenceText, describeRunError, filterRuns, findChangeRequest, groupRunsByDay, knownRunError, zoneLabel, type ScheduleRunRow, type ScheduleRunsState } from "../shared/schedules";
+import { EMPTY_RUN_FILTER, cadenceLabel, cadenceText, describeRunError, filterRuns, findChangeRequest, groupRunsByDay, knownRunError, zoneLabel, type HeartbeatsState, type ScheduleRunRow,
+  type ScheduleRunsState } from "../shared/schedules";
 
 const NOW = Date.parse("2026-10-09T06:00:00.000Z");
 const REPLY = "## 巡检结论\n\n- 3 个集群健康\n\n修复 MR：https://gitlab.example.com/acme/web-app/-/merge_requests/12";
@@ -32,7 +35,7 @@ function storedAgent(id: string, patch: Record<string, unknown> = {}) {
     features: [], persistence: { provider: "codex", sessionId: `session-${id}`, nativeHandle: `session-${id}`, metadata: {} },
     requiresAttention: true, attentionReason: "finished", attentionTimestamp: "2026-09-24T22:06:45.606Z", internal: false, archivedAt: "2026-09-24T22:06:45.630Z", ...patch };
 }
-async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: boolean; maxFileBytes?: number; maxLedgerBytes?: number; limits?: ScheduleIndexOptions["limits"] } = {}) {
+async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: boolean; maxFileBytes?: number; maxLedgerBytes?: number; limits?: ScheduleIndexOptions["limits"]; searchFoldBudget?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "observatory-schedules-"));
   const home = join(root, "home"), data = join(root, "data");
   await mkdir(join(home, "schedules"), { recursive: true }); await mkdir(join(home, "projects"), { recursive: true }); await mkdir(data, { recursive: true });
@@ -41,7 +44,7 @@ async function fixture(agents: StatsDirectoryAgent[], options: { workspaces?: bo
   let now = NOW;
   const made: ScheduleIndex[] = [], warnings: string[] = [];
   const make = (writeDelayMs = 0) => { const index = new ScheduleIndex({ home, dataDirectory: data, directory, writeDelayMs, now: () => now, maxFileBytes: options.maxFileBytes, maxLedgerBytes: options.maxLedgerBytes, limits: options.limits,
-    log: message => warnings.push(message) }); made.push(index); return index; };
+    searchFoldBudget: options.searchFoldBudget, log: message => warnings.push(message) }); made.push(index); return index; };
   // Every index saves what is pending and stops writing before the temporary tree goes away.
   const close = async () => { await chmod(data, 0o700).catch(() => {}); for (const index of made) await index.close(); await rm(root, { recursive: true, force: true }); };
   const record = async (folder: string, body: { id: string }) => { await mkdir(join(home, "agents", folder), { recursive: true }); await writeFile(join(home, "agents", folder, `${body.id}.json`), JSON.stringify(body)); };
@@ -195,11 +198,11 @@ test("a damaged ledger is kept aside, reported once and replaced", async () => {
     await f.write("s1", schedule("s1"));
     const index = f.make();
     const result = full(await index.list(null, { window: "all" }));
-    assert.match(result.notice ?? "", /账本损坏，已另存为 schedule-ledger\.corrupt-/);
+    assert.match(result.notice ?? "", /账本损坏，已另存为 schedule-ledger\.corrupt\.json /);
     assert.match(f.warnings.join("\n"), /^ledger unreadable: SyntaxError/);
     await index.flush();
     const files = await readdir(f.data);
-    assert.equal(files.some(name => /^schedule-ledger\.corrupt-.*\.json$/.test(name)), true);
+    assert.deepEqual(files.filter(name => name.includes(".corrupt")), ["schedule-ledger.corrupt.json"]);
     assert.equal(JSON.parse(await readFile(join(f.data, "schedule-ledger.json"), "utf8")).runs["run-ok"].scheduleId, "s1");
   } finally { await f.close(); }
 });
@@ -391,7 +394,8 @@ test("Chinese cadences, zones, change-request labels and day groups", () => {
   assert.equal(cadenceLabel({ type: "cron", expression: "30 9 * * *" }), "每天 09:30");
   assert.equal(cadenceLabel({ type: "cron", expression: "0 9 * * 1-5" }), "工作日 09:00");
   assert.equal(cadenceLabel({ type: "cron", expression: "0 18 * * 5" }), "每周五 18:00");
-  assert.equal(cadenceLabel({ type: "cron", expression: "5 4 1 * *" }), "5 4 1 * *");
+  assert.equal(cadenceLabel({ type: "cron", expression: "5 4 1 * *" }), "每月 1 日 04:05");
+  assert.equal(cadenceLabel({ type: "cron", expression: "5 4 1 * 1" }), "5 4 1 * 1", "a day of month together with a weekday stays as written");
   assert.equal(cadenceLabel({ type: "every", everyMs: 3_600_000 }), "每 1 小时");
   assert.equal(cadenceText({ cadence: "每天 09:30", timezone: "UTC" }, "America/New_York"), "每天 09:30（UTC）");
   assert.equal(cadenceText({ cadence: "每天 09:30", timezone: "Etc/UTC" }, "UTC"), "每天 09:30", "same zone, no suffix");
@@ -417,4 +421,253 @@ test("run errors get short Chinese summaries and lose ACP repetition", () => {
   // Agent 详情 translates only errors it recognises; anything else is shown as it is.
   assert.equal(knownRunError("Request failed: acp does not support ACP session resume requestType=plugin.rpc.invoke.request code=handler_error"), "会话无法恢复：这个 ACP Agent 不支持重新载入");
   assert.equal(knownRunError("模拟连接中断，请稍后重试"), null); assert.equal(knownRunError(undefined), null);
+});
+
+// ---------- 2.13: background recording, search through replies, failure counts ----------
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+/** Polls `check` until it holds (the recorder runs on real timers and file-system events). */
+async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) { if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`); await sleep(15); }
+}
+const ledgerOf = async (data: string): Promise<ScheduleLedger | null> => { try { return JSON.parse(await readFile(join(data, "schedule-ledger.json"), "utf8")) as ScheduleLedger; } catch { return null; } };
+/** How Paseo writes a schedule: a temporary file next to it, renamed over it. */
+async function writeAtomic(home: string, id: string, body: unknown) {
+  const temporary = join(home, "schedules", `.${id}.json.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(temporary, JSON.stringify(body)); await rename(temporary, join(home, "schedules", `${id}.json`));
+}
+/** A watcher that never reports anything, for tests that drive recording by hand. */
+const quietWatch = (): DirectoryWatcher => ({ close() {}, on() { return undefined; } });
+
+test("the recorder keeps a heartbeat's runs while nobody opens 定时运行, and they outlive the heartbeat's deletion", async () => {
+  const f = await fixture([agent("duty", { archivedAt: null, status: "idle", title: "值班助手" })]);
+  try {
+    const heartbeat = (runs: unknown[]) => schedule("hb", { name: "值班心跳", cadence: { type: "cron", expression: "35 22 11 10 *", timezone: "Asia/Tokyo" }, maxRuns: 1,
+      target: { type: "agent", agentId: "duty" }, nextRunAt: null, runs });
+    const logs: string[] = [];
+    const recorder = new ScheduleRecorder(f.make(), { debounceMs: 20, pollMs: 60_000, log: message => logs.push(message) });
+    recorder.start();
+    await until(() => recorder.watching, "the watcher");
+    // The run starts (a heartbeat run records no Agent until it ends), then ends: two atomic rewrites.
+    await writeAtomic(f.home, "hb", heartbeat([run("hb-1", NOW - 60_000, { status: "running", endedAt: null, output: null })]));
+    await until(async () => (await ledgerOf(f.data))?.runs["hb-1"]?.status === "running", "the running run in the ledger");
+    assert.equal((await ledgerOf(f.data))!.runs["hb-1"]!.agentId, "duty", "a running heartbeat is the run of its target Agent");
+    await writeAtomic(f.home, "hb", heartbeat([run("hb-1", NOW - 60_000, { agentId: "duty", output: "已检查，没有阻塞" })]));
+    await until(async () => (await ledgerOf(f.data))?.runs["hb-1"]?.status === "succeeded", "its success");
+    await rm(join(f.home, "schedules", "hb.json"));
+    await until(async () => !!(await ledgerOf(f.data))?.schedules["hb"]?.deletedAt, "the deletion");
+    await recorder.close();
+    // A later start that never had the page open still lists the run, as a one-shot of a deleted heartbeat.
+    const after = full(await f.make().list(null, { window: "all" }));
+    assert.deepEqual(after.runs.map(row => [row.id, row.kind, row.status, row.source, row.agent?.id]), [["hb-1", "heartbeat", "succeeded", "ledger", "duty"]]);
+    const [summary] = after.schedules;
+    assert.equal(summary!.status, "deleted"); assert.equal(summary!.cadence, "一次性 · 10月11日 22:35"); assert.equal(summary!.maxRuns, 1);
+    assert.equal(summary!.expression, "35 22 11 10 *"); assert.equal(summary!.onceAt, iso(NOW - 60_000), "when its run was due");
+    assert.deepEqual(logs, []); assert.deepEqual(f.warnings, []);
+  } finally { await f.close(); }
+});
+
+test("without a watcher the recorder compares the directory listing on a timer", async () => {
+  const f = await fixture([]);
+  try {
+    const logs: string[] = [];
+    const recorder = new ScheduleRecorder(f.make(), { debounceMs: 10, pollMs: 40, log: message => logs.push(message),
+      watch: () => { throw Object.assign(new Error("no inotify watches left"), { code: "ENOSPC" }); } });
+    recorder.start();
+    await f.write("s1", schedule("s1"));
+    await until(async () => !!(await ledgerOf(f.data))?.runs["run-ok"], "the run, found by comparing listings");
+    await f.write("s1", schedule("s1", { runs: [run("run-ok", Date.parse("2026-10-01T22:00:00.000Z")), run("run-2", NOW - 1000, { status: "failed", output: null, error: "boom" })] }));
+    await until(async () => (await ledgerOf(f.data))?.runs["run-2"]?.status === "failed", "a later change");
+    assert.equal(recorder.watching, false);
+    assert.deepEqual(logs, ["cannot watch the schedules directory (ENOSPC); comparing it every 40 ms instead"], "said once, though every comparison tries again");
+    await recorder.close();
+  } finally { await f.close(); }
+});
+
+test("a watcher that fails later falls back to comparing, and is set up again", async () => {
+  const f = await fixture([]);
+  try {
+    const watcher = Object.assign(new EventEmitter(), { close() {} });
+    let watches = 0;
+    const logs: string[] = [];
+    const recorder = new ScheduleRecorder(f.make(), { debounceMs: 10, pollMs: 40, log: message => logs.push(message), watch: () => { watches++; return watcher; } });
+    recorder.start();
+    await until(() => recorder.watching, "the watcher");
+    watcher.emit("error", new Error("EIO: watch failed"));
+    assert.equal(recorder.watching, false);
+    await f.write("s1", schedule("s1"));
+    await until(async () => !!(await ledgerOf(f.data))?.runs["run-ok"], "the run, found by comparing listings");
+    await until(() => recorder.watching && watches === 2, "a new watcher");
+    assert.deepEqual(logs, ["stopped watching the schedules directory (Error: EIO: watch failed); comparing it every 40 ms instead"]);
+    await recorder.close();
+  } finally { await f.close(); }
+});
+
+test("a schedules directory created after the plugin started is found, watched and recorded", async () => {
+  const f = await fixture([]);
+  try {
+    await rm(join(f.home, "schedules"), { recursive: true });
+    const recorder = new ScheduleRecorder(f.make(), { debounceMs: 10, pollMs: 40 });
+    recorder.start();
+    await sleep(80);
+    assert.equal(recorder.watching, false);
+    await mkdir(join(f.home, "schedules")); await f.write("s1", schedule("s1"));
+    await until(async () => !!(await ledgerOf(f.data))?.runs["run-ok"], "the first schedule's run");
+    await until(() => recorder.watching, "the watcher on the new directory");
+    await recorder.close();
+  } finally { await f.close(); }
+});
+
+test("a nudge records for an Agent a schedule points at, ignores other Agents, and nothing runs after close", async () => {
+  const f = await fixture([agent("a-hb", { archivedAt: null })]);
+  try {
+    await f.write("hb", schedule("hb", { target: { type: "agent", agentId: "a-hb" }, runs: [] }));
+    const index = f.make(), sync = index.sync.bind(index);
+    let syncs = 0;
+    index.sync = async () => { syncs++; await sync(); };
+    const recorder = new ScheduleRecorder(index, { debounceMs: 10, pollMs: 60_000, watch: quietWatch });
+    recorder.start();
+    await until(() => syncs === 1, "the first recording");
+    recorder.nudge("someone-else");
+    await sleep(60);
+    assert.equal(syncs, 1, "an Agent no schedule points at costs nothing");
+    recorder.nudge("a-hb"); recorder.nudge("a-hb");
+    await until(() => syncs === 2, "one recording for the heartbeat's Agent (debounced)");
+    recorder.nudge();
+    await until(() => syncs === 3, "a bare nudge");
+    await recorder.close();
+    recorder.nudge("a-hb");
+    await sleep(60);
+    assert.equal(syncs, 3);
+  } finally { await f.close(); }
+});
+
+test("search reads each run's full recorded reply, folds width and case, and gives every query its own revision", async () => {
+  const f = await fixture([]);
+  try {
+    const long = `${"例行检查通过，没有发现异常。".repeat(40)}\n\n最后一项：ＯＲＤＥＲＳ-API 的证书还有 3 天到期`;
+    await f.write("s1", schedule("s1", { runs: [run("r-long", NOW - 3000, { output: long }), run("r-plain", NOW - 2000, { output: "一切正常" }),
+      run("r-old", NOW - 40 * 86_400_000, { output: "旧的一次：orders-api 证书已更新" })] }));
+    const index = f.make();
+    const plain = full(await index.list(null));
+    assert.equal(plain.query, "");
+    assert.equal(plain.runs.find(row => row.id === "r-long")!.preview!.includes("证书"), false, "the words are past the 280-character preview");
+    const hit = full(await index.list(null, { query: "  orders-API   证书 " }));
+    assert.equal(hit.query, "orders-api 证书");
+    assert.deepEqual(hit.runs.map(row => row.id), ["r-long"]);
+    assert.equal(hit.older, 1, "the 40-day-old match is counted outside the window"); assert.equal(hit.truncated, true);
+    assert.notEqual(hit.revision, plain.revision);
+    assert.deepEqual(full(await index.list(null, { query: "ORDERS-api 服务巡检" })).runs.map(row => row.id), ["r-long"], "one word in the reply, one in the schedule name");
+    assert.deepEqual(full(await index.list(null, { query: "证书 不存在的词" })).runs, [], "every word must match");
+    assert.deepEqual(full(await index.list(null, { window: "all", query: "证书" })).runs.map(row => row.id), ["r-long", "r-old"]);
+    assert.deepEqual(await index.list(null, { query: "orders-api 证书", revision: hit.revision }), { mode: "unchanged", unchanged: true, revision: hit.revision });
+    assert.equal((await index.list(null, { revision: hit.revision })).mode, "full", "the unsearched list never answers with a search's revision");
+  } finally { await f.close(); }
+  const g = await fixture([], { searchFoldBudget: 100 });
+  try {
+    await g.write("s1", schedule("s1", { runs: [run("r-long", NOW - 3000, { output: `${"填充".repeat(200)}关键词` })] }));
+    const limited = full(await g.make().list(null, { query: "关键词" }));
+    assert.deepEqual(limited.runs, []); assert.equal(limited.searchLimited, true);
+  } finally { await g.close(); }
+});
+
+test("failure counts split ordinary runs from heartbeats and reuse a recent build", async () => {
+  const f = await fixture([agent("a-hb", { archivedAt: null })]);
+  try {
+    const failed = (id: string, at: number) => run(id, at, { status: "failed", output: null, error: "boom" });
+    const runs = [failed("f-2h", NOW - 2 * 3600_000), failed("f-30h", NOW - 30 * 3600_000), run("ok-1h", NOW - 3600_000)];
+    await f.write("s1", schedule("s1", { runs }));
+    await f.write("hb", schedule("hb", { target: { type: "agent", agentId: "a-hb" }, runs: [failed("hb-1h", NOW - 3600_000)] }));
+    const index = f.make();
+    assert.deepEqual(await index.failures(NOW - 86_400_000), { runs: 1, heartbeats: 1 });
+    assert.deepEqual(await index.failures(0), { runs: 2, heartbeats: 1 });
+    await f.write("s1", schedule("s1", { runs: [...runs, failed("f-10m", NOW - 600_000)] }));
+    assert.deepEqual(await index.failures(NOW - 86_400_000, 60_000), { runs: 1, heartbeats: 1 }, "a build at most a minute old is reused");
+    f.advance(61_000);
+    assert.deepEqual(await index.failures(NOW - 86_400_000, 60_000), { runs: 2, heartbeats: 1 });
+  } finally { await f.close(); }
+});
+
+test("registerSchedules answers the three RPCs, records in the background and exposes nudge, failure counts and close", async () => {
+  const root = await mkdtemp(join(tmpdir(), "observatory-register-"));
+  const previous = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = root;
+  try {
+    await mkdir(join(root, "schedules"), { recursive: true });
+    await writeFile(join(root, "schedules", "s1.json"), JSON.stringify(schedule("s1", { runs: [run("r-failed", NOW - 1000, { status: "failed", output: null, error: "boom" })] })));
+    await writeFile(join(root, "schedules", "hb.json"), JSON.stringify(schedule("hb", { target: { type: "agent", agentId: "a-hb" }, runs: [run("hb-failed", NOW - 1000, { status: "failed", output: null, error: "boom" })] })));
+    const handlers = new Map<string, (input: unknown, context: { paseo: unknown }) => unknown>();
+    const server = { handle(contract: { name: string }, handler: (input: unknown, context: { paseo: unknown }) => unknown) { handlers.set(contract.name, handler); } } as unknown as PluginServerContext;
+    const directory: ScheduleDirectory = { agents: [], digest: "d", async refresh() {} };
+    const schedules = registerSchedules(server, { directory }, { debounceMs: 10, pollMs: 60_000 });
+    assert.deepEqual([...handlers.keys()].sort(), ["observatory.schedules.heartbeats", "observatory.schedules.list", "observatory.schedules.run"]);
+    assert.equal(await schedules.failuresSince(NOW - 60_000), 1); assert.equal(await schedules.heartbeatFailuresSince(NOW - 60_000), 1);
+    assert.equal(await schedules.failuresSince(NOW), 0);
+    const answer = await handlers.get("observatory.schedules.heartbeats")!({}, { paseo: null }) as HeartbeatsState;
+    assert.deepEqual(answer.heartbeats.map(item => [item.scheduleId, item.agentId, item.lastRun?.status]), [["hb", "a-hb", "failed"]]);
+    schedules.nudge("a-hb");
+    // Closing saves what was recorded without any page; the ledger lands in the plugin data directory.
+    await schedules.close();
+    const ledger = await ledgerOf(join(root, "plugin-data", "agent-observatory"));
+    assert.deepEqual(Object.keys(ledger?.runs ?? {}).sort(), ["hb-failed", "r-failed"]);
+  } finally {
+    if (previous === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the ledger never keeps a failed turn's reply or a link's credentials, and cleans what older versions kept", async () => {
+  const f = await fixture([]);
+  // The host stores a failed turn's last message as the run's error: reply text, then its own `[System Error]` line.
+  const secret = ["QX7", "pass", "9f8e7d6c"].join("");
+  await f.write("s1", schedule("s1", { runs: [
+    run("r-reply", NOW - 4000, { status: "failed", output: null, error: "I updated QX7-REPLY-SENTENCE in the config and stopped." }),
+    run("r-system", NOW - 3000, { status: "failed", output: null, error: "Partial answer QX7-PARTIAL\n[System Error] usage limit reached token=abc123def456" }),
+    run("r-host", NOW - 2000, { status: "failed", output: null, error: "Agent a-hb already has an active run" }),
+    run("r-link", NOW - 1000, { output: `Opened https://oauth2:${secret}@git.example.com/g/p/-/merge_requests/5 for review` })] }));
+  try {
+    const index = f.make();
+    const rows = full(await index.list(null, { window: "all" })).runs;
+    assert.equal(rows.find(row => row.id === "r-link")!.link?.url, "https://git.example.com/g/p/-/merge_requests/5");
+    await index.flush();
+    const saved = await readFile(join(f.data, "schedule-ledger.json"), "utf8"), ledger = JSON.parse(saved) as ScheduleLedger;
+    for (const leak of ["QX7-REPLY-SENTENCE", "QX7-PARTIAL", secret, "abc123def456"]) assert.equal(saved.includes(leak), false, leak);
+    assert.equal(ledger.runs["r-system"]!.error, "[System Error] usage limit reached token=[redacted]");
+    assert.equal(ledger.runs["r-host"]!.error, "Agent a-hb already has an active run");
+    assert.match(ledger.runs["r-reply"]!.error ?? "", /未保存/);
+    assert.equal(ledger.runs["r-link"]!.link, "https://git.example.com/g/p/-/merge_requests/5");
+    // A ledger an older version wrote is cleaned when it is read, and on disk with the next save.
+    ledger.runs["r-reply"]!.error = "Older QX7-OLD-REPLY text"; ledger.runs["r-link"]!.link = `https://oauth2:${secret}@git.example.com/g/p/-/merge_requests/5`;
+    await writeFile(join(f.data, "schedule-ledger.json"), JSON.stringify(ledger));
+    await rm(join(f.home, "schedules", "s1.json"));
+    const fresh = f.make();
+    const after = full(await fresh.list(null, { window: "all" })).runs;
+    assert.equal(after.find(row => row.id === "r-link")!.link?.url, "https://git.example.com/g/p/-/merge_requests/5");
+    assert.match(after.find(row => row.id === "r-reply")!.error ?? "", /未保存/);
+    await fresh.flush();
+    const rewritten = await readFile(join(f.data, "schedule-ledger.json"), "utf8");
+    assert.equal(rewritten.includes("QX7-OLD-REPLY"), false); assert.equal(rewritten.includes(secret), false);
+  } finally { await f.close(); }
+});
+
+test("a ledger damaged again keeps one backup; log lines name the error, never quote the file", async () => {
+  const f = await fixture([]);
+  try {
+    await f.write("s1", schedule("s1"));
+    // V8 quotes the text at the fault, so each file starts with its sentinel.
+    await writeFile(join(f.home, "projects", "workspaces.json"), "QX7-WORKSPACES [");
+    for (const attempt of ["first", "second"]) {
+      await writeFile(join(f.data, "schedule-ledger.json"), `QX7-LEDGER-${attempt} {`);
+      const index = f.make();
+      full(await index.list(null, { window: "all" }));
+      await index.flush(); await index.close();
+    }
+    const files = await readdir(f.data);
+    assert.deepEqual(files.filter(name => name.includes(".corrupt")), ["schedule-ledger.corrupt.json"]);
+    assert.equal(await readFile(join(f.data, "schedule-ledger.corrupt.json"), "utf8"), "QX7-LEDGER-second {");
+    assert.match(f.warnings.join("\n"), /ledger unreadable: SyntaxError/);
+    assert.match(f.warnings.join("\n"), /could not read the workspace registry: SyntaxError/);
+    assert.equal(f.warnings.some(line => line.includes("QX7")), false, f.warnings.join("\n"));
+  } finally { await f.close(); }
 });

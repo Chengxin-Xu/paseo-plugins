@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SHOW, type FoldRole } from "../shared/fold";
 import type { FoldIndexInput, FoldIndexOutput, WireRow } from "../shared/fold-index";
-import { createFoldRuntime, FOLD_TIMING } from "./fold-runtime";
+import { createFoldRuntime, FOLD_MEMORY, FOLD_TIMING, trimOldest } from "./fold-runtime";
 
 /** Injected clock: every timer of the runtime runs here, never on the real one. */
 function fakeClock() {
@@ -182,8 +182,28 @@ describe("fold runtime", () => {
     expect(timeline.calls[1]!.cursor).toEqual({ epoch: "e1", seq: 2 });
     runtime.noteRow("agent-1", "t:a", "completed", 2000);
     runtime.noteRow("agent-1", "t:new", "running", 9000);
-    await clock.advance(FOLD_TIMING.rowDelay);
+    await clock.advance(FOLD_TIMING.pokeDelay);
     expect(timeline.calls.map((call) => call.direction)).toEqual(["tail", "after", "after"]);
+  });
+
+  it("plans a repeat notice the way the transformer decided it (0.6.0-local.3)", async () => {
+    const { clock, timeline, runtime, project } = setup();
+    timeline.append(user);
+    timeline.append(shell("a"));
+    // The index kept the notice (it could not compare results); the client then saw both rows say the same.
+    timeline.append({ k: "t", key: "t:n", st: "completed", look: "shell", ref: "a", fg: false });
+    timeline.append(shell("b"));
+    timeline.setRunning(true);
+    project("t:a", "t:n", "t:b");
+    runtime.acquire("agent-1");
+    await clock.advance(1_000);
+    expect(runtime.roleFor("t:n").kind).toBe("show");
+    runtime.noteNotice("t:n", true);
+    await clock.advance(1_000);
+    expect(runtime.roleFor("t:n").kind).toBe("hide");
+    runtime.noteNotice("t:n", false);
+    await clock.advance(1_000);
+    expect(runtime.roleFor("t:n").kind).toBe("show");
   });
 
   it("re-projects a toggle at once and remembers it", async () => {
@@ -315,7 +335,7 @@ describe("fold runtime", () => {
     runtime.acquire("agent-1");
     runtime.noteRow("agent-1", "t:later", "running", 5_000);
     await clock.advance(0);
-    await clock.advance(FOLD_TIMING.rowDelay);
+    await clock.advance(FOLD_TIMING.pokeDelay);
     expect(timeline.calls.map((call) => call.direction)).toEqual(["tail", "after"]);
     await clock.advance(FOLD_TIMING.pollMs);
     expect(timeline.calls.length).toBe(3);
@@ -358,6 +378,35 @@ describe("fold runtime", () => {
     await clock.advance(0);
     expect(timeline.calls.at(-1)?.direction).toBe("tail");
     expect(runtime.roleFor("t:b").kind).toBe("hide");
+  });
+
+  it("tells onForget listeners which Agent it forgot, once, and not after they stop listening (0.5.0)", async () => {
+    const { clock, timeline, runtime } = setup();
+    timeline.append(user);
+    timeline.append(shell("a"));
+    timeline.setRunning(false);
+    const forgotten: string[] = [];
+    const stop = runtime.onForget((agentId) => void forgotten.push(agentId));
+    runtime.onForget(() => {
+      throw new Error("a failing listener does not keep the others from hearing");
+    });
+    const late: string[] = [];
+    const stopLate = runtime.onForget((agentId) => void late.push(agentId));
+    runtime.acquire("agent-1");
+    await clock.advance(1_000);
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs - 1);
+    expect(forgotten).toEqual([]);
+    await clock.advance(1);
+    expect(forgotten).toEqual(["agent-1"]);
+    expect(late).toEqual(["agent-1"]);
+    stop();
+    stopLate();
+    runtime.acquire("agent-1");
+    await clock.advance(1_000);
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs);
+    expect(forgotten).toEqual(["agent-1"]);
   });
 
   it("keeps an Agent that comes back in time, and one whose read is still running (0.4.1)", async () => {
@@ -418,7 +467,7 @@ describe("fold runtime", () => {
     // An hour later Claude Code wakes up by itself: the read reports the running turn and its start.
     active = { id: "autonomous-turn-32", at: HOUR + 29_000 };
     runtime.setRunning("agent-1", true);
-    await clock.advance(FOLD_TIMING.rowDelay);
+    await clock.advance(FOLD_TIMING.pokeDelay);
     expect(runtime.tailStart("agent-1")).toBe(HOUR + 29_000);
     // Its first reasoning lands: the next row starts when that ended, and the reasoning starts at the turn's start.
     rows = [...rows, { s: 4, at: HOUR + 33_000, k: "r", key: "r:b", u: 1 }];
@@ -452,8 +501,252 @@ describe("fold runtime", () => {
     runtime.setRunning(subagent, true);
     runtime.noteRow(subagent, "t:y", "completed", 2_000);
     await clock.advance(FOLD_TIMING.pollMs * 6);
-    expect(calls).toEqual(["tail"]);
+    expect(calls).toEqual([]);
     expect(runtime.roleFor("t:x")).toBe(SHOW);
     expect(runtime.timing(subagent, "t:x")).toBeNull();
+  });
+});
+
+describe("fold runtime memory over a long session (0.5.0)", () => {
+  /** A runtime whose single Agent answers with `page()`; `epoch` and the rows can change between reads. */
+  function scripted() {
+    const clock = fakeClock();
+    const runtime = createFoldRuntime();
+    let nudges = 0;
+    const state = {
+      epoch: "e1",
+      rows: [] as WireRow[],
+      turns: [] as NonNullable<FoldIndexOutput["turns"]>,
+      active: null as FoldIndexOutput["active"],
+      reset: false,
+    };
+    runtime.configure({
+      rpc: async (input) => {
+        const reset = state.reset && input.direction !== "tail";
+        if (reset) state.reset = false;
+        return {
+          status: "ok", epoch: state.epoch, rows: reset ? [] : state.rows, startCursor: { epoch: state.epoch, seq: 1 },
+          endCursor: { epoch: state.epoch, seq: state.rows.length + 1 }, hasOlder: false, hasNewer: false, reset,
+          running: true, turns: state.turns, active: state.active,
+        };
+      },
+      nudge: () => void nudges++,
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+    return { clock, runtime, state, nudges: () => nudges };
+  }
+
+  it("trims the older half of a set or map once it is full, like seen", () => {
+    const set = new Set(Array.from({ length: 11 }, (_, index) => index));
+    expect(trimOldest(set, 10)).toBe(true);
+    expect([...set]).toEqual([5, 6, 7, 8, 9, 10]);
+    const map = new Map([["a", 1], ["b", 2]]);
+    expect(trimOldest(map, 2)).toBe(false);
+    expect([...map.keys()]).toEqual(["a", "b"]);
+  });
+
+  it("caps the rows seen running and the turn starts of one Agent, and drops what a fresh tail no longer needs", async () => {
+    const { clock, runtime, state } = scripted();
+    const many = FOLD_MEMORY.witnessed + 500;
+    state.rows = Array.from({ length: many }, (_, index) => ({ s: index + 1, at: 1000 + index, k: "t", key: `t:c${index}`, st: "running", look: "shell", u: index % 3000 }) as WireRow);
+    state.turns = Array.from({ length: 3000 }, (_, index) => ({ id: `turn-${index}`, at: 500 + index }));
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    expect(runtime.debugMemory("agent-1").witnessed).toBeLessThanOrEqual(FOLD_MEMORY.witnessed);
+    expect(runtime.debugMemory("agent-1").turnStarts).toBeLessThanOrEqual(FOLD_MEMORY.turnStarts);
+    // The newest are kept: the row running now still reads as seen running.
+    expect(runtime.timing("agent-1", `t:c${many - 1}`)?.witnessed).toBe(true);
+    // The history is read again from a short tail (same epoch): only its rows' running marks and turns stay.
+    state.rows = [{ s: 1, at: 1000, k: "t", key: `t:c${many - 1}`, st: "running", look: "shell", u: 0 }];
+    state.turns = [{ id: "turn-0", at: 500 }];
+    state.reset = true;
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.debugMemory("agent-1")).toMatchObject({ witnessed: 1, turnStarts: 1 });
+  });
+
+  it("forgets turn ids and opened folds of an old history when the epoch changes", async () => {
+    const { clock, runtime, state } = scripted();
+    state.rows = [
+      { s: 1, at: 1000, k: "b", w: "user_message", u: 0 },
+      { s: 2, at: 2000, k: "t", key: "t:a", st: "completed", look: "shell", u: 0 },
+      { s: 3, at: 3000, k: "t", key: "t:b", st: "completed", look: "shell", u: 0 },
+    ];
+    state.turns = [{ id: "foreground-turn-1", at: 900 }];
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    runtime.toggle("agent-1", "2", true);
+    expect(runtime.isExpanded("agent-1", "2")).toBe(true);
+    // A reopened session counts turns from the start again: same id, a different turn without a known start.
+    state.epoch = "e2";
+    state.turns = [{ id: "foreground-turn-1", at: null }];
+    state.reset = true;
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.debugMemory("agent-1")).toMatchObject({ turnStarts: 0, expanded: 0 });
+    expect(runtime.isExpanded("agent-1", "2")).toBeUndefined();
+    expect(runtime.timing("agent-1", "t:a")?.start).toBe(1000);
+  });
+
+  it("caps the folds one Agent remembers and drops them when the Agent is forgotten", async () => {
+    const { clock, runtime, state } = scripted();
+    state.rows = [{ s: 1, at: 1000, k: "b", w: "user_message" }];
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    for (let index = 0; index < FOLD_MEMORY.expanded + 100; index++) runtime.toggle("agent-1", `seg-${index}`, index % 2 === 0);
+    expect(runtime.debugMemory("agent-1").expanded).toBeLessThanOrEqual(FOLD_MEMORY.expanded);
+    // The newest choice survives; the oldest went first.
+    expect(runtime.isExpanded("agent-1", `seg-${FOLD_MEMORY.expanded + 98}`)).toBe(true);
+    expect(runtime.isExpanded("agent-1", "seg-0")).toBeUndefined();
+    // A toggle for an Agent the runtime does not know keeps nothing.
+    runtime.toggle("stranger", "1", true);
+    expect(runtime.debugMemory().expandedAgents).toBe(1);
+    runtime.release("agent-1");
+    await clock.advance(FOLD_TIMING.forgetMs);
+    expect(runtime.debugAgent("agent-1")).toBeNull();
+    expect(runtime.debugMemory()).toMatchObject({ agents: 0, expandedAgents: 0 });
+  });
+
+  it("caps the rows it asked about in vain", async () => {
+    const { clock, runtime, state } = scripted();
+    state.rows = [{ s: 1, at: 1000, k: "b", w: "user_message" }];
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    for (let index = 0; index < FOLD_MEMORY.misses + 300; index++) runtime.noteRow("agent-1", `t:ghost-${index}`, "completed", 1000);
+    expect(runtime.debugMemory("agent-1").misses).toBeLessThanOrEqual(FOLD_MEMORY.misses);
+  });
+
+  it("drops a contested key once no Agent left has it", async () => {
+    const clock = fakeClock();
+    const one = fakeTimeline("e1");
+    const two = fakeTimeline("e2");
+    const runtime = createFoldRuntime();
+    runtime.configure({ rpc: (input) => (input.agentId === "one" ? one.rpc(input) : two.rpc(input)), nudge: () => undefined, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+    for (const timeline of [one, two]) {
+      timeline.append(user);
+      timeline.append({ k: "r", key: "r:same" });
+      timeline.setRunning(false);
+    }
+    one.append(shell("a"));
+    one.append(text);
+    two.append(shell("x"));
+    two.append(shell("y"));
+    two.append(text);
+    for (const key of ["r:same", "t:a", "t:x", "t:y"]) runtime.markProjected(key, SHOW);
+    runtime.acquire("one");
+    runtime.acquire("two");
+    await clock.advance(1_000);
+    expect(runtime.debugMemory().contested).toBe(1);
+    runtime.release("one");
+    await clock.advance(FOLD_TIMING.forgetMs);
+    // Still in the other Agent's index: still contested there.
+    expect(runtime.debugMemory().contested).toBe(1);
+    runtime.release("two");
+    await clock.advance(FOLD_TIMING.forgetMs);
+    expect(runtime.debugMemory()).toMatchObject({ agents: 0, contested: 0 });
+  });
+
+  it("re-projects after the drawn keys were trimmed, so rows on screen are recorded again", () => {
+    const { runtime, nudges, clock } = scripted();
+    for (let index = 0; index <= FOLD_TIMING.seenLimit; index++) runtime.markProjected(`t:k${index}`, SHOW);
+    expect(runtime.debugMemory().seen).toBeLessThanOrEqual(FOLD_TIMING.seenLimit);
+    return clock.advance(FOLD_TIMING.minGap.auto + FOLD_TIMING.delay.auto).then(() => expect(nudges()).toBe(1));
+  });
+});
+
+describe("pinned question (0.6.0, grok-B2)", () => {
+  it("pins the question above the newest drawn stretch, tells its rows when it moves, and drops it with the takeover", async () => {
+    const { clock, timeline, runtime, project } = setup();
+    timeline.append(user); // s1
+    // Three rounds of 「做一段、说一句」: six blocks, about a screen (shared/prompt-pin.ts).
+    for (const id of ["a", "b", "x"]) {
+      timeline.append(shell(id));
+      timeline.append({ ...text, ln: 3 });
+    }
+    const c = timeline.append(shell("c", "running")); // s8
+    project("t:a", "t:b", "t:x", "t:c");
+    let heard = 0;
+    const stop = runtime.subscribePin("agent-1", () => void (heard += 1));
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    expect(runtime.pin("agent-1")).toEqual({ key: "t:c", segment: String(c), fold: false, promptSeq: 1, sameTurn: false, turn: null });
+    expect(runtime.epoch("agent-1")).toBe("e1");
+    expect(heard).toBe(1);
+    // It appeared (the chat opened): no entrance.
+    expect(runtime.pinMovedAt("agent-1")).toBe(0);
+    // Reading again without news keeps the same pin object, and nobody is told.
+    const first = runtime.pin("agent-1");
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.pin("agent-1")).toBe(first);
+    expect(heard).toBe(1);
+
+    // The Agent reports back and starts a new stretch: the pin moves down to it.
+    timeline.update(c, { st: "completed" });
+    timeline.append(text);
+    const d = timeline.append(shell("d", "running"));
+    project("t:d");
+    runtime.noteRow("agent-1", "t:d", "running", d * 1000);
+    const asked = clock.now();
+    // Reads of a running Agent stay at least `pokeDelay` apart (0.6.0-local.5, the lazy release's fold traffic budget).
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.pin("agent-1")).toMatchObject({ key: "t:d", segment: String(d), promptSeq: 1 });
+    expect(heard).toBe(2);
+    // Moved while you watch: the strip comes in with an entrance.
+    expect(runtime.pinMovedAt("agent-1")).toBeGreaterThanOrEqual(asked);
+    expect(runtime.pinMovedAt("agent-1")).toBeLessThanOrEqual(clock.now());
+
+    // A new question: nothing to pin until the Agent is well into it.
+    timeline.append(user);
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.pin("agent-1")).toBeNull();
+    expect(heard).toBe(3);
+
+    // 关闭接管: the plugin draws no rows, so nothing to pin.
+    runtime.setSettings({ scope: "off" });
+    expect(runtime.pin("agent-1")).toBeNull();
+    stop();
+  });
+});
+
+describe("fold request traffic", () => {
+  it("keeps running reads at least two seconds apart even when new rows arrive rapidly", async () => {
+    const { clock, timeline, runtime } = setup();
+    timeline.append(user);
+    const times: number[] = [];
+    const read = timeline.rpc.bind(timeline);
+    timeline.rpc = async (input) => { times.push(clock.now()); return read(input); };
+    runtime.acquire("throttled");
+    await clock.advance(0);
+    for (let n = 0; n < 30; n++) {
+      runtime.noteRow("throttled", `t:new-${n}`, "running", clock.now());
+      runtime.poke();
+      await clock.advance(100);
+    }
+    await clock.advance(2_000);
+    expect(times.length).toBeGreaterThan(1);
+    for (let n = 1; n < times.length; n++) expect(times[n]! - times[n - 1]!).toBeGreaterThanOrEqual(2_000);
+  });
+
+  it("does not let streaming pokes or new rows bypass an RPC failure backoff", async () => {
+    const { clock, timeline, runtime } = setup();
+    timeline.append(user);
+    runtime.acquire("retry");
+    await clock.advance(0);
+    const times: number[] = [];
+    timeline.rpc = async () => { times.push(clock.now()); throw new Error("Plugin is not available"); };
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    for (let n = 0; n < 90; n++) {
+      runtime.poke();
+      runtime.noteRow("retry", `t:retry-${n}`, "running", clock.now());
+      await clock.advance(100);
+    }
+    expect(times).toHaveLength(3);
+    expect(times[1]! - times[0]!).toBe(2_000);
+    expect(times[2]! - times[1]!).toBe(5_000);
   });
 });

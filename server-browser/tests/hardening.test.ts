@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { access, chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { chromium } from 'playwright-core';
-import { BrowserManager, type BrowserManagerOptions } from '../server/browser-manager';
+import type { PluginServerContext } from '@getpaseo/plugin/server';
+import contribute from '../index.server';
+import { TestBrowserManager as BrowserManager } from './manual-action';
+import { safeFailure, type BrowserManagerOptions } from '../server/browser-manager';
 import { defaultRuntimeRoot } from '../server/runtime';
+import { WorkspaceDirectory, type PaseoWorkspace } from '../server/service';
 
 // Real Chromium with temporary profiles and a synthetic loopback site. No daemon, account or existing browser is touched.
 const runtimeRoot = defaultRuntimeRoot();
@@ -257,4 +263,83 @@ test('Chromium starts with its sandbox where the host allows it, falls back once
   assert((await commandLine(off, 'off')).includes('--no-sandbox'));
   const disabled = await sandboxCheck(off, 'off');
   assert.equal(disabled.status, 'warning'); assert.match(disabled.detail, /PASEO_SERVER_BROWSER_SANDBOX=0/);
+});
+
+test('tab addresses: the panel and the Agent\'s tab list never carry an account and password; query and fragment stay', { timeout:60_000 }, async t => {
+  const { manager } = await managed(t);
+  const { origin } = await site(t);
+  await manager.start('urls'); await manager.action('urls', { kind:'mode', mode:'agent' });
+  const meta = await metadata(manager, 'urls');
+  // A page can reach such an address itself (the address bar and the Agent are refused it); Chromium keeps the userinfo.
+  const browser = await chromium.connectOverCDP(meta.cdpEndpoint); t.after(() => browser.close());
+  const live = `${origin}/x?code=one-time&keep=1#access_token=abc`;
+  await browser.contexts()[0].pages()[0].goto(live.replace('http://', 'http://user:hunter2@'));
+  assert.deepEqual((await manager.state('urls')).tabs.map(tab => tab.url), [live], 'the panel keeps the live address, minus the account and password');
+  const lease = await post(meta, 'acquire', { workspaceId:'urls', write:false, toolName:'browser_tabs', tabAction:'list' });
+  assert.equal(lease.status, 200);
+  const listed = await post(meta, 'tabs', { workspaceId:'urls', leaseId:lease.body.leaseId, action:'list' });
+  await post(meta, 'release', { workspaceId:'urls', leaseId:lease.body.leaseId, failed:false });
+  assert.equal(listed.status, 200);
+  const reply = JSON.stringify(listed.body);
+  for (const secretPart of ['hunter2', 'user:']) assert.ok(!reply.includes(secretPart), `${secretPart} reached the Agent: ${reply.slice(0, 400)}`);
+  assert.deepEqual(listed.body.tabs.map((tab:{url:string}) => tab.url), [live], 'the Agent sees the full address otherwise, as Playwright MCP shows it');
+  assert.equal(listed.body.session.url, live);
+});
+
+test('while the user is in control the server refuses page-structure, network and console reads as it refuses writes, also for a lease taken just before', { timeout:60_000 }, async t => {
+  const { manager } = await managed(t);
+  await manager.start('manual-reads');
+  const meta = await metadata(manager, 'manual-reads');
+  for (const toolName of ['browser_snapshot', 'browser_find', 'browser_wait_for', 'browser_network_requests', 'browser_network_request', 'browser_console_messages']) {
+    const refused = await post(meta, 'acquire', { workspaceId:'manual-reads', write:false, toolName });
+    assert.equal(refused.status, 409, toolName); assert.match(refused.body.error, /不能读取页面结构.*browser_take_screenshot/, toolName);
+  }
+  const screenshot = await post(meta, 'acquire', { workspaceId:'manual-reads', write:false, toolName:'browser_take_screenshot' });
+  assert.equal(screenshot.status, 200, 'screenshots stay allowed during the takeover');
+  await post(meta, 'release', { workspaceId:'manual-reads', leaseId:screenshot.body.leaseId, failed:false });
+  await manager.action('manual-reads', { kind:'mode', mode:'agent' });
+  const lease = await post(meta, 'acquire', { workspaceId:'manual-reads', write:false, toolName:'browser_snapshot' });
+  assert.equal(lease.status, 200, 'allowed while the Agent is in control');
+  await manager.action('manual-reads', { kind:'mode', mode:'manual' });
+  const stale = await post(meta, 'validate', { workspaceId:'manual-reads', leaseId:lease.body.leaseId });
+  assert.equal(stale.status, 409, 'checked again right before the Playwright MCP call'); assert.match(stale.body.error, /不能读取页面结构/);
+  await post(meta, 'release', { workspaceId:'manual-reads', leaseId:lease.body.leaseId, failed:true });
+});
+
+test('RPC errors carry no page address: a failed navigation\'s query and fragment never reach the client or the daemon log', { timeout:60_000 }, async t => {
+  const { manager, dataRoot } = await managed(t);
+  const handlers = new Map<string, (input:unknown, context:unknown) => Promise<unknown>>();
+  const server = { handle:(contract:{ name:string }, handler:(input:unknown, context:unknown) => Promise<unknown>) => { handlers.set(contract.name, handler); }, on:() => () => {}, before:() => () => {} } as unknown as PluginServerContext;
+  const workspace = { id:'rpc-errors', projectRootPath:dataRoot, workspaceDirectory:dataRoot, projectDisplayName:'Errors', name:'main', scripts:[] } as unknown as PaseoWorkspace;
+  contribute(server, { manager, directory:new WorkspaceDirectory(60_000, Date.now, async () => [workspace]) });
+  const paseo = {};
+  await handlers.get('browser.start')!({ workspaceId:'rpc-errors' }, { paseo });
+  // Nothing listens there; Playwright names the whole address in its error.
+  const failed = await handlers.get('browser.action')!({ workspaceId:'rpc-errors', action:{ kind:'navigate', url:'http://127.0.0.1:9/x?token=SECRET#frag' } }, { paseo }).then(() => null, (error:unknown) => error);
+  assert.ok(failed instanceof Error, 'the navigation fails');
+  assert.doesNotMatch(failed.message, /SECRET|frag/, failed.message);
+  assert.match(failed.message, /\S/);
+  assert.equal((await manager.state('rpc-errors')).status, 'running');
+});
+
+test('error text loses every address, whatever its scheme', () => {
+  assert.equal(safeFailure(new Error('page.goto: net::ERR_ABORTED at https://app.example/reset?token=t#x')), 'page.goto: net::ERR_ABORTED at [网页地址]');
+  assert.doesNotMatch(safeFailure(new Error('WebSocket error: ws://127.0.0.1:9/devtools/browser/abc?k=v')), /devtools|k=v/);
+});
+
+test('plugin restoration removes a session.json a crash left behind, before an Agent bridge can use it', { timeout:30_000 }, async t => {
+  const { manager, dataRoot } = await managed(t);
+  const exited = spawn(process.execPath, ['-e', ''], { stdio:'ignore' }); await once(exited, 'exit');
+  // A killed plugin's Chromium that still runs with its Profile: archiving and orphan cleanup find it through session.json.
+  const orphan = spawn(process.execPath, ['-e', 'setInterval(()=>{},1<<30)', '--', `--user-data-dir=${path.join(dataRoot, 'still-running', 'profile')}`, '--remote-debugging-address=127.0.0.1'], { stdio:'ignore' });
+  t.after(() => { orphan.kill('SIGKILL'); });
+  const leftover = async (id:string, browserPid:number) => {
+    await mkdir(path.join(dataRoot, id), { recursive:true, mode:0o700 });
+    await writeFile(path.join(dataRoot, id, 'state.json'), JSON.stringify({ version:2, desiredRunning:false }), { mode:0o600 });
+    await writeFile(manager.metadataPath(id), JSON.stringify({ version:2, workspaceId:id, endpoint:'http://127.0.0.1:9', token:'0'.repeat(64), cdpEndpoint:'http://127.0.0.1:9', browserPid, epoch:1 }), { mode:0o600 });
+  };
+  await leftover('crashed', exited.pid!); await leftover('still-running', orphan.pid!);
+  await manager.restore(['crashed', 'still-running']);
+  await assert.rejects(access(manager.metadataPath('crashed')), 'the file of a browser that no longer runs is gone');
+  await access(manager.metadataPath('still-running'));
 });

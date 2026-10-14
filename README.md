@@ -4,11 +4,11 @@ Plugins for [Paseo](https://paseo.sh). Each directory is a separate plugin with 
 
 | Plugin | Directory | What it does |
 | --- | --- | --- |
-| Agent Observatory | [`agent-observatory`](agent-observatory) | Results-first dashboard for every agent and subagent on a host: unread queue, timelines and execution review, usage and token statistics, scheduled runs, optional AI reviews. |
-| Project Notes | [`project-notes`](project-notes) | Tasks, prompts and ideas per project; start a workspace and agent from a note; a small CLI lets agents add notes. |
-| Server Browser | [`server-browser`](server-browser) | A Chromium browser on the daemon host, shared by your phone, your computer and a dedicated browser agent, with explicit handover. |
-| Terracotta Themes | [`claude-theme`](claude-theme) | Six color themes, three dark and three light, derived from one perceptual tonal ladder. Unofficial; not affiliated with Anthropic. |
-| Vivid Activity | [`vivid-activity`](vivid-activity) | Color-coded thinking and tool-call rows with live states, folding of finished runs and per-step timing. Based on Colorful Agent Activity by Matt Cowger. |
+| Agent Observatory | [`agent-observatory`](agent-observatory) | Results-first dashboard for every Paseo agent and subagent: unread queue, timelines, usage and token statistics, scheduled runs and optional AI reviews. |
+| Project Notes | [`project-notes`](project-notes) | Tasks, prompts and ideas per project, with a launcher that starts an agent from a note and a CLI for agents. |
+| Server Browser | [`server-browser`](server-browser) | A Chromium browser on the daemon host, shared by your phone, your computer and a dedicated browser Agent, with explicit handover between you and the Agent. |
+| Terracotta Themes | [`claude-theme`](claude-theme) | Twelve color themes, six dark and six light, derived from one perceptual tonal ladder. Unofficial; not affiliated with Anthropic. |
+| Vivid Activity | [`vivid-activity`](vivid-activity) | Redraws agent thinking and tool-call rows as color-coded activity rows with live states, folds finished runs into one summary row and times every step. Based on Colorful Agent Activity by Matt Cowger. |
 
 Requirements are declared per plugin in `requirements.paseo` (currently Paseo 0.11.0 or newer for the themes and 0.11.1 or newer for the others). Read each plugin's `OVERVIEW.md` for what it reads, writes and runs.
 

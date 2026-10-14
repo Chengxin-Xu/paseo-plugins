@@ -1,16 +1,17 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
-import { vendorOf, type StatsRange } from "../shared/stats";
+import { vendorOf, type StatsBreakdownRow, type StatsRange } from "../shared/stats";
 import { bigNumber, percent, weekdayNames } from "../shared/stats-view";
-import { cacheHitRate, outputSpeed, tokenInput, tokenSourceNames, tokenTotal, tokenTruncationNotice, type TokenCounts, type TokenLive, type TokenRow, type TokenSnapshot } from "../shared/tokens";
-import { Banner, EmptyState, ProjectMark, Segmented, Skeleton, fontSize, gradient, hairline, hue, hueFor, radius, relativeTime, space, withAlpha, type Hue } from "./kit";
+import { cacheHitRate, isArchivedLogRoot, outputSpeed, TOKEN_SOURCES, TOKEN_UNMATCHED, tokenInput, tokenSourceNames, tokenTotal, tokenTruncationNotice, type TokenCounts, type TokenLive, type TokenRow, type TokenSnapshot, type TokenSource } from "../shared/tokens";
+import { Banner, EmptyState, ProjectMark, Segmented, Skeleton, aria, fontSize, gradient, hairline, hue, hueFor, radius, relativeTime, space, withAlpha, type Hue } from "./kit";
 import { Card, CompositionBar, Donut, InlineBar, StackedColumns, TrendChart } from "./charts";
-import { GlassPill, IconDisk, StatsHeader, trackFor, vendorHue, vendorLabel } from "./stats-common";
+import { GlassPill, IconDisk, StatsHeader, rowHues, trackFor, vendorHue, vendorLabel } from "./stats-common";
 import { KpiTile, type Tile } from "./stats-board";
 import { LiveRateCard, perSecond } from "./live-rate";
 import { Ping } from "./motion";
+import { QuotaCard, quotaInfo, type QuotaCardProps } from "./quota-card";
 
 /** The four kinds of tokens, bottom to top in stacked charts: cache reads dominate, output matters most. */
 export const tokenKinds = [
@@ -21,12 +22,19 @@ const shortDay = (day: string) => `${Number(day.slice(5, 7))}/${Number(day.slice
 const longDay = (day: string) => `${Number(day.slice(5, 7))}月${Number(day.slice(8, 10))}日 ${weekdayNames[(new Date(`${day}T00:00:00.000Z`).getUTCDay() + 6) % 7]}`;
 const days: Record<StatsRange, number> = { "7d": 7, "30d": 30, "90d": 90 };
 export const tokenInfo = [
-  "Token 来自本机 Claude Code 与 Codex 的会话日志，包括 extends 它们的自定义 Provider（按 Provider 配置或启动脚本里的 CLAUDE_CONFIG_DIR / CODEX_HOME 找到日志目录），口径与 ccusage 等工具一致；其他 Provider 的日志暂不支持。",
-  "统计本机所有 Claude Code / Codex 会话（不只是 Paseo 启动的），按会话 ID 关联到 Paseo 会话；续接或分叉的会话按消息去重，不会重复计算。",
+  "Token 来自本机 Claude Code、Codex、Grok CLI 和 Pi 的会话日志，包括基于它们的自定义 Provider（按 Provider 配置、启动脚本或 Pi 设置里的 CLAUDE_CONFIG_DIR / CODEX_HOME / GROK_HOME / PI_CODING_AGENT_DIR 找到日志目录），口径与 ccusage 等工具一致；其他 Provider 的日志暂不支持，读不到的来源不显示。",
+  "统计本机所有这些会话（不只是 Paseo 启动的），按会话 ID 关联到 Paseo 会话；续接或分叉的会话按消息去重，不会重复计算。Codex 已归档的会话（archived_sessions）也会读到；Codex 派出的子 Agent 线程和 Claude Code 的子 Agent 一样，算在派出它的会话里。在系统临时目录里跑的会话（脚本的一次性运行）在「项目用量」里合成一项「临时目录」。",
+  "Grok CLI 每轮结束时记一次这一轮的用量（usage.json），所以 Grok 按轮计入、没有单次调用的响应用时，不参与输出速率和实时流速，只计入总量；它的输入里含缓存读写，已拆开。观测台自己的 Grok 智能分析（临时目录 paseo-insight-*）不计入。Pi 按它自己的口径累计：每条回复、带用量的工具结果，以及压缩和分支摘要。",
+  "「Provider 用量」按会话 ID 找到对应的 Paseo 会话，再按它的 Provider 汇总，所以几个自定义 Provider 共用同一个日志目录时也能分开；日志目录只属于一个自定义 Provider 时，那里没有对应 Paseo 会话的日志也算它的；其余找不到对应 Paseo 会话的日志（在终端直接运行的会话、已删除的会话）单列为「未关联会话」。",
+  "按天和按小时都按这台设备的时区（含夏令时切换）计算，和统计页一致：日志按 UTC 小时记账，读取时每个小时按它当时的偏移换算。",
   "新输入 + 缓存写入 + 缓存读取 = 模型读入的全部上下文，再加输出就是总量。缓存命中率 = 缓存读取 ÷ 读入。",
   "输出速率（TPS）= 输出 token ÷ 响应用时，响应用时包含等待第一个 token 的时间。实时流速把每次调用的输出平摊到它的响应时间里。",
   "只保存计数、模型、工作目录和会话 ID，不保存提示词或输出内容。不估算费用：同一个模型经不同 Provider、代理或订阅的单价各不相同。",
+  ...quotaInfo,
 ];
+/** Each log source's colour in the source rows: the vendor family it mostly runs (Claude orange, Codex teal, Grok violet), Pi pink. */
+const sourceHues: Record<TokenSource, Hue> = { claude: "orange", codex: "teal", grok: "violet", pi: "pink" };
+const isTokenSource = (key: string): key is TokenSource => (TOKEN_SOURCES as readonly string[]).includes(key);
 
 function Hero({ theme, snapshot, live, narrow }: { theme: PluginTheme; snapshot: TokenSnapshot; live?: TokenLive; narrow: boolean }) {
   const today = snapshot.daily.at(-1), todayTotal = live?.today.total ?? (today ? tokenTotal(today) : 0), todayOutput = live?.today.output ?? today?.output ?? 0;
@@ -114,21 +122,29 @@ function RowStats({ theme, row }: { theme: PluginTheme; row: TokenCounts }) {
     输出 {bigNumber(row.output)} · 命中 {percent(hit)}{speed !== null ? ` · ${perSecond(speed)} tok/s` : ""} · {bigNumber(row.calls)} 次调用
   </Text>;
 }
-function TokenRows({ theme, rows, kind, total, limit = 8 }: { theme: PluginTheme; rows: readonly TokenRow[]; kind: "models" | "projects" | "sources"; total: number; limit?: number }) {
+type RowKind = "models" | "projects" | "sources" | "providers";
+function rowSubtitle(kind: RowKind, row: TokenRow): string {
+  const when = row.lastAt ? ` · ${relativeTime(row.lastAt)}` : "";
+  if (row.key === TOKEN_UNMATCHED) return `${row.sessions} 个会话 · 终端直接运行或已删除${when}`;
+  return `${kind === "models" || kind === "providers" ? `${vendorLabel(row.vendor ?? (kind === "models" ? vendorOf(row.key, null) : null))} · ` : ""}${row.sessions} 个会话${when}`;
+}
+function TokenRows({ theme, rows, kind, total, limit = 8, hues, ranked = true, empty = "这个范围内还没有数据" }: {
+  theme: PluginTheme; rows: readonly TokenRow[]; kind: RowKind; total: number; limit?: number; hues?: ReadonlyMap<string, Hue>; ranked?: boolean; empty?: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const max = Math.max(1, ...rows.map(tokenTotal)), shown = expanded ? rows : rows.slice(0, limit);
-  if (!rows.length) return <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>这个范围内还没有数据</Text>;
+  if (!rows.length) return <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>{empty}</Text>;
   return <View>
     {shown.map((row, index) => {
-      const color: Hue = row.key === "__other__" ? "gray" : kind === "models" ? vendorHue(row.vendor ?? vendorOf(row.key, null)) : kind === "sources" ? (row.key === "codex" ? "teal" : "orange") : hueFor(row.label);
+      const color: Hue = row.key === "__other__" || row.key === TOKEN_UNMATCHED ? "gray" : hues?.get(row.key) ?? (kind === "models" ? vendorHue(row.vendor ?? vendorOf(row.key, null)) : kind === "sources" ? (isTokenSource(row.key) ? sourceHues[row.key] : hueFor(row.label)) : hueFor(row.label));
       const value = tokenTotal(row);
       return <View key={row.key} style={{ gap: 5, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: trackFor(theme) }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-          <Text numberOfLines={1} style={{ width: 22, textAlign: "center", fontVariant: ["tabular-nums"], color: index < 3 ? hue(theme, color, "text") : theme.colors.foregroundMuted, fontSize: fontSize.small, fontWeight: "800" }}>{index + 1}</Text>
+          <Text numberOfLines={1} style={{ width: 22, textAlign: "center", fontVariant: ["tabular-nums"], color: ranked && index < 3 ? hue(theme, color, "text") : theme.colors.foregroundMuted, fontSize: fontSize.small, fontWeight: "800" }}>{ranked ? index + 1 : "—"}</Text>
           {kind === "projects" && row.key !== "__other__" ? <ProjectMark theme={theme} name={row.label} size={20} /> : <View style={{ width: 20, height: 20, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: hue(theme, color, "soft") }}><View style={{ width: 9, height: 9, borderRadius: 3, backgroundColor: hue(theme, color) }} /></View>}
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{row.label}</Text>
-            <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{kind === "models" ? `${vendorLabel(row.vendor ?? vendorOf(row.key, null))} · ` : ""}{row.sessions} 个会话{row.lastAt ? ` · ${relativeTime(row.lastAt)}` : ""}</Text>
+            <Text numberOfLines={1} style={{ color: row.key === TOKEN_UNMATCHED ? theme.colors.foregroundMuted : theme.colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{row.label}</Text>
+            <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{rowSubtitle(kind, row)}</Text>
           </View>
           <Text style={{ color: theme.colors.foreground, fontSize: fontSize.body, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{bigNumber(value)}</Text>
           <Text style={{ width: 46, textAlign: "right", color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{percent(total ? value / total : 0, total && value / total < 0.1 ? 1 : 0)}</Text>
@@ -139,10 +155,28 @@ function TokenRows({ theme, rows, kind, total, limit = 8 }: { theme: PluginTheme
         </View>
       </View>;
     })}
-    {rows.length > limit ? <Pressable accessibilityRole="button" onPress={() => setExpanded(!expanded)} style={{ alignSelf: "center", paddingVertical: 6, paddingHorizontal: 12 }}>
+    {rows.length > limit ? <Pressable accessibilityRole="button" accessibilityState={{ expanded }} {...aria({ expanded })} onPress={() => setExpanded(!expanded)} style={{ alignSelf: "center", paddingVertical: 6, paddingHorizontal: 12 }}>
       <Text style={{ color: hue(theme, "amber", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{expanded ? "收起" : `展开全部（还有 ${rows.length - limit} 个）`}</Text>
     </Pressable> : null}
   </View>;
+}
+
+/**
+ * Provider 用量 (2.13): sessions matched to Paseo agents, by the agent's provider, so custom providers sharing one log
+ * directory are told apart; the sessions nothing matches stand apart as 未关联会话.
+ */
+function ProviderCard({ theme, snapshot, total }: { theme: PluginTheme; snapshot: TokenSnapshot; total: number }) {
+  const rows = snapshot.providers;
+  const ranked = useMemo(() => rows?.filter(row => row.key !== TOKEN_UNMATCHED) ?? [], [rows]), unmatched = rows?.find(row => row.key === TOKEN_UNMATCHED);
+  // rowHues reads only key, vendor and label: a provider's colour follows its models' vendor, neighbours take adjacent hues.
+  const hues = useMemo(() => rowHues(ranked as unknown as readonly StatsBreakdownRow[], "provider"), [ranked]);
+  const named = ranked.filter(row => row.key !== "__other__").length;
+  return <Card theme={theme} title="Provider 用量" icon="Network" color="violet" trailing={rows ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{named} 个 Provider</Text> : undefined}>
+    {!rows ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>正在读取 Paseo 会话目录，读到后按 Provider 拆分</Text> : <>
+      <TokenRows theme={theme} rows={ranked} kind="providers" total={total} limit={6} hues={hues} empty="这个范围内没有能关联到 Paseo 会话的用量" />
+      {unmatched ? <TokenRows theme={theme} rows={[unmatched]} kind="providers" total={total} ranked={false} /> : null}
+    </>}
+  </Card>;
 }
 
 function SessionsCard({ theme, snapshot, onOpenAgent }: { theme: PluginTheme; snapshot: TokenSnapshot; onOpenAgent?: (agentId: string) => void }) {
@@ -194,7 +228,8 @@ function RhythmCard({ theme, snapshot }: { theme: PluginTheme; snapshot: TokenSn
 
 function Coverage({ theme, snapshot }: { theme: PluginTheme; snapshot: TokenSnapshot }) {
   const { backfill, roots, earliestAt } = snapshot.coverage, cut = tokenTruncationNotice(snapshot.coverage.truncated);
-  const parts = [...roots.map(root => `${tokenSourceNames[root.source]} ${root.files} 个日志${root.error ? `（${root.error}）` : ""}`), earliestAt ? `最早 ${new Date(earliestAt).toLocaleDateString("zh-CN")}` : null, snapshot.paseoShare !== null ? `Paseo 会话占 ${percent(snapshot.paseoShare)}` : null].filter(Boolean);
+  // A source this host does not have (no directory, nothing found) is left out quietly; Grok keeps one usage file per session.
+  const parts = [...roots.filter(root => root.files || root.error).map(root => `${tokenSourceNames[root.source]}${isArchivedLogRoot(root.path) ? " 已归档" : ""} ${root.files} ${root.source === "grok" ? "个会话" : "个日志"}${root.error ? `（${root.error}）` : ""}`), earliestAt ? `最早 ${new Date(earliestAt).toLocaleDateString("zh-CN")}` : null, snapshot.paseoShare !== null ? `Paseo 会话占 ${percent(snapshot.paseoShare)}` : null].filter(Boolean);
   return <View style={{ gap: space.sm }}>
     {!backfill.done ? <View accessibilityLabel={`正在导入历史日志 ${percent(backfill.bytes ? backfill.bytesDone / backfill.bytes : 0)}`} style={{ gap: 6, padding: space.md, borderRadius: radius.lg, backgroundColor: hue(theme, "amber", "soft"), borderWidth: 1, borderColor: hue(theme, "amber", "line") }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
@@ -218,14 +253,16 @@ export interface TokenBoardProps {
   tokens?: TokenSnapshot; loading: boolean; error?: string;
   live?: TokenLive; liveError?: string; liveWindow: 30 | 60; onLiveWindow: (minutes: 30 | 60) => void;
   onOpenAgent?: (agentId: string) => void;
+  /** 额度 (2.13): the host's provider usage windows with history and forecasts (client/use-quota), shown at the top. */
+  quota?: Omit<QuotaCardProps, "theme" | "compact">;
 }
 /** Token 页: personal token statistics from the local provider logs, with the live speed chart. */
-export function TokenBoard({ theme, compact, range, onRange, onRefresh, tokens, loading, error, live, liveError, liveWindow, onLiveWindow, onOpenAgent }: TokenBoardProps) {
+export function TokenBoard({ theme, compact, range, onRange, onRefresh, tokens, loading, error, live, liveError, liveWindow, onLiveWindow, onOpenAgent, quota }: TokenBoardProps) {
   const [width, setWidth] = useState(0);
   const inset = compact ? space.md : space.xl, wide = width >= 900, columns = width >= 900 ? 4 : width >= 560 ? 3 : 2;
   const pair = (left: ReactNode, right: ReactNode, ratio = 1.4) => wide ? <View style={{ flexDirection: "row", gap: space.lg, alignItems: "stretch" }}><View style={{ flex: ratio, minWidth: 0 }}>{left}</View><View style={{ flex: 1, minWidth: 0 }}>{right}</View></View> : <>{left}{right}</>;
   let body: ReactNode;
-  if (!tokens) body = loading ? <Skeleton theme={theme} rows={6} /> : <EmptyState theme={theme} icon={error ? "WifiOff" : "Coins"} tone={error ? "danger" : "warning"} title={error ? "Token 统计暂时读不到" : "还没有 Token 数据"} message={error ?? "本机的 Claude Code / Codex 会话日志会在这里汇总"} action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />;
+  if (!tokens) body = loading ? <Skeleton theme={theme} rows={6} /> : <EmptyState theme={theme} icon={error ? "WifiOff" : "Coins"} tone={error ? "danger" : "warning"} title={error ? "Token 统计暂时读不到" : "还没有 Token 数据"} message={error ?? "本机 Claude Code、Codex、Grok CLI 和 Pi 的会话日志会在这里汇总"} action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />;
   else {
     const total = tokenTotal(tokens.totals);
     body = <>
@@ -234,10 +271,14 @@ export function TokenBoard({ theme, compact, range, onRange, onRefresh, tokens, 
       <LiveRateCard theme={theme} live={live} error={liveError} windowMinutes={liveWindow} onWindow={onLiveWindow} onOpenAgent={onOpenAgent} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", margin: -space.xs }}>{tiles(tokens).map(tile => <KpiTile key={tile.key} theme={theme} tile={tile} width={`${100 / columns}%`} />)}</View>
       {pair(<TrendCard theme={theme} snapshot={tokens} />, <CompositionCard theme={theme} counts={tokens.totals} />)}
+      {/* Providers sit above projects: together they balance the taller model list on wide screens. */}
       {pair(<Card theme={theme} title="模型用量" icon="Cpu" color="cyan" trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{tokens.models.filter(row => row.key !== "__other__").length} 个模型</Text>}>
         <TokenRows theme={theme} rows={tokens.models} kind="models" total={total} />
         {tokens.sources.length > 1 ? <View style={{ borderTopWidth: hairline, borderTopColor: theme.colors.border, paddingTop: space.sm }}><TokenRows theme={theme} rows={tokens.sources} kind="sources" total={total} /></View> : null}
-      </Card>, <Card theme={theme} title="项目用量" icon="FolderGit2" color="blue"><TokenRows theme={theme} rows={tokens.projects} kind="projects" total={total} limit={6} /></Card>, 1.2)}
+      </Card>, <View style={{ gap: space.lg }}>
+        <ProviderCard theme={theme} snapshot={tokens} total={total} />
+        <Card theme={theme} title="项目用量" icon="FolderGit2" color="blue"><TokenRows theme={theme} rows={tokens.projects} kind="projects" total={total} limit={6} /></Card>
+      </View>, 1.2)}
       {pair(<SessionsCard theme={theme} snapshot={tokens} onOpenAgent={onOpenAgent} />, <RhythmCard theme={theme} snapshot={tokens} />, 1.2)}
       <Coverage theme={theme} snapshot={tokens} />
     </>;
@@ -245,6 +286,7 @@ export function TokenBoard({ theme, compact, range, onRange, onRefresh, tokens, 
   return <ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingHorizontal: inset, paddingTop: space.md, paddingBottom: space.xxl }}>
     <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ gap: space.lg, width: "100%", maxWidth: 1180, alignSelf: "center" }}>
       <StatsHeader theme={theme} compact={compact} range={range} onRange={onRange} generatedAt={tokens?.generatedAt} info={tokenInfo} infoTitle="关于 Token 统计" />
+      {quota ? <QuotaCard theme={theme} compact={compact || (width > 0 && width < 560)} {...quota} /> : null}
       {body}
     </View>
   </ScrollView>;

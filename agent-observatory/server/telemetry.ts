@@ -5,13 +5,34 @@ import { z } from "zod";
 import { ensurePrivateDirectory, resolvePaseoHome } from "./paseo-home";
 import {
   agentTelemetrySchema,
+  changeRequestSchema,
   telemetryEventSchema,
+  type AgentTelemetry,
+  type ChangeRequestLink,
   type TelemetryEvent,
   type TelemetryResponse,
   type TelemetrySnapshot,
   type TurnOutcome,
 } from "../shared/telemetry";
-import { AnalyticsAccumulator, type AnalyticsAgent, type ReportedUsage } from "./analytics";
+import type { StopReason } from "../shared/stop-reason";
+import { REPLY_NUDGES, type ReplyNudge } from "../shared/reply";
+import { withoutUserinfo } from "../shared/change-request";
+
+/** Only a well-formed link is kept; anything else (a malformed URL, an oversized label) is dropped, never stored. */
+/** A stored link, without the `user:password@` that versions before 2.15.1 kept. */
+function linkOf(value: ChangeRequestLink | null | undefined): ChangeRequestLink | null {
+  const parsed = value ? changeRequestSchema.safeParse(value) : null;
+  return parsed?.success ? { ...parsed.data, url: withoutUserinfo(parsed.data.url) } : null;
+}
+/** Only a known 快捷回复 category is kept (opus-B26). */
+function nudgeOf(value: unknown): ReplyNudge | null {
+  return (REPLY_NUDGES as readonly unknown[]).includes(value) ? value as ReplyNudge : null;
+}
+/** The stop fields a turn's end may store: kind, reset (and whether it was guessed), when. Never an acknowledgement. */
+function stopOf(stop: StopReason, at: string): NonNullable<AgentTelemetry["stop"]> {
+  return { kind: stop.kind, resetAt: stop.resetAt, ...(stop.resetGuessed === true ? { resetGuessed: true } : {}), at };
+}
+import { AnalyticsAccumulator, type AnalyticsAgent, type AnalyticsDevice, type ReportedUsage } from "./analytics";
 import { latestUsageSamples, type AnalyticsResponse, type AnalyticsSnapshot } from "../shared/analytics";
 import { contentRevision } from "./revision";
 
@@ -54,9 +75,13 @@ export type TelemetryObservation =
   | { type: "created" | "archived"; agent: ObservedAgent }
   | { type: "turn_started"; agent: ObservedAgent; turnId: string | null }
   // `asks`: whether the turn's final reply hands the next step to the user (see shared/reply.ts); null without a final reply.
-  | { type: "turn_ended"; agent: ObservedAgent; turnId: string | null; outcome: TurnOutcome; asks?: boolean | null }
+  // `nudge`: what that reply invites (快捷回复, shared/reply.ts `replyNudge`), a category only.
+  // `stop`: why it stopped when that is not simply done (shared/stop-reason.ts); never text.
+  | { type: "turn_ended"; agent: ObservedAgent; turnId: string | null; outcome: TurnOutcome; asks?: boolean | null; nudge?: ReplyNudge | null; stop?: StopReason | null; link?: ChangeRequestLink | null }
   | { type: "permission_requested"; agent: ObservedAgent; requestId: string }
-  | { type: "permission_resolved"; agent: ObservedAgent; requestId: string; allowed: boolean };
+  | { type: "permission_resolved"; agent: ObservedAgent; requestId: string; allowed: boolean }
+  // The host closed the Agent (0.11 `agent.closed`): a turn still open then will never end on its own.
+  | { type: "closed"; agent: ObservedAgent };
 
 export interface TelemetryStoreOptions {
   /** Test overrides keep all writes inside a temporary directory. */
@@ -166,14 +191,15 @@ export class TelemetryStore {
       projectRootPath: observation.agent.projectRootPath };
     let metadata: TelemetryObservation;
     switch (observation.type) {
-      case "created": case "archived":
+      case "created": case "archived": case "closed":
         metadata = { type: observation.type, agent };
         break;
       case "turn_started":
         metadata = { type: observation.type, agent, turnId: observation.turnId };
         break;
       case "turn_ended":
-        metadata = { type: observation.type, agent, turnId: observation.turnId, outcome: observation.outcome, asks: typeof observation.asks === "boolean" ? observation.asks : null };
+        metadata = { type: observation.type, agent, turnId: observation.turnId, outcome: observation.outcome, asks: typeof observation.asks === "boolean" ? observation.asks : null,
+          nudge: nudgeOf(observation.nudge), stop: observation.stop ? stopOf(observation.stop, observation.stop.at) : null, link: linkOf(observation.link) };
         break;
       case "permission_requested":
         metadata = { type: observation.type, agent, requestId: observation.requestId };
@@ -184,17 +210,18 @@ export class TelemetryStore {
     }
     const at = this.now();
     const task = this.mutations.then(() => this.apply(metadata, at) ?? null).catch(() => {
-      this.setError("An observation could not be collected. Live agent status remains available.");
+      this.setError("有一条事件没能记录，会话的实时状态不受影响。");
       return null;
     });
     this.mutations = task.then(() => {});
     return task;
   }
 
-  async analyticsSnapshot(projectId?: string): Promise<AnalyticsSnapshot> {
+  /** `device`: the reading device's clock (明细 → 观测 by its local days, opus-F40); without it, UTC days as the stats backfill reads them. */
+  async analyticsSnapshot(projectId?: string, device?: AnalyticsDevice): Promise<AnalyticsSnapshot> {
     await this.recordHeartbeat();
     await this.mutations;
-    return this.analytics.snapshot(this.now(), this.persistenceError, projectId);
+    return this.analytics.snapshot(this.now(), this.persistenceError, projectId, device);
   }
 
   /**
@@ -202,8 +229,8 @@ export class TelemetryStore {
    * which advances with every heartbeat; an unchanged reply carries that interval so clients stay current.
    * Only the usage samples the dashboard renders (each Agent's first-listed and newest report) are sent.
    */
-  async analyticsRead(input: { projectId?: string; revision?: string } = {}): Promise<AnalyticsResponse> {
-    const snapshot = await this.analyticsSnapshot(input.projectId);
+  async analyticsRead(input: { projectId?: string; revision?: string; timeZone?: string; utcOffsetMinutes?: number } = {}): Promise<AnalyticsResponse> {
+    const snapshot = await this.analyticsSnapshot(input.projectId, input);
     const view: AnalyticsSnapshot = { ...snapshot, usage: latestUsageSamples(snapshot.usage) };
     const intervals = view.coverageIntervals ?? [], tail = intervals.at(-1) ?? null;
     const withoutCoverage = ({ coveredMs: _coveredMs, ...bucket }: AnalyticsSnapshot["hours"][number]) => bucket;
@@ -235,7 +262,7 @@ export class TelemetryStore {
       this.dirty = true;
       this.scheduleWrite();
     }).catch(() => {
-      this.setError("A usage observation could not be collected. Lifecycle data remains available.");
+      this.setError("有一条用量记录没能处理，其他事件照常记录。");
     });
     return this.mutations;
   }
@@ -282,7 +309,7 @@ export class TelemetryStore {
    * timeline tail after the user message sent at `userAt` (null when that turn has none). A reply after the latest known
    * end is also the evidence that the turn completed. Never records reply text, and never an event: nothing was observed live.
    */
-  recordReply(agentId: string, userAt: string, reply: { at: string; asks: boolean } | null): Promise<void> {
+  recordReply(agentId: string, userAt: string, reply: { at: string; asks: boolean; nudge?: ReplyNudge | null; link?: ChangeRequestLink | null } | null, stop: StopReason | null = null): Promise<void> {
     if (this.closed || !agentId || agentId.length > 256) return Promise.resolve();
     const user = Date.parse(userAt), at = reply ? Date.parse(reply.at) : NaN;
     if (!Number.isFinite(user)) return Promise.resolve();
@@ -290,24 +317,56 @@ export class TelemetryStore {
       const state = this.stateFor(agentId, this.now()), summary = state.summary;
       // A turn this method completed earlier may be corrected by a later read of the same turn.
       const backfilled = summary.turnEndedAt !== null && summary.turnStartedAt === summary.replyFor && summary.turnEndedAt === summary.replyAt;
+      // This read decides how the turn ended unless the hooks saw it end.
+      const ours = backfilled || (Date.parse(summary.turnEndedAt ?? "") || 0) < user;
       summary.replyFor = new Date(user).toISOString();
       if (reply && Number.isFinite(at) && at >= user) {
         summary.replyAt = new Date(at).toISOString();
         summary.replyAsks = reply.asks;
-        if (backfilled || (Date.parse(summary.turnEndedAt ?? "") || 0) < user) {
+        summary.replyNudge = nudgeOf(reply.nudge);
+        const link = linkOf(reply.link);
+        if (link) summary.link = link;
+        if (ours) {
           summary.turnStartedAt = summary.replyFor; summary.turnEndedAt = summary.replyAt; summary.outcome = "completed";
           state.activeTurns = state.activeTurns.filter((turn) => turn.at > at);
         }
       } else if ((Date.parse(summary.replyAt ?? "") || 0) < user) {
-        summary.replyAt = null; summary.replyAsks = null;
+        summary.replyAt = null; summary.replyAsks = null; summary.replyNudge = null;
       }
+      // A missed end read later: a limit notice as the reply, or a tail that stopped after tool calls or produced nothing.
+      // A close of this very prompt's turn was seen first-hand: a tail without a reply cannot tell more, while a reply shows
+      // the turn did end after all (only its hook was missed), so it replaces the close (a limit notice) or clears it.
+      const replied = !!reply && Number.isFinite(at) && at >= user;
+      const closedHere = summary.stop?.closedMidTurn === true && (Date.parse(summary.stop.at) || 0) >= user;
+      if (stop && ours && (replied || !closedHere)) summary.stop = stopOf(stop, stop.at);
+      else if (reply && (closedHere ? replied && ours : (Date.parse(summary.stop?.at ?? "") || 0) < user)) summary.stop = null;
       this.markChanged(agentId);
       this.dirty = true;
       this.scheduleWrite();
     }).catch(() => {
-      this.setError("A reply observation could not be collected. Lifecycle data remains available.");
+      this.setError("有一条回复记录没能处理，其他事件照常记录。");
     });
     return this.mutations;
+  }
+
+  /**
+   * 知道了 on the Agent's current stop (opus-F34): records when the user saw it, only while `stopAt` is exactly that stop (a
+   * newer turn or stop replaced it otherwise), and writes it out before answering. True when this stop is marked seen.
+   */
+  ackStop(agentId: string, stopAt: string): Promise<boolean> {
+    if (this.closed || !agentId || agentId.length > 256) return Promise.resolve(false);
+    const task = this.mutations.then(() => {
+      const state = this.agents.get(agentId), stop = state?.summary.stop;
+      if (!state || !stop || stop.at !== stopAt) return false;
+      if (stop.seenAt) return true;
+      // A new object: snapshots handed out earlier keep what they showed.
+      state.summary.stop = { ...stop, seenAt: new Date(this.now()).toISOString() };
+      this.markChanged(agentId);
+      this.dirty = true;
+      return true;
+    }).catch(() => false);
+    this.mutations = task.then(() => {});
+    return task.then(async seen => { if (seen) await this.flush(); return seen; });
   }
 
   /**
@@ -377,13 +436,13 @@ export class TelemetryStore {
       } catch (error) {
         this.dirty ||= durable;
         this.coverageDirty = true;
-        this.setError(`Telemetry could not be saved (${errorCode(error)}). Live collection remains available.`);
+        this.setError(`事件暂时无法写入磁盘（${errorCode(error)}），仍在内存里继续记录。`);
       } finally {
         await unlink(temporary).catch(() => {});
       }
     }).catch(() => {
       this.dirty = true;
-      this.setError("Telemetry could not be saved. Live collection remains available.");
+      this.setError("事件暂时无法写入磁盘，仍在内存里继续记录。");
     });
     return this.writes;
   }
@@ -419,7 +478,7 @@ export class TelemetryStore {
       content = await readFile(this.file, "utf8");
     } catch (error) {
       if (errorCode(error) !== "ENOENT") {
-        this.persistenceError = `Saved telemetry could not be read (${errorCode(error)}). Live collection remains available.`;
+        this.persistenceError = `已保存的事件历史无法读取（${errorCode(error)}），已重新开始记录。`;
       }
       return;
     }
@@ -430,7 +489,7 @@ export class TelemetryStore {
       for (const state of ordered) this.agents.set(state.summary.agentId, state);
       this.events = saved.events.slice(0, this.maxEvents);
       if (saved.analytics !== undefined && !this.analytics.restore(saved.analytics)) {
-        this.persistenceError = "Saved analytics was invalid. Existing lifecycle history has been preserved.";
+        this.persistenceError = "已保存的统计数据无法读取，已重新开始统计；会话事件历史保留不变。";
       }
       this.lastWrittenDigest = createHash("sha256").update(content).digest("base64");
     } catch {
@@ -439,7 +498,7 @@ export class TelemetryStore {
   }
 
   private async recoverInvalidFile(quarantine = true): Promise<void> {
-    this.persistenceError = "Saved telemetry was invalid. A fresh observation history has been started.";
+    this.persistenceError = quarantine ? "已保存的事件历史无法读取，已重新开始记录；原文件另存了一份备份。" : "已保存的事件历史超过 64 MB，无法读取，已重新开始记录。";
     // A single quarantine file replaces the previous one, keeping recovery disk use bounded.
     if (quarantine) await rename(this.file, `${this.file}.corrupt`).catch(() => {});
     else await unlink(this.file).catch(() => {});
@@ -513,7 +572,7 @@ export class TelemetryStore {
         // A replayed creation should not clear already-observed lifecycle information.
         if (this.events.some((event) => event.agentId === agent.id && event.type === "created")) return;
         type = "created";
-        label = "Agent created";
+        label = "新建 Agent";
         break;
       case "turn_started": {
         const key = identifierKey(observation.turnId, "turn");
@@ -528,8 +587,10 @@ export class TelemetryStore {
         state.summary.outcome = null;
         state.summary.replyAt = null;
         state.summary.replyAsks = null;
+        state.summary.replyNudge = null;
+        state.summary.stop = null;
         type = "turn_started";
-        label = "Turn started";
+        label = "开始一轮";
         break;
       }
       case "turn_ended": {
@@ -558,11 +619,17 @@ export class TelemetryStore {
           const asks = observation.outcome === "completed" && typeof observation.asks === "boolean" ? observation.asks : null;
           state.summary.replyAt = asks === null ? null : stamp;
           state.summary.replyAsks = asks;
+          // A category of the same final reply: none without one.
+          state.summary.replyNudge = asks === null ? null : nudgeOf(observation.nudge);
+          state.summary.stop = observation.stop ? stopOf(observation.stop, stamp) : null;
+          // A later reply without a link does not unmake the request; a new one replaces it.
+          const link = linkOf(observation.link);
+          if (link) state.summary.link = link;
           this.finishPermissionWait(state, at);
           state.pendingPermissions = [];
         }
         type = `turn_${observation.outcome}`;
-        label = observation.outcome === "completed" ? "Turn completed" : observation.outcome === "failed" ? "Turn failed" : "Turn canceled";
+        label = observation.outcome === "completed" ? "完成一轮" : observation.outcome === "failed" ? "一轮失败" : "一轮被取消";
         break;
       }
       case "permission_requested": {
@@ -572,7 +639,7 @@ export class TelemetryStore {
         state.pendingPermissions.push({ key, at });
         state.pendingPermissions = state.pendingPermissions.slice(-MAX_PERMISSIONS);
         type = "permission_requested";
-        label = "Waiting for approval or input";
+        label = "等你审批或回答";
         break;
       }
       case "permission_resolved": {
@@ -584,21 +651,36 @@ export class TelemetryStore {
         remember(state.resolvedPermissions, key, MAX_PERMISSION_HISTORY);
         if (state.pendingPermissions.length === 0) this.finishPermissionWait(state, at);
         type = "permission_resolved";
-        label = observation.allowed ? "Request approved" : "Request declined or cleared";
+        label = observation.allowed ? "请求已批准" : "请求被拒绝或撤销";
         break;
       }
       case "archived":
         this.finishPermissionWait(state, at);
         state.pendingPermissions = [];
         type = "archived";
-        label = "Agent archived";
+        label = "已归档";
         break;
+      case "closed": {
+        // Closing ends the session; turns still open will never report an end. Mark the latest one as stopped mid-way
+        // (可能未收尾) instead of leaving it running forever. No event: closing is routine (idle sessions are unloaded).
+        // The host raises no attention for it (only a turn that ends does), so it is marked `closedMidTurn`: only 知道了 here
+        // marks it seen. A stop a backfill already read for this turn stands: that turn had ended, the hook only missed it.
+        const open = state.activeTurns.length > 0 && state.summary.turnEndedAt === null;
+        state.activeTurns = [];
+        this.finishPermissionWait(state, at);
+        state.pendingPermissions = [];
+        if (open && !state.summary.stop) state.summary.stop = { kind: "unfinished", resetAt: null, at: stamp, closedMidTurn: true };
+        this.markChanged(agent.id);
+        this.dirty = true;
+        this.scheduleWrite();
+        return;
+      }
     }
 
     const event: TelemetryEvent = {
       id: randomUUID(),
       agentId: agent.id,
-      agentTitle: (agent.title?.trim() || "Untitled agent").slice(0, 160),
+      agentTitle: (agent.title?.trim() || "未命名 Agent").slice(0, 160),
       at: stamp,
       type,
       label,

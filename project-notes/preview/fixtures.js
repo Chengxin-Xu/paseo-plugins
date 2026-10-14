@@ -67,6 +67,7 @@ if (scenario === "many") {
 let revisionCounter = 1;
 const snapshot = value => structuredClone({ projectId: value.projectId, revision: value.revision, items: value.items });
 const receipts = new Map();
+const histories = new Map();
 const launches = new Map();
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 let dashboardCount = 0;
@@ -104,13 +105,15 @@ export async function call(method, input) {
   globalThis.__notesCalls.push({ method, input: structuredClone(input) });
   await wait(scenario === "slow" && method === "project-notes.dashboard" ? 3_600_000 : scenario === "slow-write" && method === "project-notes.write" ? 1_500 : 60);
   switch (method) {
+    case "project-notes.prompt.environment": return { languages: input.projectId === "__inbox__" ? [] : ["TypeScript"], testCommands: input.projectId === "__inbox__" ? [] : ["npm run test"], notices: [] };
+    case "project-notes.history": return { versions: structuredClone(histories.get(input.itemId) ?? []), missing: false, missingCount: 0, itemRevision: board(input.projectId).items.find(item => item.id === input.itemId)?.revision ?? 1 };
     case "project-notes.dashboard": {
       dashboardCount++;
       if (scenario === "error") throw new Error("连接主机超时，请检查网络后重试。");
       if (scenario === "stale" && dashboardCount > 1) throw new Error("网络已断开");
       const revision = `rev-${revisionCounter}`;
-      if (input.revision === revision) return { unchanged: true, revision };
-      return { revision, projects, boards: [...boards.values()].map(snapshot) };
+      if (input.revision === revision && !input.refreshProjectIds?.length) return { unchanged: true, revision };
+      return { ...(input.revision ? { mode: "delta", baseRevision: input.revision } : { mode: "full" }), revision, projects, boards: [...boards.values()].map(snapshot) };
     }
     case "project-notes.write": {
       if (scenario === "write-error") throw new Error("这条记录已在另一台设备更新。你的草稿仍保留，请刷新记录后重新编辑。");
@@ -125,16 +128,32 @@ export async function call(method, input) {
       if (operation.type === "create") {
         itemId = crypto.randomUUID();
         target.items.unshift({ ...operation.fields, id: itemId, projectId: input.projectId, revision: 1, createdAt: now, updatedAt: now, deletedAt: null });
+      } else if (operation.type === "emptyTrash") {
+        if (target.revision !== operation.expectedRevision) throw new Error("回收站已在另一台设备更新，请刷新后重新确认。");
+        for (const item of target.items.filter(item => item.deletedAt)) histories.delete(item.id);
+        target.items = target.items.filter(item => !item.deletedAt); itemId = "";
       } else {
         itemId = operation.id;
         const index = target.items.findIndex(item => item.id === operation.id);
         if (index < 0) throw new Error("这条记录已不存在，请刷新。");
         const existing = target.items[index];
         if (existing.revision !== operation.expectedRevision) throw new Error("这条记录已在另一台设备更新。你的草稿仍保留，请刷新记录后重新编辑。");
-        if (operation.type !== "restore" && existing.deletedAt) throw new Error("这条记录已在回收站，请先恢复。");
+        if (operation.type !== "restore" && operation.type !== "purge" && existing.deletedAt) throw new Error("这条记录已在回收站，请先恢复。");
         if (operation.type === "restore" && !existing.deletedAt) throw new Error("这条记录已经恢复，请刷新。");
-        const changes = operation.type === "update" ? operation.fields : { deletedAt: operation.type === "delete" ? now : null };
-        target.items[index] = { ...existing, ...changes, revision: existing.revision + 1, updatedAt: now };
+        if (operation.type === "purge") {
+          if (!existing.deletedAt) throw new Error("请先把这条记录移入回收站。");
+          target.items.splice(index, 1); histories.delete(existing.id);
+        } else {
+          const history = histories.get(existing.id) ?? [];
+          const restored = operation.type === "restoreVersion" ? history.find(version => version.revision === operation.revision) : null;
+          if (operation.type === "restoreVersion" && !restored) throw new Error("这个修改快照已不存在，请刷新。");
+          const changes = operation.type === "update" ? operation.fields : operation.type === "repairHistory" ? {} : restored ? { kind: restored.kind, title: restored.title, body: restored.body, status: restored.status, priority: restored.priority, pinned: restored.pinned } : { deletedAt: operation.type === "delete" ? now : null };
+          if (["title", "body", "kind"].some(key => key in changes && changes[key] !== existing[key])) {
+            history.push({ kind: existing.kind, title: existing.title, body: existing.body, status: existing.status, priority: existing.priority, pinned: existing.pinned, revision: existing.revision, updatedAt: existing.updatedAt, deletedAt: existing.deletedAt });
+            histories.set(existing.id, history.slice(-10));
+          }
+          target.items[index] = { ...existing, ...changes, historyCount: histories.get(existing.id)?.length ?? 0, revision: existing.revision + 1, updatedAt: now };
+        }
       }
       target.revision++; revisionCounter++;
       receipts.set(input.requestId, { hash, itemId });

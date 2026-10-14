@@ -64,6 +64,8 @@ export const densitySchema = z.enum(["compact", "standard"]);
 export type Density = z.output<typeof densitySchema>;
 export const DEFAULT_DENSITY: Density = "compact";
 export const DEFAULT_FOLD = true;
+/** 0.6.0: 「钉住本轮提问」 (shared/prompt-pin.ts). */
+export const DEFAULT_PIN_PROMPT = true;
 
 export const activitySettings = defineSettings({
   id: "display",
@@ -76,6 +78,8 @@ export const activitySettings = defineSettings({
     // 本地补丁：「完成后折叠连续的思考与工具行」。旧设置没有这两项，读出来取默认值，所以版本号不变。
     fold: z.boolean().default(DEFAULT_FOLD),
     density: densitySchema.default(DEFAULT_DENSITY),
+    // 0.6.0：同上，旧设置没有这一项，读出来取默认值。
+    pinPrompt: z.boolean().default(DEFAULT_PIN_PROMPT),
   }),
 });
 

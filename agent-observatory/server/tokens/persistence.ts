@@ -2,22 +2,27 @@ import { randomUUID } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { z } from "zod";
-import { tokenCountsSchema } from "../../shared/tokens";
-import { bucketKey, emptyData, projectHourKey, RECORD_DEPTH, sessionHourKey, sessionKey, type TokenData } from "./data";
+import { MAX_TOKEN_ROOTS, TOKEN_SOURCES, tokenCountsSchema } from "../../shared/tokens";
+import { bucketKey, emptyData, MAX_THREADS, noteThread, projectHourKey, RECORD_DEPTH, sessionHourKey, sessionKey, type TokenData } from "./data";
 import type { TokenIngester } from "./ingester";
 import { dayOf, safeError } from "./types";
 import { ensurePrivateDirectory } from "../paseo-home";
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const time = z.number().finite().nonnegative(), count = z.number().int().nonnegative();
-const source = z.enum(["claude", "codex"]), id = z.string().min(1).max(256), cwd = z.string().max(4096);
+// 2.14 adds the grok and pi sources; an older version quarantines a ledger that has them and imports its logs again.
+const source = z.enum(TOKEN_SOURCES), id = z.string().min(1).max(256), cwd = z.string().max(4096);
 const model = z.string().max(240).nullable(), hash = z.string().regex(/^[a-f0-9]{16}$/);
 const callSchema = z.object({ key: hash, source, sessionId: id, cwd, at: time, start: time.nullable(), model,
-  input: count, cacheWrite: count, cacheRead: count, output: count, reasoning: count, subagent: z.boolean() });
+  input: count, cacheWrite: count, cacheRead: count, output: count, reasoning: count, subagent: z.boolean(),
+  // 2.14: model calls of a Grok turn record (absent: one).
+  calls: count.optional() });
 const candidate = z.object({ call: callSchema, forked: z.boolean(), accepted: z.boolean().optional() });
 const parser = z.object({ sessionId: id, cwd, model, inputAt: time.nullable(), lastTotal: z.string().max(512).nullable(),
   open: candidate.nullable(), openInputAt: time.nullable(), sessions: z.array(id).max(256), links: z.array(id).max(256), hasForks: z.boolean(),
-  metaSeen: z.boolean(), pendingRecord: z.boolean(), legacySessionId: id });
+  metaSeen: z.boolean(), pendingRecord: z.boolean(), legacySessionId: id,
+  // 2.13: a Codex rollout's own thread and the parent thread of a subagent rollout (null: not a subagent; absent: saved before 2.13).
+  threadId: id.optional(), parentThread: id.nullable().optional() });
 const fileSchema = z.object({ path: z.string().max(8192), root: count, source, parentSession: id.nullable(), dev: count, ino: count,
   size: count, mtime: time, offset: count, partialBytes: count, state: parser, imported: z.boolean() });
 const bounds = { settledFirstAt: time.optional(), settledLastAt: time.optional() };
@@ -26,7 +31,7 @@ const sessionHour = bucket.extend({ sessionId: id, cwd, firstAt: time, subagentC
 const projectHour = tokenCountsSchema.extend({ at: time, cwd, lastAt: time, ...bounds });
 const record = z.object({ key: hash, at: time, model, output: count, tps: time });
 const savedSchema = z.object({ version: z.literal(2), change: count, earliestAt: time.nullable(), latestAt: time.nullable(),
-  roots: z.array(z.object({ source, path: z.string().max(4096) })).max(8),
+  roots: z.array(z.object({ source, path: z.string().max(4096), provider: z.string().min(1).max(256).optional() })).max(MAX_TOKEN_ROOTS),
   hours: z.array(bucket).max(250_000), days: z.array(bucket).max(100_000),
   sessionDays: z.array(z.object({ day: time, sessionId: id, source, hours: z.array(sessionHour).max(24_000) })).max(460_000),
   projectDays: z.array(z.object({ day: time, cwd, hours: z.array(projectHour).max(24) })).max(460_000),
@@ -35,6 +40,8 @@ const savedSchema = z.object({ version: z.literal(2), change: count, earliestAt:
   recordHours: z.array(z.object({ at: time, speeds: z.record(z.string(), count), fastest: z.array(record).max(32), biggest: z.array(record).max(32),
     settledFastest: z.array(record).max(32).optional(), settledBiggest: z.array(record).max(32).optional() })).max(92 * 24),
   recent: z.array(callSchema).max(100_000), mutable: z.array(callSchema).max(100_000), seen: z.array(z.tuple([hash, time])).max(1_000_000), seenFloor: time.nullable().optional(), files: z.array(fileSchema).max(50_000),
+  /** Codex subagent thread → parent thread (2.13). */
+  threads: z.array(z.tuple([id, id])).max(MAX_THREADS).optional(),
 });
 type Saved = z.infer<typeof savedSchema>;
 
@@ -68,11 +75,14 @@ export class TokenPersistence {
     }
     for (const row of saved.recent) data.recent.set(row.key, row);
     for (const row of saved.mutable) data.mutable.set(row.key, row);
+    for (const [child, parent] of saved.threads ?? []) noteThread(data, child, parent);
     for (const [key, at] of saved.seen) ingester.seen.set(key, at);
     ingester.seenFloor = saved.seenFloor ?? null;
     // Roots found from the provider config in an earlier run are watched again at once, so their files keep their
     // read positions instead of being imported a second time when the config is read.
     ingester.addRoots(saved.roots, false);
+    // Roots this ledger never watched (a source added by an upgrade) are imported in full, past the dedupe window.
+    ingester.markNewRoots(saved.roots);
     for (const file of saved.files) {
       const oldRoot = saved.roots[file.root];
       const root = ingester.roots.findIndex(candidate => candidate.source === oldRoot?.source && resolve(candidate.path) === resolve(oldRoot.path));
@@ -97,10 +107,10 @@ export class TokenPersistence {
       const group = projectDays.get(key) ?? { day, cwd: row.cwd, hours: [] }; group.hours.push(row); projectDays.set(key, group);
     }
     return JSON.stringify({ version: 2, change, earliestAt: data.earliestAt, latestAt: data.latestAt,
-      roots: ingester.roots.map(({ source: rootSource, path }) => ({ source: rootSource, path })),
+      roots: ingester.roots.map(({ source: rootSource, path, provider }) => ({ source: rootSource, path, ...(provider ? { provider } : {}) })),
       hours: [...data.hours.values()], days: [...data.days.values()], sessionDays: [...sessionDays.values()], projectDays: [...projectDays.values()],
       sessions: [...data.sessions.values()], recordHours: [...data.recordHours.values()], recent: [...data.recent.values()], mutable: [...data.mutable.values()],
-      seen: [...ingester.seen], seenFloor: ingester.seenFloor, files: [...ingester.files.values()] });
+      seen: [...ingester.seen], seenFloor: ingester.seenFloor, files: [...ingester.files.values()], threads: [...data.threads] });
   }
   async write(payload: string, durable = false): Promise<boolean> {
     if (!this.readable) return false;

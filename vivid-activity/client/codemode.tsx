@@ -2,6 +2,7 @@ import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import React, { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ActivityStyles } from "./activity";
+import { aria } from "./kit";
 import { PaseoCodeBlock, Section } from "./paseo";
 import { parseCodeModeCatalog } from "../shared/codemode";
 import { compactText, formatUnknownValue } from "../shared/presentation";
@@ -71,6 +72,7 @@ export function CodeModeToolDetail({
           {hiddenCount > 0 || catalog.remaining ? (
             <Pressable
               accessibilityRole="button"
+              {...aria({ expanded: showAll })}
               onPress={() => setShowAll(!showAll)}
               style={styles.showMoreButton}
             >

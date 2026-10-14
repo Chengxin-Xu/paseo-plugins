@@ -25,7 +25,7 @@ export function statusColor(theme: PluginTheme, status: TaskStatus) { return ton
 /** Colored text for a status label; 待办 keeps the regular text color. */
 export function statusText(theme: PluginTheme, status: TaskStatus) { return status === "todo" ? theme.colors.foreground : toneColor(theme, STATUS_TONES[status]); }
 /** One-line preview of a body: whitespace and list markers collapse, so two lines show two lines of content. */
-export function excerpt(body: string) { return body.replace(/(^|\n)\s*(?:[-*•]|\d+[.)、])\s+/g, "$1").replace(/\s+/g, " ").trim(); }
+export function excerpt(body: string) { return body.slice(0, 2000).replace(/(^|\n)\s*(?:[-*•]|\d+[.)、])\s+/g, "$1").replace(/\s+/g, " ").trim().slice(0, 240); }
 export const itemKey = (item: Pick<BoardItem, "projectId" | "id">) => `${item.projectId}:${item.id}`;
 
 type Interaction = { pressed: boolean; hovered?: boolean };
@@ -45,7 +45,7 @@ export function PickerButton({ theme, icon, leading, label, onPress, disabled = 
   theme: PluginTheme; icon?: string; leading?: ReactNode; label: string; onPress: () => void; disabled?: boolean; accessibilityLabel?: string; trailingIcon?: string; block?: boolean; maxWidth?: DimensionValue; placeholder?: boolean; expanded?: boolean;
 }) {
   const { colors } = theme;
-  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled, ...(expanded === undefined ? {} : { expanded }) }} disabled={disabled} onPress={onPress} hitSlop={{ top: 8, bottom: 8 }}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} aria-disabled={disabled} aria-expanded={expanded} disabled={disabled} onPress={onPress} hitSlop={{ top: 8, bottom: 8 }}
     style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, minHeight: block ? 36 : control.md, paddingHorizontal: space.md - 2, borderRadius: radius.md, backgroundColor: colors.surface2, flexShrink: 1, minWidth: 0, ...(maxWidth !== undefined ? { maxWidth } : {}), ...(block ? { alignSelf: "stretch", borderWidth: 1, borderColor: colors.border } : {}), opacity: disabled ? 0.6 : hover(state).pressed ? 0.8 : 1 })}>
     {leading ?? (icon ? <Icon name={icon} size={16} color={colors.foregroundMuted} /> : null)}
     <Text numberOfLines={1} style={{ flexShrink: 1, ...(block ? { flex: 1 } : {}), color: placeholder ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.body }}>{label}</Text>
@@ -55,7 +55,7 @@ export function PickerButton({ theme, icon, leading, label, onPress, disabled = 
 
 /** The compact form of the primary "新建" button: same accent fill, icon only. */
 export function PrimaryIconButton({ theme, icon, label, onPress, disabled = false }: { theme: PluginTheme; icon: string; label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} aria-disabled={disabled} disabled={disabled} onPress={onPress} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
     style={state => ({ width: control.md, height: control.md, alignItems: "center", justifyContent: "center", borderRadius: radius.md, backgroundColor: theme.colors.accent, opacity: disabled ? 0.45 : hover(state).pressed ? 0.8 : 1 })}>
     <Icon name={icon} size={16} color={theme.colors.accentForeground} />
   </Pressable>;
@@ -96,7 +96,7 @@ export function ScopeMark({ theme, project, size = 18 }: { theme: PluginTheme; p
 
 /** Task status glyph that advances 待办 → 进行中 → 已完成 (→ 待办) on tap. */
 export function StatusToggle({ theme, item, onPress, disabled = false }: { theme: PluginTheme; item: BoardItem; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${item.title}：移到${STATUS_LABELS[NEXT_STATUS[item.status]]}`} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} hitSlop={10}
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${item.title}：移到${STATUS_LABELS[NEXT_STATUS[item.status]]}`} aria-disabled={disabled} disabled={disabled} onPress={onPress} hitSlop={10}
     style={state => ({ width: 20, height: 20, alignItems: "center", justifyContent: "center", borderRadius: radius.full, backgroundColor: hover(state).hovered && !disabled ? theme.colors.surface2 : "transparent", opacity: disabled ? 0.5 : hover(state).pressed ? 0.6 : 1 })}>
     <StatusGlyph theme={theme} status={item.status} />
   </Pressable>;
@@ -131,7 +131,7 @@ function PressableFrame({ theme, label, onPress, selected = false, selectedColor
   theme: PluginTheme; label: string; onPress: () => void; selected?: boolean; selectedColor?: string; base?: string; hovered: string; style?: StyleProp<ViewStyle>; children: ReactNode;
 }) {
   return <View style={[{ borderRadius: radius.md, overflow: "hidden" }, style]}>
-    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected }} onPress={onPress}
+    <Pressable accessibilityRole="button" accessibilityLabel={label} aria-selected={selected} onPress={onPress}
       style={state => ({ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: selected ? selectedColor ?? theme.colors.surface2 : hover(state).hovered || hover(state).pressed ? hovered : base })} />
     <View style={[touch.through, { flexDirection: "row", alignItems: "flex-start", gap: 10 }]}>{children}</View>
   </View>;
@@ -184,7 +184,7 @@ export function GroupHeader({ theme, title, count, leading, color, open, onToggl
     {count !== undefined ? <Text style={{ color: color ?? colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"], opacity: 0.8 }}>{count}</Text> : null}
   </View>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32, paddingHorizontal: space.md, paddingTop: space.sm }}>
-    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} accessibilityState={{ expanded: open }} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
+    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} aria-expanded={open} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
   </View>;
 }
 
@@ -195,7 +195,7 @@ export function StatusSegmented({ theme, value, onChange }: { theme: PluginTheme
     {STATUSES.map(status => {
       const selected = status === value, tinted = selected && status !== "todo";
       // aria-selected too: react-native-web 0.21 drops accessibilityState from the DOM.
-      return <Pressable key={status} accessibilityRole="tab" accessibilityLabel={STATUS_LABELS[status]} accessibilityState={{ selected }} aria-selected={selected} onPress={() => onChange(status)} hitSlop={{ top: 6, bottom: 6 }}
+      return <Pressable key={status} accessibilityRole="tab" accessibilityLabel={STATUS_LABELS[status]} aria-selected={selected} onPress={() => onChange(status)} hitSlop={{ top: 6, bottom: 6 }}
         style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, minHeight: control.md - 2 * space.xxs, paddingHorizontal: 10, borderRadius: radius.sm, borderWidth: selected ? hairline : 0,
           borderColor: tinted ? toneColor(theme, STATUS_TONES[status], "line") : colors.border, backgroundColor: tinted ? toneColor(theme, STATUS_TONES[status], "soft") : selected ? colors.surface0 : hover(state).hovered ? colors.surface1 : "transparent" })}>
         <StatusGlyph theme={theme} status={status} size={14} />

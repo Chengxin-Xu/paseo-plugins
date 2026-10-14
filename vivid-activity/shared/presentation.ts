@@ -10,6 +10,7 @@ import {
   parseCodeModeCatalog,
 } from "./codemode";
 import { exaToolIcon, exaToolKind, exaToolLabel, exaToolSummary } from "./exa";
+import { splitAtLine, trimSpacesBeforeLineBreaks, trimTrailingSlashes } from "./text-scan";
 import {
   githubToolIcon,
   githubToolKind,
@@ -272,7 +273,8 @@ export function fileIconForPath(filePath: string | undefined): string {
  */
 export function relativeToRoot(filePath: string, root: string | undefined): string {
   if (!filePath || !root) return filePath;
-  const normalizedRoot = root.replace(/\/+$/, "");
+  // 本地补丁（codex-vivid-F1）：线性去掉结尾斜杠（shared/text-scan.ts），`/\/+$/` 遇到一长串斜杠会平方级回溯。
+  const normalizedRoot = trimTrailingSlashes(root);
   if (!normalizedRoot) return filePath;
   if (normalizedRoot === "/") return filePath.startsWith("/") ? filePath.slice(1) || filePath : filePath;
   if (filePath === normalizedRoot) return filePath.split("/").pop() ?? filePath;
@@ -487,7 +489,13 @@ export function expansionTargetForToolCall(toolName: string, detailType: string)
   }
 }
 
-/** Whether a tool name refers to the ask-user-question tool, in any namespace. */
+/**
+ * Ask-the-user tools by name. 0.6.0 (opus-F54): upstream knew only `ask` (OMP); Claude's AskUserQuestion, Codex's
+ * request_user_input (and its async form), Pi's ask_user / ask_user_question and OpenCode's question are 「提问」 too.
+ */
+const ASK_TOOLS: ReadonlySet<string> = new Set(["ask", "askuserquestion", "ask_user_question", "ask_user", "request_user_input", "request_user_input_async", "question"]);
+
+/** Whether a tool name refers to an ask-the-user tool, in any namespace. */
 export function isAskTool(toolName: string): boolean {
   const normalized = toolName
     .trim()
@@ -495,7 +503,70 @@ export function isAskTool(toolName: string): boolean {
     .replace(/^(?:functions|tools)\./, "")
     .replace(/^mcp__.*?__/, "")
     .replace(/^mcp_/, "");
-  return normalized === "ask";
+  return ASK_TOOLS.has(normalized);
+}
+
+export interface AskQuestion {
+  header?: string;
+  question: string;
+  options: string[];
+  multiSelect: boolean;
+}
+export interface AskContent {
+  questions: AskQuestion[];
+  /** What was answered; `question` is null when the answer does not say which question it is for. */
+  answers: Array<{ question: string | null; answer: string }>;
+}
+
+function askQuestionOf(value: unknown): AskQuestion | null {
+  if (!isRecord(value)) return null;
+  const question = stringField(value, "question");
+  if (!question) return null;
+  const options = Array.isArray(value.options)
+    ? value.options.map((option) => (typeof option === "string" ? option : stringField(option, "label") ?? "")).filter(Boolean)
+    : [];
+  const header = stringField(value, "header");
+  return { ...(header ? { header } : {}), question, options, multiSelect: value.multiSelect === true };
+}
+
+/**
+ * 0.6.0: what an ask tool asked and what was answered. Claude's AskUserQuestion has `input.questions` and answers in its
+ * result (`"问题"="回答"`); Codex's request_user_input is plain text (`标题: 问题`, `Options: …`, then `Answers:` lines).
+ */
+export function askContent(detail: ToolCallDetail): AskContent {
+  if (detail.type === "unknown") {
+    const input = decodeToolInput(detail.input);
+    const questions = Array.isArray(input?.questions) ? input.questions.map(askQuestionOf).filter((entry): entry is AskQuestion => entry !== null) : [];
+    const output = unwrapProviderOutput(detail.output);
+    const answers: AskContent["answers"] = [];
+    if (typeof output === "string") {
+      for (const match of output.slice(0, MAX_FORMAT_CHARS).matchAll(/"([^"\n]{1,500})"="([^"\n]{0,2000})"/g)) answers.push({ question: match[1]!, answer: match[2]! });
+    }
+    return { questions, answers };
+  }
+  if (detail.type === "plain_text" && detail.text) {
+    // 本地补丁（codex-vivid-F1）：按单独一行的 `Answers:` 线性切开（shared/text-scan.ts），原正则遇到一长串空行会平方级回溯。
+    const [asked = "", answered = ""] = splitAtLine(detail.text.slice(0, MAX_FORMAT_CHARS), "Answers:");
+    const questions: AskQuestion[] = [];
+    for (const block of asked.split(/\n\s*\n/)) {
+      const [first = "", ...rest] = block.split("\n").map((line) => line.trim()).filter(Boolean);
+      if (!first) continue;
+      // 本地补丁（codex-vivid-F1）：冒号后的文字以非空白开头（或只剩最后一个空白字符），`\s*(.+)$` 遇到行里的 \r 会平方级回溯；结果不变。
+      const split = /^([^:：]{1,80})[:：]\s*(\S.*|[^\S\n\r\u2028\u2029])$/.exec(first);
+      const options = rest.find((line) => /^Options:/i.test(line))?.replace(/^Options:\s*/i, "").split(/,\s*/).filter(Boolean) ?? [];
+      questions.push({ ...(split ? { header: split[1]! } : {}), question: split ? split[2]! : first, options, multiSelect: false });
+    }
+    const answers = answered
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const pair = /^([^:]{1,80}):\s*(\S.*|)$/.exec(line);
+        return pair ? { question: pair[1]!, answer: pair[2]! } : { question: null, answer: line };
+      });
+    return { questions, answers };
+  }
+  return { questions: [], answers: [] };
 }
 
 export function paseoToolLeafName(toolName: string): string | null {
@@ -670,9 +741,13 @@ function opencodeSubagentTextFromValue(value: unknown, depth = 0): string | unde
 }
 
 function parseSubagentEnvelopeTag(text: string): OpencodeSubagentOutput | undefined {
-  const openMatch = text.match(/<subagent\s+([^>]*?)>/i);
-  if (!openMatch?.[1]) return undefined;
-  const attrs = openMatch[1] ?? "";
+  // 本地补丁（codex-vivid-F1）：`<subagent\s+([^>]*?)>` 的空白和懒惰匹配都吃空格，没有 `>` 时每个切分点都重扫到结尾（平方级）。
+  // 先找第一个 `<subagent` 加空白，再找其后第一个 `>`：它后面没有 `>`，后面的 `<subagent` 也不会有，结果不变。
+  const open = /<subagent\s+/i.exec(text);
+  const attrsStart = open ? open.index + open[0].length : -1;
+  const close = open ? text.indexOf(">", attrsStart) : -1;
+  if (close < 0 || close === attrsStart) return undefined;
+  const attrs = text.slice(attrsStart, close);
   const attr = (name: string): string | undefined => {
     const match = attrs.match(new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, "i"));
     return match?.[1]?.trim() || undefined;
@@ -680,7 +755,7 @@ function parseSubagentEnvelopeTag(text: string): OpencodeSubagentOutput | undefi
   const sessionID = attr("sessionID") ?? attr("sessionId") ?? attr("session_id");
   const status = attr("state") ?? attr("status");
   const description = attr("description");
-  const afterOpen = text.slice((openMatch.index ?? 0) + openMatch[0].length);
+  const afterOpen = text.slice(close + 1);
   const closeIndex = afterOpen.search(/<\/subagent\s*>/i);
   const body = (closeIndex >= 0 ? afterOpen.slice(0, closeIndex) : afterOpen).trim();
   return {
@@ -691,6 +766,21 @@ function parseSubagentEnvelopeTag(text: string): OpencodeSubagentOutput | undefi
   };
 }
 
+/**
+ * 本地补丁（codex-vivid-F1）：`working in the background (sessionID: …)` 里的会话 ID（去掉首尾空白），没有时 undefined。原来的
+ * `\s*([^)]+)\)` 两段都吃空格，后面没有 `)` 时平方级回溯；现在逐个找这句话，取到其后第一个 `)` 为止，括号里至少一个字符，
+ * 与原正则抓到的相同。
+ */
+function backgroundSessionOf(text: string): string | undefined {
+  const lead = /working in the background\s*\(sessionID:/gi;
+  for (let match = lead.exec(text); match; match = lead.exec(text)) {
+    const close = text.indexOf(")", lead.lastIndex);
+    if (close < 0) return undefined;
+    if (close > lead.lastIndex) return text.slice(lead.lastIndex, close).trim();
+  }
+  return undefined;
+}
+
 /** Parse the opencode `subagent` tool output (envelope tag, object, or plain text). */
 export function parseOpencodeSubagentOutput(output: unknown): OpencodeSubagentOutput | undefined {
   if (typeof output === "string") {
@@ -698,10 +788,10 @@ export function parseOpencodeSubagentOutput(output: unknown): OpencodeSubagentOu
     if (!trimmed) return undefined;
     const envelope = parseSubagentEnvelopeTag(trimmed);
     if (envelope && (envelope.sessionID || envelope.status || envelope.text)) return envelope;
-    const backgroundMatch = trimmed.match(/working in the background\s*\(sessionID:\s*([^)]+)\)/i);
-    if (backgroundMatch?.[1]) {
+    const backgroundSession = backgroundSessionOf(trimmed);
+    if (backgroundSession !== undefined) {
       return {
-        sessionID: backgroundMatch[1].trim(),
+        sessionID: backgroundSession,
         status: "running",
         text: trimmed,
         isBackgroundNotice: true,
@@ -1484,6 +1574,168 @@ export function previewText(
   };
 }
 
+/*
+ * 0.5.0：终端输出里的 ANSI 转义序列。命令输出、日志、终端截取常带颜色、光标移动、窗口标题和超链接（OSC 8），
+ * 原样显示就是 `[0m`、`[2K`、`]8;;https://…` 这类乱码，手机上尤其难看。思路借鉴 Tidy Timeline（github.com/jegork/paseo-tidy-timeline，
+ * MIT）`shared/detect.ts` 的 stripAnsi，这里是自己的实现：一遍线性扫描、没有正则回溯，另外处理被截断的半个序列和单字节（C1）写法。
+ * - CSI：`ESC [`（或 U+009B）+ 参数字节 0x30–0x3F + 中间字节 0x20–0x2F + 结束字节 0x40–0x7E：颜色、光标、清行清屏；
+ * - OSC：`ESC ]`（或 U+009D）… 以 BEL 或 ST（`ESC \`、U+009C）结尾：窗口标题、超链接；DCS／SOS／PM／APC 同样以 ST 结尾；
+ * - 其余 ESC 序列：`ESC ( B` 这类带中间字节的，`ESC 7`、`ESC =`、`ESC c` 这类两个字符的。
+ * 不完整的序列只丢掉序列本身：CSI 被截在文本末尾就丢到末尾；中途出现非法字节，丢掉引导符和已读的参数，这个字节照常保留；
+ * 没有结尾的 OSC 等字符串序列丢到行尾（换行保留）或下一个 ESC 为止，一个坏序列不会吞掉后面几行。
+ * 原文不改：调用方另留一份，「复制原文」用它。
+ */
+const ESC = 0x1b;
+const BEL = 0x07;
+const C1_CSI = 0x9b;
+const C1_ST = 0x9c;
+
+/** Characters that open an escape sequence: ESC and the C1 forms of CSI, OSC, DCS, SOS, PM and APC. */
+function opensEscape(code: number): boolean {
+  return code === ESC || code === C1_CSI || code === 0x9d || code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f;
+}
+
+function firstEscape(text: string): number {
+  for (let index = 0; index < text.length; index++) if (opensEscape(text.charCodeAt(index))) return index;
+  return -1;
+}
+
+/** Whether the text holds anything that starts a terminal escape sequence. */
+export function hasAnsi(text: string): boolean {
+  return firstEscape(text) >= 0;
+}
+
+/**
+ * Where the escape sequence that starts at `at` ends (exclusive). Negative when it is a complete colour sequence
+ * `ESC [ <digits and ;> m`, the only kind the "ansi" highlighter (client/highlight.ts) reads: then its end is `-end`.
+ */
+function escapeEnd(text: string, at: number): number {
+  const length = text.length;
+  const code = text.charCodeAt(at);
+  let index = at + 1;
+  let csi = code === C1_CSI;
+  if (code === ESC) {
+    if (index >= length) return length;
+    const next = text.charCodeAt(index);
+    if (next === 0x5b) {
+      csi = true;
+      index += 1;
+    } else if (next === 0x5d || next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) {
+      index += 1; // ] P X ^ _: a string sequence, read below.
+    } else if (next >= 0x20 && next <= 0x2f) {
+      // ESC + intermediate bytes + one final byte, e.g. ESC ( B.
+      index += 1;
+      while (index < length && text.charCodeAt(index) >= 0x20 && text.charCodeAt(index) <= 0x2f) index += 1;
+      if (index < length && text.charCodeAt(index) >= 0x30 && text.charCodeAt(index) <= 0x7e) index += 1;
+      return index;
+    } else if (next >= 0x30 && next <= 0x7e) {
+      return index + 1; // Two characters, e.g. ESC 7, ESC =, ESC c.
+    } else {
+      return index; // A lone ESC: drop it, keep what follows.
+    }
+  }
+  if (csi) {
+    let colour = code === ESC;
+    while (index < length) {
+      const byte = text.charCodeAt(index);
+      if (byte < 0x30 || byte > 0x3f) break;
+      if (byte !== 0x3b && (byte < 0x30 || byte > 0x39)) colour = false;
+      index += 1;
+    }
+    while (index < length) {
+      const byte = text.charCodeAt(index);
+      if (byte < 0x20 || byte > 0x2f) break;
+      colour = false;
+      index += 1;
+    }
+    if (index >= length) return length; // Cut off at the end of the text.
+    const final = text.charCodeAt(index);
+    if (final >= 0x40 && final <= 0x7e) return colour && final === 0x6d ? -(index + 1) : index + 1;
+    return index; // Broken sequence: the byte that broke it is ordinary text.
+  }
+  // OSC, DCS, SOS, PM, APC: up to BEL or ST.
+  while (index < length) {
+    const byte = text.charCodeAt(index);
+    if (byte === BEL || byte === C1_ST) return index + 1;
+    if (byte === ESC) return index + 1 < length && text.charCodeAt(index + 1) === 0x5c ? index + 2 : index;
+    if (byte === 0x0a || byte === 0x0d) return index;
+    index += 1;
+  }
+  return length;
+}
+
+/**
+ * One pass over `text`: drops every escape sequence, or with `keepColour` keeps complete colour sequences. Stops once
+ * `limit` visible characters (UTF-16 units of the text without sequences) are out, leaving later sequences out too.
+ */
+function scanAnsi(text: string, keepColour: boolean, limit: number): string {
+  const first = firstEscape(text);
+  if (first < 0) return text.length <= limit ? text : text.slice(0, limit);
+  const parts: string[] = [];
+  let shown = 0;
+  let start = 0;
+  let index = first;
+  while (index < text.length) {
+    if (!opensEscape(text.charCodeAt(index))) {
+      index += 1;
+      continue;
+    }
+    if (index > start) {
+      const run = index - start;
+      if (shown + run >= limit) {
+        parts.push(text.slice(start, start + (limit - shown)));
+        return parts.join("");
+      }
+      parts.push(text.slice(start, index));
+      shown += run;
+    }
+    const end = escapeEnd(text, index);
+    if (end < 0) {
+      if (keepColour) parts.push(text.slice(index, -end));
+      index = -end;
+    } else {
+      index = end;
+    }
+    start = index;
+  }
+  if (start < text.length) parts.push(text.slice(start, start + Math.max(0, limit - shown)));
+  return parts.join("");
+}
+
+/** The text without terminal escape sequences (CSI, OSC and the rest). Text without any comes back as the same string. */
+export function stripAnsi(text: string): string {
+  return scanAnsi(text, false, Infinity);
+}
+
+/**
+ * The first `visible` characters of `stripAnsi(raw)` with the colour sequences before them kept: what the "ansi"
+ * highlighter colours. Only reads as far into `raw` as it needs.
+ */
+export function ansiColourPrefix(raw: string, visible: number): string {
+  return scanAnsi(raw, true, Math.max(0, visible));
+}
+
+export interface OutputView {
+  /** Preview of the cleaned text (its counts are of the cleaned text too). */
+  preview: TextPreview;
+  /** What the box shows: the preview, or all of the cleaned text. */
+  shown: string;
+  /** What goes to the highlighter: `shown`, or for "ansi" the same characters with their colour sequences. */
+  highlight: string;
+}
+
+/**
+ * 0.5.0：输出框显示什么。预览和「展开全部」都从整份原文清理后的文本里取（不是把截断的预览再清理一遍），
+ * 计数也按清理后的文本；`colours` 时把颜色序列留给 ansi 高亮，显示出来的字符不变。`clean` 是 `stripAnsi(raw)`。
+ */
+export function outputView(raw: string, clean: string, showAll: boolean, colours: boolean, trimFinalNewline = true): OutputView {
+  const full = trimFinalNewline ? clean.replace(/\r?\n$/, "") : clean;
+  const preview = previewText(full);
+  const shown = showAll ? full : preview.text;
+  const highlight = colours && clean !== raw ? ansiColourPrefix(raw, shown.length) : shown;
+  return { preview, shown, highlight };
+}
+
 function looksLikeJson(source: string): boolean {
   return /^\s*[[{"]/.test(source.slice(0, 256));
 }
@@ -2126,8 +2378,9 @@ export function stripLeadingCwdCd(command: string, cwd?: string | null): string 
     return command;
   }
   const rawTarget = match[1] ?? match[2] ?? match[3] ?? "";
-  const normalizedTarget = rawTarget.replace(/\\/g, "/").replace(/\/+$/, "");
-  const normalizedCwd = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  // 本地补丁（codex-vivid-F1）：线性去掉结尾斜杠（shared/text-scan.ts）。
+  const normalizedTarget = trimTrailingSlashes(rawTarget.replace(/\\/g, "/"));
+  const normalizedCwd = trimTrailingSlashes(cwd.replace(/\\/g, "/"));
   if (!normalizedTarget || normalizedTarget !== normalizedCwd) {
     return command;
   }
@@ -2261,6 +2514,13 @@ export function resolveToolCallPresentation(
       ...(skillName ? { summary: skillName } : {}),
     };
   }
+  // 0.6.0 (opus-F54): every ask-the-user tool is 「提问」 (amber, question mark), whatever detail its provider gives it:
+  // Claude's AskUserQuestion is unknown, Codex's request_user_input plain text. The summary is the first question.
+  if (isAskTool(item.name) && (detail.type === "unknown" || detail.type === "plain_text")) {
+    const first = askContent(detail).questions[0]?.question ?? (detail.type === "plain_text" && detail.text ? detail.text : undefined);
+    const summary = first ? compactText(first) : undefined;
+    return { category: "communication", icon: "MessageCircleQuestionMark", label: "Ask Question", ...(summary ? { summary } : {}) };
+  }
   const filePath = detailFilePath(detail);
   const commonFileFields = filePath
     ? {
@@ -2350,7 +2610,8 @@ export function resolveToolCallPresentation(
         category: "communication",
         icon: iconNameFromProtocol(detail.icon) ?? "Wrench",
         label: detail.label || prettyToolName(item.name),
-        summary: detail.text ? compactText(detail.text) : undefined,
+        // 0.5.0: plain-text results can be terminal output; the one-line summary shows them without escape sequences.
+        summary: detail.text ? compactText(stripAnsi(detail.text)) : undefined,
       };
     case "plan":
       return {
@@ -2518,7 +2779,8 @@ export function resolveSubAgentActionPresentation(
 export function parseSubAgentActionLog(log: string): readonly SubAgentAction[] {
   const actions: SubAgentAction[] = [];
   for (const line of log.split(/\r?\n/)) {
-    const match = line.trim().match(/^\[([^\]]+)\]\s*(.*)$/);
+    // 本地补丁（codex-vivid-F1）：`]` 后的文字以非空白开头或为空，`\s*(.*)$` 遇到行里的 \r、U+2028 会平方级回溯；结果不变。
+    const match = line.trim().match(/^\[([^\]]+)\]\s*(\S.*|)$/);
     if (!match?.[1]) continue;
     const toolName = match[1].trim();
     if (!toolName) continue;
@@ -2974,7 +3236,8 @@ export function toolCallHasBody(
  * 上游把所有空白压成一个空格。
  */
 function errorText(value: string, maxLength = 1200): string | undefined {
-  const normalized = value.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  // codex-vivid-F1：行尾空白线性去掉（shared/text-scan.ts），`[ \t]+\n` 遇到不换行的长空白会平方级回溯。
+  const normalized = trimSpacesBeforeLineBreaks(value.replace(/\r\n?/g, "\n")).replace(/\n{3,}/g, "\n\n").trim();
   if (!normalized) return undefined;
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }

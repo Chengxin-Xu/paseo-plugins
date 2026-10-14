@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { contrast, luminance } from "../shared/color.ts";
-import { THEMES } from "../shared/palette.ts";
+import { THEMES, evaluateThemeContrast, resolveHostSurfaces } from "../shared/palette.ts";
 
 const HEX = /^#[0-9A-F]{6}$/;
 
@@ -10,11 +10,24 @@ const HEX = /^#[0-9A-F]{6}$/;
 test("registers the whole family under its saved ids", () => {
   assert.deepEqual(
     THEMES.map((theme) => theme.id),
-    ["claude-code-dark", "claude-code-light", "cocoa-night", "blueberry-night", "sakura-latte", "matcha-latte"],
+    [
+      "claude-code-dark",
+      "claude-code-light",
+      "cocoa-night",
+      "blueberry-night",
+      "sakura-latte",
+      "matcha-latte",
+      "harbor-night",
+      "glacier-latte",
+      "velvet-night",
+      "orchid-latte",
+      "lagoon-night",
+      "lagoon-latte",
+    ],
   );
   assert.equal(new Set(THEMES.map((theme) => theme.id)).size, THEMES.length);
-  assert.equal(THEMES.filter((theme) => theme.appearance === "dark").length, 3);
-  assert.equal(THEMES.filter((theme) => theme.appearance === "light").length, 3);
+  assert.equal(THEMES.filter((theme) => theme.appearance === "dark").length, 6);
+  assert.equal(THEMES.filter((theme) => theme.appearance === "light").length, 6);
 });
 
 // The palettes are generated, so this is the guard that the recipe still lands on the values
@@ -24,11 +37,15 @@ test("the recipe still reproduces the CLI's dark palette", () => {
   assert.deepEqual(dark, {
     background: "#1A1A1A",
     raised: "#262626", // composerSidebarBackground
-    control: "#373737", // userMessageBackground
-    border: "#505050", // subtle
+    control: "#373737", // surface2 (inputs, dark popover, dark selected sidebar)
+    border: "#505050", // subtle / surface3 (user message bubble)
     foreground: "#FFFFFF", // text
-    mutedForeground: "#999999", // inactive
-    ring: "#888888", // promptBorder
+    // The CLI's inactive is #999999, but Paseo's status badges put muted 12px text on surface3 (#505050), where it is
+    // only ~2.8:1. It is lifted until it clears the 4.1:1 chrome floor there, about what Paseo's own dark theme gives.
+    mutedForeground: "#B9B9B9", // inactive (lifted)
+    // The CLI's promptBorder is #888888, but Paseo paints `ring` as timestamp / header text on the dark workspace
+    // (`raised`), where #888888 is only ~4.3:1. It is lifted the least amount that clears 4.5:1 there.
+    ring: "#8C8C8C", // promptBorder (lifted) / foregroundExtraMuted / terminal.brightBlack
     accent: "#D77757", // claude
   });
 
@@ -40,7 +57,20 @@ test("the recipe still reproduces the CLI's dark palette", () => {
 test("display names stay clear of the Claude and Anthropic names", () => {
   assert.deepEqual(
     THEMES.map((theme) => theme.name),
-    ["🌑 Charcoal Night", "☁️ Oat Latte", "🍫 Cocoa Night", "🫐 Blueberry Night", "🌸 Sakura Latte", "🍵 Matcha Latte"],
+    [
+      "🌑 Charcoal Night",
+      "☁️ Oat Latte",
+      "🍫 Cocoa Night",
+      "🫐 Blueberry Night",
+      "🌸 Sakura Latte",
+      "🍵 Matcha Latte",
+      "⚓ Harbor Night",
+      "🧊 Glacier Latte",
+      "🔮 Velvet Night",
+      "🌺 Orchid Latte",
+      "🐬 Lagoon Night",
+      "🌊 Lagoon Latte",
+    ],
   );
   for (const { name } of THEMES) assert.doesNotMatch(name, /claude|anthropic/i);
 });
@@ -61,12 +91,48 @@ for (const theme of THEMES) {
     }
   });
 
-  // Accent and muted text land on cards as often as on the page, so both surfaces must clear AA.
-  test(`${name} keeps text legible on its own surfaces`, () => {
-    assert.ok(contrast(colors.foreground, colors.background) >= 7, "body text below 7:1");
-    for (const surface of [colors.background, colors.raised]) {
-      assert.ok(contrast(colors.mutedForeground, surface) >= 4.5, `muted text below 4.5:1 on ${surface}`);
-      assert.ok(contrast(colors.accent!, surface) >= 4.5, `accent below 4.5:1 on ${surface}`);
+  // Models Paseo 0.11.1's real surface expansion (`buildLightSemanticColors` / `buildDarkSemanticColors`): every text
+  // token on every surface the host paints it on.
+  //   - workspace (page in light themes, `raised` in dark ones): foreground ≥ 7, muted / ring / accent ≥ 4.5;
+  //   - sidebar, popovers, inputs: foreground ≥ 7, muted ≥ 4.1, ring ≥ 3.3, accent ≥ 3.7;
+  //   - selected sidebar row (`border` in light themes, `control` in dark ones): foreground ≥ 7, muted ≥ 4.1,
+  //     ring ≥ 3.3, accent ≥ 3.5;
+  //   - status badges (muted 12px text on surface3 = `border`): muted ≥ 4.1;
+  //   - user bubble: foreground ≥ 7; terminal: foreground ≥ 7, ring (brightBlack) ≥ 4.5;
+  //   - `accentForeground` (`background`) on the accent primary button ≥ 4.5.
+  // Below the workspace, muted and ring floors are deliberate compromises under the 4.5:1 that WCAG AA asks of small
+  // text: at 4.5:1 the extra-muted timestamps would match muted text and the hierarchy would flatten.
+  test(`${name} clears the Paseo 0.11 host surface contrast matrix`, () => {
+    const host = resolveHostSurfaces(theme);
+    assert.equal(host.surfaceSidebar, appearance === "light" ? colors.control : colors.background);
+    assert.equal(host.surfaceWorkspace, appearance === "light" ? colors.background : colors.raised);
+    assert.equal(host.userBubble, colors.border);
+    assert.equal(host.foregroundExtraMuted, colors.ring);
+    assert.equal(host.surface4, colors.ring);
+    assert.equal(host.terminalBrightBlack, colors.ring);
+
+    const checks = evaluateThemeContrast(theme);
+    assert.equal(checks.length, 25);
+    for (const check of checks) {
+      assert.ok(
+        check.pass,
+        `${name} failed ${check.id} (${check.label}): ${check.ratio.toFixed(2)}:1 < ${check.minRatio}:1 (${check.foreground} on ${check.surface})`,
+      );
+    }
+
+    // Light themes keep `ring` (extraMuted / placeholder) slightly lighter than `mutedForeground`
+    // while still clearing ≥4.5:1 on `background` and ≥3.8:1 on `control`.
+    // The gaps the 10-12 reviews found: ring on the dark workspace, muted text on the light selected row and on the
+    // status badges (surface3) in every theme.
+    if (appearance === "dark") assert.ok(contrast(colors.ring, colors.raised) >= 4.5, `${name} dark ring on the workspace below 4.5:1`);
+    assert.ok(contrast(colors.mutedForeground, colors.border) >= 4.1, `${name} muted text on a status badge below 4.1:1`);
+    // Muted text stays visibly secondary to the main text.
+    assert.ok(contrast(colors.foreground, colors.mutedForeground) >= 1.7, `${name} muted text too close to the main text`);
+    if (appearance === "light") {
+      assert.ok(contrast(colors.ring, colors.background) >= 4.5, `${name} light ring on background below 4.5:1`);
+      assert.ok(contrast(colors.ring, colors.raised) >= 4.1, `${name} light ring on raised below 4.1:1`);
+      assert.ok(contrast(colors.ring, colors.control) >= 3.8, `${name} light ring on control below 3.8:1`);
+      assert.ok(luminance(colors.ring) > luminance(colors.mutedForeground), `${name} ring should stay softer than mutedForeground`);
     }
   });
 
@@ -92,7 +158,7 @@ test("the family reads consistently whatever the hue", () => {
   for (const appearance of ["dark", "light"] as const) {
     const family = THEMES.filter((theme) => theme.appearance === appearance);
     const ratios = family.map(({ colors }) => contrast(colors.mutedForeground, colors.background));
-    const spread = Math.max(...ratios) - Math.min(...ratios);
-    assert.ok(spread < 0.25, `${appearance} muted contrast varies by ${spread.toFixed(2)} across the family`);
+    const spread = (Math.max(...ratios) - Math.min(...ratios)) / (ratios.reduce((sum, ratio) => sum + ratio, 0) / ratios.length);
+    assert.ok(spread < 0.05, `${appearance} muted contrast varies by ${(spread * 100).toFixed(1)}% across the family`);
   }
 });

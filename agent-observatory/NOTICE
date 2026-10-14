@@ -5,10 +5,10 @@ Licensed under the MIT License (see LICENSE).
 Third-party code
 ----------------
 
-client/open-url.ts adapts the external link opener of the schedule-runs plugin in
-panrafal/paseo-plugins (https://github.com/panrafal/paseo-plugins). The scheduled
-runs page (定时运行) is a reimplementation modeled on the same plugin. That code is
-used under the following license:
+The scheduled runs page (定时运行) is a reimplementation modeled on the schedule-runs
+plugin in panrafal/paseo-plugins (https://github.com/panrafal/paseo-plugins). Versions
+up to 2.12 of client/open-url.ts adapted its external link opener; since 2.13 links open
+through the host's openExternalUrl. That code is used under the following license:
 
 MIT License
 

@@ -1,4 +1,4 @@
-import { agentAttentionPriority, buildAgentForest, completionReadState, isUnreadCompletion, matchesStatus, timestamp, type AgentRecord, type AgentStatus, type AgentTreeNode, type CompletionReadFilter } from "./model";
+import { agentAttentionPriority, buildAgentForest, completionReadState, isUnreadCompletion, matchesAgentStatus, stopShown, stopUnseen, timestamp, type AgentRecord, type AgentStatus, type AgentTreeNode, type CompletionReadFilter } from "./model";
 
 export interface DashboardRow {
   node: AgentTreeNode;
@@ -28,7 +28,7 @@ const activityTime = (agent: AgentRecord) => timestamp(agent.lastActivityAt) ?? 
 export function buildDashboardRows(agents: readonly AgentRecord[], options: DashboardRowOptions): { rows: DashboardRow[]; matchingCount: number } {
   const search = options.query.trim().toLocaleLowerCase();
   const filtered = !!search || options.status !== "all" || options.readFilter !== undefined && options.readFilter !== "all" || !!options.focus;
-  const matches = (agent: AgentRecord) => matchesStatus(agent.status, options.status) && (!options.focus || options.focus(agent))
+  const matches = (agent: AgentRecord) => matchesAgentStatus(agent, options.status) && (!options.focus || options.focus(agent))
     && (options.readFilter !== "unread" || isUnreadCompletion(agent)) && (options.readFilter !== "read" || completionReadState(agent) === "read")
     && (!search || [agent.title, agent.id, agent.cwd, agent.provider, agent.model, agent.projectId, agent.projectName, agent.projectRootPath, agent.workspaceName, agent.worktreeName, agent.worktreePath, agent.branch].filter(Boolean).join(" ").toLocaleLowerCase().includes(search));
   const compare = (a: AgentRecord, b: AgentRecord) => (options.sort === "attention" ? agentAttentionPriority(a) - agentAttentionPriority(b) : 0) || activityTime(b) - activityTime(a) || a.id.localeCompare(b.id);
@@ -73,12 +73,30 @@ export function buildDashboardRows(agents: readonly AgentRecord[], options: Dash
   return { rows, matchingCount };
 }
 
-/** Needs the user now: a pending approval, an error, or an unread result that is not snoozed. Archived sessions never do. */
-export function needsAttention(agent: AgentRecord, snoozed = false): boolean {
+export interface AttentionOptions {
+  /**
+   * Whether a subagent's finished turn (an Agent with a parent) counts: its parent has the result already. Off by default
+   * (the 「子 Agent 完成计入需要处理」 setting); a subagent's approval, error or stop always counts.
+   */
+  childCompletions?: boolean;
+}
+
+/**
+ * Needs the user now: a pending approval or question, an error or a stop (usage limit, empty or unfinished turn) not seen yet,
+ * an unread result that is not snoozed, or a question not opened yet. Archived sessions never do.
+ * Seen means native attention is cleared — opening the Agent in Paseo, or 知道了 / 标记已读 here — and for a turn the host
+ * closed mid-way, which raised no attention, 知道了 here (see `stopUnseen`).
+ */
+export function needsAttention(agent: AgentRecord, snoozed = false, options: AttentionOptions = {}): boolean {
   if (agent.archivedAt) return false;
+  if (agent.pendingPermissionCount > 0 || agent.status === "waiting") return true;
+  // A stop decides on its own, before the subagent setting (a child's parent may not have stopped) and never snoozed.
+  if (stopShown(agent)) return stopUnseen(agent);
+  if (agent.status === "error") return agent.requiresAttention !== false;
+  if (agent.parentAgentId && options.childCompletions !== true) return false;
   // A question the user has not opened yet is as urgent as an unread result; once read it stays 待回复 but leaves 需要处理.
   const unreadQuestion = agent.status === "idle" && agent.requiresAttention === true && agent.attentionReason === "finished";
-  return agent.pendingPermissionCount > 0 || agent.status === "waiting" || agent.status === "error" || (!snoozed && isUnreadCompletion(agent)) || unreadQuestion;
+  return !snoozed && (isUnreadCompletion(agent) || unreadQuestion);
 }
 
 export type DashboardGroup = "attention" | "running" | "recent";

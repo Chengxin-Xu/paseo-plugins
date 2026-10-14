@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DaemonClient } from '@getpaseo/client/internal/daemon-client';
 
-import { assertSeparateWorkspaces, baseUrl, browserLaunchOptions, daemonUrl, dataRoot, testChromium, testValue, testWorkspace } from './live-config.mjs';
+import { invokeBrowserRpc, assertSeparateWorkspaces, baseUrl, browserLaunchOptions, daemonUrl, dataRoot, testChromium, testValue, testWorkspace } from './live-config.mjs';
 
 const DEMO = testWorkspace({ aliases: ['BROWSER_UI_WORKSPACE', 'BROWSER_AGENT_WORKSPACE'] });
 const PROTECTED = testWorkspace({ linked: true, aliases: ['BROWSER_OVERVIEW_LINKED_WORKSPACE'] });
@@ -14,7 +14,7 @@ const chromium = testChromium();
 const output = path.resolve('artifacts/ux-v04');
 const report = { version:'0.4', startedAt:new Date().toISOString(), checks:[], layouts:[], screenshots:[], errors:[], protectedPage:{}, limits:['Mobile coverage uses Chromium touch Web contexts; physical iOS/Android soft-keyboard behavior is not measured.'] };
 const daemon = new DaemonClient({url:daemonUrl,clientId:'server-browser-ux-v04-acceptance',clientType:'cli'});
-const rpc = (method,input) => daemon.invokePluginRpc('server-browser',method,input);
+const rpc = (method,input) => invokeBrowserRpc(daemon,method,input);
 const pause = ms => new Promise(resolve=>setTimeout(resolve,ms));
 const selected = new WeakMap();
 let browser, oracle, beforeDemo, beforeProtected, demoTitle;

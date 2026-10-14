@@ -1,7 +1,10 @@
 import { fixtureStats } from "./stats-fixture";
+import { createFixtureLedger } from "./deferred-fixture";
+import { quickReplyGroup, quickReplyGuard, quickReplyKey } from "../client/deferred-state";
 import { fixtureTokenLive, fixtureTokens } from "./tokens-fixture";
 import { fixtureDigest } from "./digest-fixture";
-import { fixtureScheduleList, fixtureScheduleRun } from "./schedules-fixture";
+import { fixtureQuota } from "./quota-fixture";
+import { fixtureHeartbeatsResponse, fixtureScheduleList, fixtureScheduleRun } from "./schedules-fixture";
 import { fixtureModels, fixtureOverview, fixtureProfiles, fixtureReportJobs, fixtureRunners, fixtureSuggestions, fixtureSuggestionsState, richInsightScenarios, runnerLabelFor } from "./insights-overview-fixture";
 import { useEffect, useMemo, useState } from "react";
 import * as Lucide from "lucide-react";
@@ -9,15 +12,24 @@ import { createPortal } from "react-dom";
 import { ScrollView, FlatList, TextInput } from "react-native-web";
 import { defaultViewPreferences } from "../shared/preferences";
 import { normalizeTimelinePage, projectTimelineRows } from "../shared/timeline";
-import { fixtureAnalytics, fixtureArchiveOrigins, fixtureInsight, fixtureInsightState, fixtureProjectAnalytics, fixtureReadReceipts, fixtureTelemetry, fixtureTimeline, longFirstInput, longLatestReply, longFixtureTimeline, nativeChildren, nativeTimeline, rawAgents, subscribeFixtureAgents, updateFixtureAgent } from "./fixtures";
+import { fixtureAnalytics, fixtureArchiveOrigins, fixtureInsight, fixtureInsightState, fixtureProjectAnalytics, fixtureReadReceipts, fixtureTelemetry, fixtureTimeline, longFirstInput, longLatestReply, longFixtureTimeline, nativeChildren, nativeTimeline, rawAgents, subscribeFixtureAgents, updateFixtureAgent, applyAttentionScenario, fixtureLiveExtras, fixtureHeartbeats, ackFixtureStop } from "./fixtures";
 
 let insightSequence = 0;
+/** 恢复后续跑's ledger as the stand-in keeps it (server/resume.ts keeps the real one). */
+const previewResumes = [];
+let previewResumeSequence = 0;
+// The UI tests set one Agent's ledger state, as the server's checks leave it (未能确认续跑 after a restart, 心跳被改过).
+globalThis.__previewSetResume = entry => {
+  const now = new Date().toISOString();
+  previewResumes.splice(0, previewResumes.length, ...previewResumes.filter(item => item.agentId !== entry.agentId),
+    { scheduleId: `fixture-resume-${++previewResumeSequence}`, stopAt: null, plannedAt: now, wakeAt: now, attempt: 1, reason: null, createdAt: now, updatedAt: now, deliveredAt: null, ...entry });
+};
 let fixtureRevision = 0;
-const revisioned = new Set(["observatory.telemetry.get", "observatory.analytics.get", "observatory.read-state.list", "observatory.results.get", "observatory.stats.get", "observatory.tokens.get", "observatory.digest.get", "observatory.insights.overview"]);
-let preferencesRevision=0;const preferencePages=new Map();let preferenceSnoozes=[];
+const revisioned = new Set(["observatory.telemetry.get", "observatory.analytics.get", "observatory.read-state.list", "observatory.results.get", "observatory.stats.get", "observatory.tokens.get", "observatory.digest.get", "observatory.insights.overview", "observatory.quota.get"]);
+let preferencesRevision=0;const preferencePages=new Map();let preferenceSnoozes=[];let preferenceSettings={childCompletions:false};
 // ?storedQuery= simulates search text synced by an older version (the server now strips it; the client must ignore it too).
 const storedQuery=typeof location==="undefined"?null:new URLSearchParams(location.search).get("storedQuery");
-const preferenceSnapshot=(key)=>structuredClone({revision:preferencesRevision,view:preferencePages.get(key)?.view??{...defaultViewPreferences(key),...(storedQuery&&!key.endsWith("archives")?{query:storedQuery}:{})},savedViews:preferencePages.get(key)?.savedViews??[],snoozes:preferenceSnoozes.filter(s=>Date.parse(s.until)>Date.now()),error:null});
+const preferenceSnapshot=(key)=>structuredClone({revision:preferencesRevision,view:preferencePages.get(key)?.view??{...defaultViewPreferences(key),...(storedQuery&&!key.endsWith("archives")?{query:storedQuery}:{})},savedViews:preferencePages.get(key)?.savedViews??[],snoozes:preferenceSnoozes.filter(s=>Date.parse(s.until)>Date.now()),error:null,settings:{...preferenceSettings}});
 globalThis.__previewRpcCalls = [];
 globalThis.__previewAgentOperations = [];
 globalThis.__previewTimelineCalls = [];
@@ -27,6 +39,39 @@ globalThis.__previewGetAgent = id => structuredClone(rawAgents.find(agent => age
 globalThis.__previewTimelineActive = id => timelineListeners.get(id)?.size ?? 0;
 globalThis.__previewEmitTimeline = (id,event) => {for(const listener of timelineListeners.get(id)??[])listener({agentId:id,event});};
 const scenarioName=()=>new URLSearchParams(globalThis.location?.search??"").get("scenario");
+if(scenarioName()==="attention-states")applyAttentionScenario();
+/**
+ * ?scenario=approvals: in-place approvals (opus-B12) and quick replies (opus-B26) with the host's real request shapes. 审查数据库迁移
+ * (Claude) waits on a shell command with no provider actions and a question; 同步订单表结构 (an ACP provider) on an edit with the
+ * agent's own choices, one of them lasting. 规划下一轮迭代 asks whether to go on, 整理性能基线 ended on its next step.
+ */
+function applyApprovalScenario() {
+  const now = Date.now(), at = seconds => new Date(now - seconds * 1000).toISOString();
+  const review = rawAgents.find(agent => agent.id === "migration-review");
+  // Two more after them (codex-obs-send-ui-F1): a command too long to show collapsed, whose end 展开完整内容 brings back, and a Grep
+  // whose pattern is its target and whose path is a parameter of its own.
+  const tables = `npm run migrate:check -- --dry-run --tables ${Array.from({ length: 450 }, (_, index) => `orders_${String(index).padStart(3, "0")}`).join(",")} && echo 检查结束`;
+  review.pendingPermissions = [{ id: "permission-1", provider: "claude", kind: "tool", name: "Bash", title: "执行数据库迁移检查", description: "运行只读检查并核对迁移计划。",
+    input: { command: "npm run migrate:check -- --dry-run --env staging", description: "只读检查迁移计划" }, detail: { type: "shell", command: "npm run migrate:check -- --dry-run --env staging" } }, review.pendingPermissions[1],
+    { id: "permission-3", provider: "claude", kind: "tool", name: "Bash", title: "检查全部订单分表", input: { command: tables, description: "逐个分表只读检查" }, detail: { type: "shell", command: tables } },
+    { id: "permission-4", provider: "claude", kind: "tool", name: "Grep", title: "Grep", input: { pattern: "TODO", path: "db/migrations", output_mode: "content" }, detail: { type: "search", query: "TODO" } }];
+  const options = [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "allow_always", name: "Always Allow", kind: "allow_always" }, { optionId: "reject", name: "Reject", kind: "reject_once" }];
+  rawAgents.splice(5, 0, { ...structuredClone(review), id: "schema-sync", title: "同步订单表结构", provider: "my-acp", model: null, activeTurn: { turnId: "schema-turn", startedAt: at(150) }, updatedAt: at(9),
+    pendingPermissions: [{ id: "permission-acp-1", provider: "my-acp", kind: "tool", name: "edit", title: "Edit db/migrations/0042_orders.sql",
+      detail: { type: "edit", filePath: "/workspace/commerce-platform/db/migrations/0042_orders.sql", unifiedDiff: "@@ -1,3 +1,4 @@\n CREATE TABLE orders (\n+  tenant_id TEXT NOT NULL,\n   id TEXT PRIMARY KEY," },
+      actions: options.map(option => ({ id: option.optionId, label: option.name, behavior: option.kind.startsWith("allow") ? "allow" : "deny" })), metadata: { toolCallId: "acp-call-1", options } }] });
+  const telemetry = id => fixtureTelemetry.agents.find(record => record.agentId === id);
+  Object.assign(telemetry("iteration-plan"), { replyNudge: "go-ahead" });
+  const baseline = telemetry("performance-baseline");
+  Object.assign(baseline, { replyAt: baseline.turnEndedAt, replyNudge: "keep-going" });
+}
+// The quick replies of ?scenario=approvals, sent through a ledger whose host never tells the outcome (send-unknown) or whose answer is lost.
+if(["approvals","send-unknown","send-lost-reply"].includes(scenarioName()))applyApprovalScenario();
+// ?scenario=deferred: 重构支付服务 runs on a provider that cannot take a message mid-turn, so a send to it would interrupt the turn.
+// ?scenario=deferred-held: the same, and the host never tells whether a send arrived (a message queued once the turn ended is held).
+if(["deferred","deferred-held"].includes(scenarioName()))Object.assign(rawAgents.find(agent=>agent.id==="payment-root"),{provider:"my-acp",activeTurn:{turnId:"payment-turn",startedAt:rawAgents.find(agent=>agent.id==="payment-root").activeTurn.startedAt}});
+// The daemon's message receipts (message-receipts/index.js): a retry of a delivered id succeeds without a second copy, a changed retry is refused.
+const deliveredMessages=new Map();const flakyMessages=new Set();
 if(richInsightScenarios.has(scenarioName()))fixtureInsightState.jobs.push(...fixtureReportJobs());
 let createdSequence=0;
 
@@ -37,21 +82,94 @@ const sdk = {
     subscribe: subscribeFixtureAgents,
     ref: agentId => ({ refresh: async () => { const agent = rawAgents.find(agent => agent.id === agentId); return agent ? { agent: { ...agent }, project: null } : null; },
       archive: async () => {const agent=rawAgents.find(item=>item.id===agentId);if(!agent)throw new Error("模拟会话不存在");const archivedAt=new Date().toISOString();globalThis.__previewAgentOperations.push({type:"archive",agentId});const index=fixtureArchiveOrigins.findIndex(item=>item.agentId===agentId);if(index>=0)fixtureArchiveOrigins.splice(index,1);fixtureArchiveOrigins.push({agentId,archivedAt,lastUserMessageAt:agent.lastUserMessageAt??null});updateFixtureAgent(agentId,{archivedAt,updatedAt:archivedAt,status:"closed",requiresAttention:false,attentionReason:null,attentionTimestamp:null});return {archivedAt};},
-      send: async input => { globalThis.__previewAgentOperations.push({ type: "send", agentId, input }); if (scenarioName() === "send-error") throw new Error("开发预览不允许发送新提示词"); }, timeline: {
+      send: async (input, options) => {
+        globalThis.__previewAgentOperations.push({ type: "send", agentId, input, ...(options ? { options } : {}) });
+        const scenario = scenarioName(), key = options?.messageId;
+        if (scenario === "send-error") throw new Error("开发预览不允许发送新提示词");
+        if (key) {
+          const fingerprint = JSON.stringify([agentId, input, options.activeTurnBehavior ?? "interrupt"]), previous = deliveredMessages.get(key);
+          if (previous) { if (previous !== fingerprint) throw new Error("agent_request_key_conflict"); return; }
+          // ?scenario=send-unknown: the daemon cannot tell whether it went out; ?scenario=send-flaky: the first try of each message is lost.
+          if (scenario === "send-unknown" || scenario === "deferred-held") throw new Error("agent_request_outcome_unknown");
+          if (scenario === "send-flaky" && !flakyMessages.has(key)) { flakyMessages.add(key); throw new Error("模拟网络中断，这次没有送达"); }
+          deliveredMessages.set(key, fingerprint);
+        }
+        // Like the host: every send clears the pending requests, and a message to a stopped Agent starts a turn.
+        const agent = rawAgents.find(item => item.id === agentId), now = new Date().toISOString();
+        if (agent) updateFixtureAgent(agentId, { pendingPermissions: [], updatedAt: now, ...(["running", "initializing"].includes(agent.status) ? {} : { status: "running", activeTurn: { turnId: `preview-${key ?? now}`, startedAt: now }, lastUserMessageAt: now }) });
+      },
+      // Fire and forget like the host (no receipt): the request disappears a moment later; 拒绝并中断 also ends the turn.
+      // ?scenario=permission-stuck: the host never drops it, so the panel has to say it is unconfirmed.
+      respondToPermission: async ({ requestId, response }) => {
+        globalThis.__previewAgentOperations.push({ type: "permission", agentId, requestId, response: structuredClone(response) });
+        if (scenarioName() === "permission-stuck" || !rawAgents.find(item => item.id === agentId)?.pendingPermissions.some(request => request.id === requestId)) return;
+        setTimeout(() => {
+          const agent = rawAgents.find(item => item.id === agentId);
+          if (!agent) return;
+          const interrupt = response?.behavior === "deny" && response.interrupt === true;
+          updateFixtureAgent(agentId, { pendingPermissions: agent.pendingPermissions.filter(request => request.id !== requestId), updatedAt: new Date().toISOString(), ...(interrupt ? { status: "idle", activeTurn: null } : {}) });
+        }, 400);
+      }, timeline: {
       refetch: async (input = {}) => {globalThis.__previewTimelineCalls.push({agentId,...input});return scenarioName()==="long-history" ? longFixtureTimeline(agentId,input) : fixtureTimeline(agentId,input.direction);},
       subscribe: listener => {const listeners=timelineListeners.get(agentId)??new Set();listeners.add(listener);timelineListeners.set(agentId,listeners);return Object.assign(()=>listeners.delete(listener),{ready:Promise.resolve()});},
     } }),
   },
 };
 sdk.config = { get: async () => ({ requestId: "fixture-config", config: { agentProfiles: fixtureProfiles } }) };
+// The plugin server's ledger for observatory.deferred.* (server/deferred-send.ts there), over the synthetic Agents: it sends with the
+// stand-in host's send above, so every delivery is in __previewAgentOperations. ?scenario=send-lost-reply: the first answer to each
+// send never reaches the card (an RPC timeout), though the ledger sent it.
+const instant = value => { const at = value ? Date.parse(value) : NaN; return Number.isFinite(at) ? at : null; };
+/**
+ * The server's check of a quick reply's turn (`answeringGuard`, server/send-ledger.ts there), over the fixture's telemetry: a
+ * round its record cannot vouch for (an error reported, no round of this Agent, or an older one) throws.
+ */
+const answeringGuard = (agentId, guard, agent) => {
+  const title = agent.title || "这个 Agent";
+  if (instant(agent.lastUserMessageAt) !== instant(guard.prompt) || agent.activeTurn || agent.status === "running") return `「${title}」已经开始新的一轮，这条快捷回复不再适用`;
+  if (agent.status !== "idle" && agent.status !== "closed") return `「${title}」的状态变了，这条快捷回复不再适用`;
+  const round = instant(guard.round);
+  if (round === null) return null;
+  if (fixtureTelemetry.persistenceError) throw new Error(`观测台的记录暂时有问题，核实不了「${title}」最近一轮`);
+  const seen = instant(fixtureTelemetry.agents.find(record => record.agentId === agentId)?.turnStartedAt);
+  if (seen === null || seen < round) throw new Error(`观测台读不到「${title}」最近一轮的记录`);
+  return seen > round ? `「${title}」之后又跑了一轮，这条快捷回复答的是之前那一轮，不再适用` : null;
+};
+const fixtureLedger = createFixtureLedger({ agent: id => { const agent = rawAgents.find(item => item.id === id); return agent ? { ...agent } : null; },
+  deliver: (agentId, text, options) => sdk.agents.ref(agentId).send(text, options), capabilities: { steerable: ["claude", "codex"], slashSteerable: ["claude"], bases: {} }, guard: answeringGuard });
+/** Another device taps the quick reply `text` for this Agent's latest turn, through the same ledger (codex-obs-attn-R3). */
+globalThis.__previewOtherDeviceReply = async (agentId, text) => {
+  const agent = rawAgents.find(item => item.id === agentId), round = fixtureTelemetry.agents.find(record => record.agentId === agentId)?.turnStartedAt ?? null;
+  const words = `${text}。`, prompt = agent?.lastUserMessageAt ?? null;
+  return fixtureLedger.send({ agentId, text: words, messageId: `other-device-${Date.now()}`, key: quickReplyKey(words, prompt, round), source: `快捷回复「${text}」`, what: "回复", consent: null,
+    group: quickReplyGroup(prompt, round), guard: quickReplyGuard(prompt, round) });
+};
+/** The plugin's store reports an error (`message`; null clears it): its record may be behind (codex-obs-attn-R3-remaining). */
+globalThis.__previewTelemetryError = message => { fixtureTelemetry.persistenceError = message; };
+const lostReplies = new Set();
 sdk.workspaces = { ref: workspaceId => ({ agents: { create: async input => { globalThis.__previewAgentOperations.push({ type: "create", workspaceId, input }); return { id: `fixture-created-${++createdSequence}` }; } } }) };
 export function usePaseo() { return sdk; }
+/** Paseo 0.11.1's app-state hooks only work inside a workspace panel and throw anywhere else; the preview renders screens. */
+const outsidePanel = () => { throw new Error("Plugin state hooks must run inside a workspace panel"); };
+export function useWorkspace() { outsidePanel(); }
+export function useAgent() { outsidePanel(); }
+/** The host's link opener (Paseo 0.11 `openExternalUrl`): the preview records the URL instead of leaving the page. */
+export async function openExternalUrl(url) { globalThis.__previewExternal = url; }
 export function useRpc(contract) {
   return useMemo(() => async input => {
     globalThis.__previewRpcCalls.push({ name: contract.name, input: { ...input } });
     let result;
     switch (contract.name) {
       case "observatory.preferences.get": result=preferenceSnapshot(input.viewKey);break;
+      case "observatory.deferred.send": {
+        result = await fixtureLedger.send(input);
+        if (scenarioName() === "send-lost-reply" && !lostReplies.has(input.messageId)) { lostReplies.add(input.messageId); throw new Error("模拟回包丢失：请求超时"); }
+        break;
+      }
+      case "observatory.deferred.enqueue": result = await fixtureLedger.enqueue(input); break;
+      case "observatory.deferred.list": result = fixtureLedger.list(input); break;
+      case "observatory.deferred.cancel": result = fixtureLedger.cancel(input.messageId); break;
+      case "observatory.deferred.resume": result = await fixtureLedger.resume(input.messageId); break;
       case "observatory.preferences.update": {
         if(input.expectedRevision!==preferencesRevision){result={...preferenceSnapshot(input.viewKey),status:"conflict"};break;}
         const old=preferenceSnapshot(input.viewKey);const value={view:{...old.view,...input.view},savedViews:[...old.savedViews]};
@@ -59,6 +177,7 @@ export function useRpc(contract) {
         if(input.deleteSavedViewId)value.savedViews=value.savedViews.filter(v=>v.id!==input.deleteSavedViewId);
         if(input.snooze)preferenceSnoozes=[...preferenceSnoozes.filter(s=>s.agentId!==input.snooze.agentId||Date.parse(s.completionAt)!==Date.parse(input.snooze.completionAt)),input.snooze];
         if(input.unsnooze)preferenceSnoozes=preferenceSnoozes.filter(s=>s.agentId!==input.unsnooze.agentId||s.completionAt!==input.unsnooze.completionAt);
+        if(input.settings)preferenceSettings={...preferenceSettings,...input.settings};
         preferencePages.set(input.viewKey,value);preferencesRevision++;result={...preferenceSnapshot(input.viewKey),status:"updated"};break;
       }
       case "observatory.results.get": {
@@ -80,6 +199,8 @@ export function useRpc(contract) {
         break;
       }
       case "observatory.insights.models": result = fixtureModels(input.provider); break;
+      // server/profiles.ts there: only the fields the sheets use, never the rest of the daemon config.
+      case "observatory.profiles.list": result = { profiles: fixtureProfiles.map(({ id, name, provider, model, modeId, thinkingOptionId, featureValues, notes }) => ({ id, name, provider, model, modeId, thinkingOptionId, featureValues, notes })) }; break;
       case "observatory.insights.overview": result = fixtureOverview(input.days, input.utcOffsetMinutes, scenarioName(), fixtureInsightState.settings, runnerLabelFor(fixtureInsightState.settings.runner)); break;
       case "observatory.insights.suggestions": {
         const all = fixtureSuggestions(Date.now(), scenarioName());
@@ -89,7 +210,7 @@ export function useRpc(contract) {
         if (scenarioName() === "insights-suggest-error") throw new Error("模拟：分析队列已满，请稍后再试。");
         const now = new Date().toISOString(), label = runnerLabelFor(input.runner ?? fixtureInsightState.settings.runner);
         result = { id: `fixture-suggestions-new-${++insightSequence}`, createdAt: now, updatedAt: now, status: "queued", trigger: "manual", stage: "已加入分析队列",
-          window: { days: input.days, from: now.slice(0, 10), to: now.slice(0, 10), reports: 0, findings: 0, agents: 0 },
+          window: { days: input.days, from: now.slice(0, 10), to: now.slice(0, 10), reports: 0, findings: 0, agents: 0, timeZone: input.timeZone ?? null, ...(input.utcOffsetMinutes !== undefined ? { utcOffsetMinutes: input.utcOffsetMinutes } : {}) },
           runner: { kind: (input.runner ?? fixtureInsightState.settings.runner).kind, label, provider: null, model: null, thinkingOptionId: null, modeId: null, sessionAgentId: null },
           usage: null, error: null, report: null, basis: [] };
         fixtureSuggestionsState.jobs.unshift(result); break;
@@ -108,6 +229,30 @@ export function useRpc(contract) {
       case "observatory.insights.report": result={job:fixtureInsightState.jobs.find(job=>job.id===input.jobId)??null,revision:insightSequence};break;
       case "observatory.insights.feedback": {const job=fixtureInsightState.jobs.find(j=>j.id===input.jobId);job.findingFeedback={...job.findingFeedback,[input.findingId]:{status:input.status,updatedAt:new Date().toISOString()}};insightSequence++;result=job;break;}
       case "observatory.telemetry.get": result = fixtureTelemetry; break;
+      case "observatory.quota.get": result = fixtureQuota(Date.now(), scenarioName()); break;
+      case "observatory.live.get": result = { mode: "full", unchanged: false, revision: `live-${fixtureLiveExtras.length}`, agents: fixtureLiveExtras }; break;
+      // Like the server: whether the read can be trusted travels with it (codex-F16), so 归档已读完成 can use it.
+      case "observatory.schedules.heartbeats": result = fixtureHeartbeatsResponse(fixtureHeartbeats, scenarioName()); break;
+      case "observatory.steerable.list": result = { providers: ["claude", "codex"], slashSteerable: ["claude"] }; break;
+      case "observatory.resume.schedule": {
+        // Like server/resume.ts: one waiting resume per Agent, recorded in the ledger the stop card reads.
+        const waiting = previewResumes.find(entry => entry.agentId === input.agentId && ["scheduled", "waking", "retrying"].includes(entry.status));
+        if (waiting) { result = { status: "scheduled", scheduleId: waiting.scheduleId, runAt: waiting.wakeAt, message: "已经安排过续跑，没有重复安排。要换时间，先取消这一次。", existing: true, entry: waiting }; break; }
+        globalThis.__previewAgentOperations.push({ type: "resume", agentId: input.agentId, input: { ...input } });
+        const now = new Date().toISOString(), entry = { agentId: input.agentId, scheduleId: `fixture-resume-${++previewResumeSequence}`, stopAt: input.stopAt ?? null, plannedAt: input.at, wakeAt: input.at, attempt: 1, status: "scheduled", reason: null, createdAt: now, updatedAt: now, deliveredAt: null };
+        previewResumes.splice(0, previewResumes.length, ...previewResumes.filter(item => item.agentId !== input.agentId), entry);
+        result = { status: "scheduled", scheduleId: entry.scheduleId, runAt: input.at, message: "已安排续跑，可以在这张卡片上取消。", entry }; break;
+      }
+      case "observatory.resume.list": result = { mode: "full", unchanged: false, revision: `resumes-${previewResumeSequence}-${previewResumes.map(entry => entry.status).join(",")}`, generatedAt: new Date().toISOString(),
+        entries: previewResumes.filter(entry => !input.agentId || entry.agentId === input.agentId), error: null }; break;
+      case "observatory.resume.cancel": {
+        const entry = previewResumes.find(item => item.agentId === input.agentId && ["scheduled", "waking", "retrying"].includes(item.status));
+        globalThis.__previewAgentOperations.push({ type: "resume-cancel", agentId: input.agentId });
+        if (!entry) { result = { status: "failed", message: "这个 Agent 没有在等的续跑。", entry: null }; break; }
+        Object.assign(entry, { status: "canceled", reason: "user", updatedAt: new Date().toISOString() });
+        result = { status: "canceled", message: "已取消续跑。", entry: { ...entry } }; break;
+      }
+      case "observatory.providers.bases": result = { bases: {} }; break;
       case "observatory.analytics.get": result = fixtureProjectAnalytics(input.projectId); break;
       case "observatory.stats.get": if (scenarioName() === "stats-error") throw new Error("模拟统计读取失败"); result = fixtureStats(input.range, input.utcOffsetMinutes); break;
       case "observatory.tokens.get": if (scenarioName() === "tokens-error") throw new Error("模拟 Token 统计读取失败"); result = fixtureTokens(input.range, input.utcOffsetMinutes); break;
@@ -120,11 +265,25 @@ export function useRpc(contract) {
         const agent = rawAgents.find(candidate => candidate.id === input.agentId);
         const scenario = new URLSearchParams(globalThis.location?.search ?? "").get("scenario");
         if (scenario === "read-error") { result = { agentId: input.agentId, status: "failed", receipt: null, message: "模拟宿主确认失败，未读状态已保留。" }; break; }
-        if (!agent || agent.attentionReason !== "finished" || agent.requiresAttention !== true || agent.activeTurn || agent.pendingPermissions.length) {
+        // Like the server: 知道了 (kind "error", a failure or a stop) clears the attention and records no completion receipt.
+        // A stop the host raised no attention for (closed mid-turn) is acknowledged by its time alone, without clearing anything.
+        if (input.kind === "error" && input.stopAt && agent && agent.requiresAttention !== true) {
+          result = ackFixtureStop(agent.id, input.stopAt) ? { agentId: input.agentId, status: "read", receipt: null, message: "已标记为知道了。" }
+            : { agentId: input.agentId, status: "stale", receipt: null, message: "停下的原因已有更新，请刷新后再确认。" };
+          break;
+        }
+        const reasons = input.kind === "error" ? ["finished", "error"] : ["finished"];
+        if (!agent || !reasons.includes(agent.attentionReason) || agent.requiresAttention !== true || agent.activeTurn || agent.pendingPermissions.length) {
           result = { agentId: input.agentId, status: "not_unread", receipt: null, message: "当前没有可标为已读的完成结果。" }; break;
         }
         if (agent.attentionTimestamp !== input.attentionTimestamp || (agent.lastUserMessageAt ?? null) !== input.lastUserMessageAt) {
           result = { agentId: input.agentId, status: "stale", receipt: null, message: "完成结果已更新，请刷新后确认。" }; break;
+        }
+        if (input.kind === "error") {
+          if (input.stopAt) ackFixtureStop(agent.id, input.stopAt);
+          updateFixtureAgent(agent.id, { requiresAttention: false, attentionReason: null, attentionTimestamp: null });
+          result = { agentId: input.agentId, status: "read", receipt: null, message: "已标记为知道了，并同步到 Paseo。" };
+          break;
         }
         const receipt = { agentId: input.agentId, completionAt: agent.attentionTimestamp, lastUserMessageAt: agent.lastUserMessageAt ?? null, readAt: new Date().toISOString() };
         const old = fixtureReadReceipts.findIndex(item => item.agentId === input.agentId);
@@ -174,6 +333,8 @@ export function useRpc(contract) {
         globalThis.__previewRestoreAudit = { before, after: { agentId: agent?.id, agentCount: rawAgents.length, userMessages: countUsers() } };
         result = { status: "restored", agentId: input.agentId, workspaceId: agent?.workspaceId ?? null, workspaceRestored: false, workspaceAction: null, message: "模拟会话已恢复" }; break;
       }
+      // Restores answer at once here, so no job is ever polled; a stale id reads as unknown (the hook then asks the host).
+      case "observatory.history.restore.status": result = null; break;
       case "observatory.provider-subagents.list": result = { subagents: input.parentAgentId === "payment-root" ? nativeChildren : [], error: null, truncated: false }; break;
       case "observatory.provider-subagents.timeline": result = { page: nativeTimeline(input.parentAgentId, input.subagentId), error: null }; break;
       default: throw new Error(`No development fixture for ${contract.name}`);

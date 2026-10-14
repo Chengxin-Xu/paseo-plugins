@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDashboardRows, groupDashboardRows, needsAttention, type DashboardRowOptions } from "../shared/dashboard-model";
 import { normalizeAgent } from "../shared/model";
+import { threadAttention } from "../shared/attention";
 
 const defaults: DashboardRowOptions = { query: "", status: "all", view: "tree", sort: "attention", expanded: new Set() };
 const date = "2026-09-16T12:00:00Z";
@@ -157,6 +158,26 @@ test("needsAttention covers approvals, errors and unread results unless snoozed 
   assert.equal(needsAttention(normalizeAgent({ id: "read", status: "completed", requiresAttention: false })), false);
 });
 
+test("a seen error stays red but leaves 需要处理; a subagent's finished turn counts only when the setting says so", () => {
+  // Opening the Agent in Paseo (or 知道了 here) clears native attention: the failure was seen.
+  assert.equal(needsAttention(normalizeAgent({ id: "seen", status: "error", requiresAttention: false })), false);
+  assert.equal(needsAttention(normalizeAgent({ id: "unseen", status: "error", requiresAttention: true, attentionReason: "error", attentionTimestamp: date })), true);
+  // A failed turn after an older unread result: native attention stays set (edge-triggered), so it still counts.
+  assert.equal(needsAttention(normalizeAgent({ id: "edge", status: "error", requiresAttention: true, attentionReason: "finished", attentionTimestamp: date })), true);
+  const child = unreadResult("child", { parentAgentId: "lead" });
+  assert.equal(needsAttention(child), false, "the parent has the result already");
+  assert.equal(needsAttention(child, false, { childCompletions: true }), true);
+  assert.equal(needsAttention(normalizeAgent({ id: "child-approval", parentAgentId: "lead", status: "running", pendingPermissionCount: 1 })), true, "approvals always count");
+  assert.equal(needsAttention(normalizeAgent({ id: "child-error", parentAgentId: "lead", status: "error" })), true, "errors always count");
+});
+
+test("a stop the user has not seen counts; once seen it only colours the row", () => {
+  const stop = { kind: "unfinished" as const, resetAt: null, at: later };
+  const quiet = { ...normalizeAgent({ id: "q", status: "idle", requiresAttention: true, attentionReason: "finished", attentionTimestamp: date, lastUserMessageAt: date }), status: "quiet" as const, stop };
+  assert.equal(needsAttention(quiet), true);
+  assert.equal(needsAttention({ ...quiet, requiresAttention: false }), false);
+});
+
 test("focus keeps accepted agents with tree ancestry, counts only direct matches, and lists only matches flat", () => {
   const agents = [
     normalizeAgent({ id: "root", status: "running" }),
@@ -181,16 +202,43 @@ test("grouping moves whole threads into 需要处理 → 执行中 → 最近 an
     normalizeAgent({ id: "failed", status: "error", updatedAt: date }),
   ];
   const collapsed = buildDashboardRows(agents, { ...defaults, sort: "recent" }).rows;
-  const sections = groupDashboardRows(collapsed, agent => needsAttention(agent));
+  // With 「子 Agent 完成计入需要处理」 on; by default a subagent's finished turn does not count (see below).
+  const counted = { childCompletions: true };
+  const sections = groupDashboardRows(collapsed, agent => needsAttention(agent, false, counted));
   assert.deepEqual(sections.map(section => section.group), ["attention", "running", "recent"]);
   assert.deepEqual(sections.map(section => section.rows.map(row => row.node.agent.id)), [["idle-parent", "failed"], ["runner"], ["quiet"]]);
   assert.deepEqual(sections.map(section => section.threads), [2, 1, 1]);
   const expanded = buildDashboardRows(agents, { ...defaults, sort: "recent", expanded: new Set(["idle-parent", "runner"]) }).rows;
-  const open = groupDashboardRows(expanded, agent => needsAttention(agent));
+  const open = groupDashboardRows(expanded, agent => needsAttention(agent, false, counted));
   assert.deepEqual(open[0]?.rows.map(row => row.node.agent.id), ["idle-parent", "unread-child", "failed"]);
   assert.deepEqual(open[1]?.rows.map(row => [row.node.agent.id, row.depth]), [["runner", 0], ["runner-child", 1]]);
   assert.equal(open[0]?.threads, 2);
-  const snoozed = groupDashboardRows(collapsed, agent => needsAttention(agent, agent.id === "unread-child"));
+  const snoozed = groupDashboardRows(collapsed, agent => needsAttention(agent, agent.id === "unread-child", counted));
   assert.deepEqual(snoozed.map(section => [section.group, section.rows.map(row => row.node.agent.id)]), [["attention", ["failed"]], ["running", ["runner"]], ["recent", ["idle-parent", "quiet"]]]);
   assert.deepEqual(groupDashboardRows([], () => true), []);
+});
+
+// P3-3 (r1): a collapsed thread pulled into 需要处理 by a descendant must say why on its parent row, which can read 已完成.
+test("a thread's parent row counts the descendants that need you, with the most urgent phase, and no descendant twice (P3-3)", () => {
+  const ended = "2026-10-12T04:00:00.000Z";
+  const agents = [
+    normalizeAgent({ id: "lead", status: "idle", requiresAttention: false, updatedAt: later }),
+    // A limit on a subagent (counted whatever the setting), closed by the host mid-turn on another, an approval on a grandchild.
+    { ...unreadResult("limited", { parentAgentId: "lead" }), stop: { kind: "quota" as const, resetAt: null, at: later } },
+    { ...normalizeAgent({ id: "cut", parentAgentId: "lead", status: "closed", lastUserMessageAt: date }), stop: { kind: "unfinished" as const, resetAt: null, at: ended, closedMidTurn: true } },
+    normalizeAgent({ id: "asks", parentAgentId: "cut", status: "running", pendingPermissions: [{ id: "p", kind: "tool", name: "Bash" }] }),
+    // A subagent's plain unread result: counted only when the setting says so.
+    unreadResult("result", { parentAgentId: "lead" }),
+  ];
+  const [row] = buildDashboardRows(agents, defaults).rows;
+  assert.equal(row!.node.agent.id, "lead", "collapsed");
+  const off = (agent: Parameters<typeof needsAttention>[0]) => needsAttention(agent, false, { childCompletions: false });
+  assert.deepEqual(groupDashboardRows([row!], off).map(section => section.group), ["attention"]);
+  assert.deepEqual(threadAttention(row!.node, off), { count: 3, phase: "approval", unread: 1 }, "the limit (an unread result too) counts once, under 需要处理; the plain result as 未读");
+  // With the setting on the result needs you too: counted there, not again as 未读.
+  assert.deepEqual(threadAttention(row!.node, agent => needsAttention(agent, false, { childCompletions: true })), { count: 4, phase: "approval", unread: 0 });
+  // Without the approval, the limit is the most urgent; nothing waiting: nothing to say.
+  const calmer = buildDashboardRows(agents.filter(agent => agent.id !== "asks"), defaults).rows[0]!;
+  assert.deepEqual(threadAttention(calmer.node, off), { count: 2, phase: "quota", unread: 1 });
+  assert.deepEqual(threadAttention(calmer.node, () => false), { count: 0, phase: null, unread: 2 });
 });

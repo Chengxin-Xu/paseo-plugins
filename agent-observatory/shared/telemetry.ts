@@ -1,5 +1,9 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { REPLY_NUDGES } from "./reply";
+
+export const changeRequestSchema = z.object({ url: z.string().max(2000).regex(/^https?:\/\//), label: z.string().max(40), kind: z.enum(["mr", "pr"]) });
+export type ChangeRequestLink = z.infer<typeof changeRequestSchema>;
 
 /** These are observations made while this plugin is enabled, not lifetime session totals. */
 export const agentTelemetrySchema = z.object({
@@ -15,8 +19,19 @@ export const agentTelemetrySchema = z.object({
   /** The latest turn's final reply: when it was written and whether it hands the next step to the user (待回复). Never its text. */
   replyAt: z.iso.datetime().nullable().optional(),
   replyAsks: z.boolean().nullable().optional(),
+  /** What that reply invites (快捷回复, opus-B26), its category only; cleared with `replyAsks` by the next turn. */
+  replyNudge: z.enum(REPLY_NUDGES).nullable().optional(),
   /** The user message (its time) a backfill already read the reply for, so each turn's tail is fetched at most once. */
   replyFor: z.iso.datetime().nullable().optional(),
+  /**
+   * Why the latest turn stopped when that is not simply done (usage limit with its reset, empty, unfinished). Never text.
+   * `resetGuessed`: the notice named no time zone, so the reset is read in the devices' (grok-F2). `closedMidTurn`: the host
+   * closed the Agent while the turn was open, which raises no attention of its own. `seenAt`: 知道了 here (opus-F34).
+   */
+  stop: z.object({ kind: z.enum(["quota", "silent", "unfinished"]), resetAt: z.iso.datetime().nullable(), resetGuessed: z.boolean().optional(), at: z.iso.datetime(),
+    closedMidTurn: z.boolean().optional(), seenAt: z.iso.datetime().nullable().optional() }).nullable().optional(),
+  /** The latest merge or pull request a final reply linked to (opus-B16): its URL and `!12` / `#34`, never the reply. */
+  link: changeRequestSchema.nullable().optional(),
 });
 
 export const telemetryEventSchema = z.object({
@@ -69,6 +84,25 @@ export type TelemetrySnapshot = z.infer<typeof telemetrySnapshotSchema>;
 export type TelemetryResponse = z.infer<typeof telemetryResponseSchema>;
 export type TelemetryState = TelemetrySnapshot & { revision?: string };
 export type TurnOutcome = NonNullable<AgentTelemetry["outcome"]>;
+
+/**
+ * The Chinese name of a lifecycle event. Events stored by 2.12 and earlier carry English labels; the type decides, so
+ * old and new events read the same.
+ */
+export function eventLabel(event: Pick<TelemetryEvent, "type" | "label">): string {
+  // Labels written since 2.13 are Chinese already and shown as they are.
+  if (/[\u3400-\u9fff]/.test(event.label)) return event.label;
+  switch (event.type) {
+    case "created": return "新建 Agent";
+    case "turn_started": return "开始一轮";
+    case "turn_completed": return "完成一轮";
+    case "turn_failed": return "一轮失败";
+    case "turn_canceled": return "一轮被取消";
+    case "permission_requested": return "等你审批或回答";
+    case "permission_resolved": return /declined|cleared|拒绝|取消/i.test(event.label) ? "请求被拒绝或撤销" : "请求已批准";
+    case "archived": return "已归档";
+  }
+}
 
 /** Client cache update: deltas replace changed summaries and prepend new events, trimmed to the server's retained count. */
 export function mergeTelemetry(previous: TelemetryState | undefined, response: TelemetryResponse | TelemetrySnapshot): TelemetryState {

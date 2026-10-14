@@ -149,6 +149,10 @@ const timeoutValues = new Set(["-k", "-s", "--kill-after", "--signal"]);
 const envValues = new Set(["-u", "--unset", "-C", "--chdir"]);
 const runnerValues = new Set(["-p", "--package", "-c", "--call", "--cache", "--registry", "--userconfig"]);
 const packageValues = new Set(["--prefix", "--cwd", "--dir", "-C", "--filter", "-F", "--workspace", "-w"]);
+/** `uv run`, `poetry run` and `pipenv run` options that take a value, before and after `run`. */
+const envRunValues = new Set(["--with", "--with-editable", "--with-requirements", "-p", "--python", "--package", "--extra", "--group", "--only-group",
+  "--no-group", "--env-file", "--index", "--index-url", "--default-index", "--extra-index-url", "-f", "--find-links", "--directory", "--project",
+  "-C", "-P", "--cache-dir", "--config-file", "--color"]);
 
 function unwrap(words: string[], depth: number): string[][] {
   let args = words;
@@ -194,6 +198,16 @@ function unwrap(words: string[], depth: number): string[][] {
         args = args.slice(skipOptions(args, index + 1, runnerValues)); continue;
       }
     }
+    // The project's environment runs the command: `uv run pytest -q` is pytest.
+    if (["uv", "poetry", "pipenv"].includes(program)) {
+      const index = skipOptions(args, 1, envRunValues);
+      if (args[index] === "run") { args = args.slice(skipOptions(args, index + 1, envRunValues)); continue; }
+    }
+    // `yarn workspace app test` is `yarn test` inside that workspace.
+    if (program === "yarn") {
+      const index = skipOptions(args, 1, packageValues);
+      if (args[index] === "workspace" && args.length > index + 2) { args = [args[0]!, ...args.slice(index + 2)]; continue; }
+    }
     return [args];
   }
   return args.length ? [args] : [];
@@ -230,6 +244,49 @@ function invokesNodeTests(args: readonly string[]): boolean {
   return found;
 }
 
+/** GNU make options with a value, separate (`-C dir`) or attached (`-Cdir`, `--directory=dir`); `-O` takes only an attached one. */
+const makeValues = new Set(["-C", "--directory", "-f", "--file", "--makefile", "-I", "--include-dir", "-o", "--old-file", "--assume-old",
+  "-W", "--what-if", "--new-file", "--assume-new", "-E", "--eval", "-O"]);
+/** Options whose value is optional: a separate one is taken only when it is a number (`-j 8`). */
+const makeCounts = new Set(["-j", "--jobs", "-l", "--load-average", "--max-load"]);
+/** Dry runs, queries, touch-only runs, help and version run no recipe. */
+const makeNonRuns = new Set(["-n", "--just-print", "--dry-run", "--recon", "-q", "--question", "-t", "--touch", "-h", "--help", "-v", "--version"]);
+/** check is GNU's test target and all its default build; test-unit, lint_go or build-image count by their first word. */
+function makeTargetKind(target: string): CheckKind | null {
+  const name = target.toLowerCase();
+  return name === "check" ? "test" : name === "all" ? "build" : scriptKind(name.split(/[-_]/, 1)[0]!);
+}
+/** `make` by its targets (none is the default build), in the fixed category order; help, clean and dry runs are not checks. */
+function makeKind(args: readonly string[]): CheckKind | null {
+  const targets: string[] = [];
+  const number = (value: string | undefined) => /^\d+(?:\.\d+)?$/.test(value ?? "");
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--") { targets.push(...args.slice(index + 1).filter(value => !assignment.test(value))); break; }
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("="), name = equals < 0 ? arg : arg.slice(0, equals);
+      if (makeNonRuns.has(name)) return null;
+      if (equals < 0 && (makeValues.has(name) || (makeCounts.has(name) && number(args[index + 1])))) index++;
+      continue;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      // Flags bundle (-kn); a value option ends the bundle and takes the rest, or the next word when it ends it.
+      for (let short = 1; short < arg.length; short++) {
+        const name = `-${arg[short]}`, last = short === arg.length - 1;
+        if (makeNonRuns.has(name)) return null;
+        if (makeValues.has(name)) { if (last && name !== "-O") index++; break; }
+        if (makeCounts.has(name)) { if (last && number(args[index + 1])) index++; break; }
+      }
+      continue;
+    }
+    // VAR=value overrides a variable; it is not a target.
+    if (!assignment.test(arg)) targets.push(arg);
+  }
+  if (!targets.length) return "build";
+  const kinds = new Set(targets.map(makeTargetKind));
+  return CHECK_ORDER.find(kind => kinds.has(kind)) ?? null;
+}
+
 function classify(words: string[]): CheckKind | null {
   let program = executable(words[0] ?? ""), args = words.slice(1);
   if (!program) return null;
@@ -252,7 +309,9 @@ function classify(words: string[]): CheckKind | null {
     if (["exec", "dlx"].includes(action)) return null;
     return scriptKind(action);
   }
-  if (["test", "pytest", "py.test", "jest", "vitest", "mocha", "rspec", "ctest", "tox", "nosetests"].includes(program)) return "test";
+  // `test` is the shell's condition builtin (`test -f package.json`), like `[`: it checks a file or a variable, never runs tests.
+  if (["pytest", "py.test", "jest", "vitest", "mocha", "rspec", "ctest", "tox", "nosetests"].includes(program)) return "test";
+  if (program === "make" || program === "gmake") return makeKind(args);
   if (program === "playwright" && args[0] === "test") return "test";
   if (["tsx", "node"].includes(program) && invokesNodeTests(args)) return "test";
   if (program === "go" || program === "cargo") {
@@ -266,7 +325,7 @@ function classify(words: string[]): CheckKind | null {
   if (["typecheck", "type-check", "mypy", "pyright", "basedpyright"].includes(program)) return "typecheck";
   if (["lint", "eslint", "ruff", "flake8", "pylint", "golangci-lint", "clippy", "biome"].includes(program)) return "lint";
   if (program === "prettier" && args.some(arg => arg === "--check" || arg === "-c")) return "lint";
-  if (["build", "make", "cmake", "webpack", "esbuild", "gradle", "gradlew", "mvn", "mvnw"].includes(program)) return "build";
+  if (["build", "cmake", "webpack", "esbuild", "gradle", "gradlew", "mvn", "mvnw"].includes(program)) return "build";
   if (program === "vite" && args[0] === "build") return "build";
   if (/^pip(?:\d(?:\.\d+)?)?$/.test(program) && args[0] === "install") return "install";
   if (program === "uv" && args[0] === "sync") return "install";

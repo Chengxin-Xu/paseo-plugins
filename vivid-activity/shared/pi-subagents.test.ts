@@ -14,7 +14,7 @@ describe("pi-subagents operations", () => {
       description: "Review subagent display changes", status: "running", body: "",
     });
     expect(resolveToolCallPresentation({ name: "get_subagent_result", detail: { type: "sub_agent", log: waitProgress } }))
-      .toMatchObject({ label: "Wait for Agent", summary: "reviewer · Review subagent display changes · running" });
+      .toMatchObject({ label: "Wait for Agent", summary: "reviewer · Review subagent display changes · 运行中" });
   });
 
   it("preserves wait identity and parses the new completion stats line", () => {
@@ -23,17 +23,17 @@ describe("pi-subagents operations", () => {
       body: "**Reviewed**\n- Found an issue",
     });
     expect(resolveToolCallPresentation({ name: "get_subagent_result", detail: { type: "sub_agent", log: waitResult } }))
-      .toMatchObject({ label: "Wait for Agent", summary: "reviewer · Review subagent display changes · completed" });
+      .toMatchObject({ label: "Wait for Agent", summary: "reviewer · Review subagent display changes · 已完成" });
   });
 
   it("distinguishes non-blocking result checks and falls back to the target ID", () => {
     const progress = waitProgress.replace("Operation: wait", "Operation: result").replace("Description: Review subagent display changes", "Description: ");
     expect(parsePiSubagentCall(undefined, progress)).toMatchObject({ operation: "result", wait: false });
     expect(resolveToolCallPresentation({ name: "get_subagent_result", detail: { type: "sub_agent", log: progress } }))
-      .toMatchObject({ label: "Check Agent Result", summary: "reviewer · f4815d0d77b2 · running" });
+      .toMatchObject({ label: "Check Agent Result", summary: "reviewer · f4815d0d77b2 · 运行中" });
     expect(resolveToolCallPresentation({ name: "get_subagent_result", detail: { type: "unknown", input: {}, output: {
       content: [{ type: "text", text: progress }], details: { description: "" },
-    } } })).toMatchObject({ summary: "reviewer · f4815d0d77b2 · running" });
+    } } })).toMatchObject({ summary: "reviewer · f4815d0d77b2 · 运行中" });
   });
 
   it("parses million-token completion metrics", () => {
@@ -50,7 +50,7 @@ describe("pi-subagents operations", () => {
     const header = waitProgress.replace("Operation: wait", "Operation: steer");
     expect(parsePiSubagentCall(undefined, header)).toMatchObject({ operation: "steer", body: "", notice: undefined });
     expect(parsePiSubagentCall(undefined, header + "\n\nSteering message sent to agent f4815d0d77b2. The agent will process it after its current tool execution.\nCurrent state: 14 token · 2 tool uses · context 1% full"))
-      .toMatchObject({ body: "", notice: "Steering message sent. It will be processed after the current tool execution." });
+      .toMatchObject({ body: "", notice: "引导消息已发出，子 Agent 做完当前这步工具调用后处理。" });
     expect(parsePiSubagentCall(undefined, header.replace("running", "completed") + '\n\nAgent "f4815d0d77b2" is not running (status: completed). Cannot steer a non-running agent.'))
       .toMatchObject({ body: "", error: "Cannot steer a non-running agent.", status: "completed" });
   });
@@ -107,13 +107,13 @@ describe("pi-subagents operations", () => {
     ["steer_subagent", {}, "Steer Agent", "MessageCircle"],
   ])("labels unknown %s calls", (name, input, label, icon) => {
     expect(resolveToolCallPresentation({ name, detail: { type: "unknown", input, output: result } }))
-      .toMatchObject({ category: "agent", label, icon, summary: "inspect payloads · completed" });
+      .toMatchObject({ category: "agent", label, icon, summary: "inspect payloads · 已完成" });
   });
 
   it.each(["Agent", "get_subagent_result", "steer_subagent"])("labels translated and nested %s calls", (name) => {
     const label = name === "Agent" ? "Dispatch Agent" : name === "steer_subagent" ? "Steer Agent" : "Agent Result";
     expect(resolveToolCallPresentation({ name, detail: { type: "sub_agent", log: result } }))
-      .toMatchObject({ label, summary: "inspect payloads · completed" });
+      .toMatchObject({ label, summary: "inspect payloads · 已完成" });
     expect(resolveSubAgentActionPresentation(`functions.${name}`)).toMatchObject({ label });
     expect(expansionTargetForToolCall(`mcp__plugin__${name}`, "unknown")).toBe("sub_agent");
   });

@@ -13,7 +13,26 @@ export const archiveReadOriginSchema = z.object({
 export type ArchiveReadOrigin = z.infer<typeof archiveReadOriginSchema>;
 export const markCompletionRead = defineRpc({
   name: "observatory.read-state.mark",
-  input: z.object({ agentId: z.string().min(1).max(512), attentionTimestamp: timestamp, lastUserMessageAt: timestamp.nullable() }),
+  // `error`: acknowledge a failed turn or a stop (知道了). It clears native attention like opening the Agent in Paseo, and
+  // records no completion receipt. Without `kind` it is a finished turn or a question (标记已读).
+  // `attentionTimestamp` is the host's own token, checked and cleared. It is null for a turn the host closed mid-way, which
+  // raised no attention; `stopAt` (with `error`) then names the stop the server observed, and 知道了 is recorded on it.
+  // `completionAt` is the completion the page shows as unread: after another prompt, or a heartbeat's turn (which leaves the
+  // prompt as it was), the host's token still names an older, unread one (it is edge-triggered), so the receipt is stored for
+  // exactly the newer turn's observed end once the server has verified it; a claim of an older turn is stale (codex-F5,
+  // codex-obs-attn-F1).
+  // An Agent the host has not loaded is never loaded for this (clearing would load it; an ACP one cannot be loaded at all):
+  // the host's token is then only checked, and a receipt here for that token is what marks it (P2-3, P2-4): a result read, a
+  // reply that asks opened, a failure seen (知道了, which also records its stop). `rearm`: a quick reply about to be sent,
+  // which loads the Agent anyway, clears it first regardless, so the turn the reply starts is announced when it ends.
+  // `round`: the turn whose reply asks the user (待回复), as the page saw it start and end. A heartbeat's next round asks again
+  // with the host's prompt and attention tokens unchanged, so the server marks it read only while the turn it observed last is
+  // still this one (codex-obs-attn-R2); a page left on an earlier round's question gets stale. A quick reply's `rearm` names
+  // the round it answers by its start alone (codex-obs-attn-R4): nothing is cleared once another round has begun since, or
+  // when the plugin's own record of the rounds cannot be read.
+  input: z.object({ agentId: z.string().min(1).max(512), attentionTimestamp: timestamp.nullable(), lastUserMessageAt: timestamp.nullable(), kind: z.enum(["completion", "error"]).optional(),
+    completionAt: timestamp.optional(), stopAt: timestamp.optional(), rearm: z.boolean().optional(),
+    round: z.object({ startedAt: timestamp.nullable(), endedAt: timestamp.nullable().optional() }).optional() }),
   output: z.object({ agentId: z.string(), status: z.enum(["read", "stale", "not_unread", "failed"]),
     receipt: readReceiptSchema.nullable(), message: z.string() }),
 });

@@ -57,3 +57,13 @@ export function browserLaunchOptions() {
   const executablePath = process.env.BROWSER_TEST_EXECUTABLE || process.env.PASEO_BROWSER_EXECUTABLE;
   return { headless: true, ...(executablePath ? { executablePath } : {}), env };
 }
+
+/** Acceptance scripts are viewers too: obtain a fresh frame before a page-changing RPC. */
+export async function invokeBrowserRpc(daemon, method, input) {
+  if (method === 'browser.action' && !input.target && !['mode', 'stop', 'restart', 'cleanup', 'settings', 'handleDialog'].includes(input.action.kind)) {
+    const { frame } = await daemon.invokePluginRpc('server-browser', 'browser.frame', { workspaceId: input.workspaceId });
+    if (!frame) throw new Error('A current browser frame is required before this acceptance action.');
+    input = { ...input, target: { tabId: frame.tabId, viewRevision: frame.viewRevision } };
+  }
+  return daemon.invokePluginRpc('server-browser', method, input);
+}

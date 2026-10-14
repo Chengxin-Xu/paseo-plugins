@@ -40,7 +40,8 @@ vi.mock("@getpaseo/plugin/client", () => {
 vi.mock("@getpaseo/plugin/client/react-native", async () => {
   const { createElement: h } = await import("react");
   const Modal = Object.assign(({ open, title, children }: { open: boolean; title: string; children: ReactNode }) => open ? h("Modal", { title }, children) : null, { Content: ({ children }: { children: ReactNode }) => children });
-  return { Icon: "Icon", Modal, ScrollView: "ScrollView", TextInput: "TextInput", copyText: async (text: string) => { host.copies.push(text); }, useToast: () => host.toast };
+  const FlatList = ({ data, renderItem, ListEmptyComponent, ...props }: any) => h("FlatList", props, data.length ? data.slice(0, props.initialNumToRender ?? data.length).map((item: any, index: number) => h("Row", { key: index }, renderItem({ item, index }))) : ListEmptyComponent);
+  return { Icon: "Icon", Modal, FlatList, ScrollView: "ScrollView", TextInput: "TextInput", copyText: async (text: string) => { host.copies.push(text); }, useToast: () => host.toast };
 });
 
 const { NotesSurface } = await import("../client/board");
@@ -54,8 +55,8 @@ const board = (revision: number, title = "上线检查"): BoardSnapshot => ({ pr
 const projects = [{ id: "__inbox__", name: "随手记", path: "暂不归入项目的想法" }, { id: "prj_git", name: "Git 项目", path: "/repo/git" }];
 
 let serverBoard = board(1), serverRevision = "rev-1";
-function dashboardHandler(input: { revision?: string }): DashboardUpdate {
-  if (input.revision === serverRevision) return { unchanged: true, revision: serverRevision };
+function dashboardHandler(input: { revision?: string; refreshProjectIds?: string[] }): DashboardUpdate {
+  if (input.revision === serverRevision && !input.refreshProjectIds?.length) return { unchanged: true, revision: serverRevision };
   return { revision: serverRevision, ...(input.revision ? {} : { projects }), boards: [serverBoard] };
 }
 /** Host components are mocked as plain strings ("View", "Text", "Pressable"). */
@@ -72,6 +73,8 @@ function applyWrites() {
     const operation = input.operation, now = "2026-09-22T01:00:00.000Z";
     let items = serverBoard.items, id = itemId;
     if (operation.type === "create") { id = "7a1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"; items = [{ ...operation.fields, id, projectId: input.projectId, revision: 1, createdAt: now, updatedAt: now, deletedAt: null }, ...items]; }
+    else if (operation.type === "emptyTrash") items = items.filter(item => item.deletedAt === null);
+    else if (operation.type === "purge") items = items.filter(item => item.id !== operation.id);
     else items = items.map(item => item.id !== operation.id ? item : { ...item, ...(operation.type === "update" ? operation.fields : { deletedAt: operation.type === "delete" ? now : null }), revision: item.revision + 1, updatedAt: now });
     serverBoard = { ...serverBoard, projectId: input.projectId, revision: serverBoard.revision + 1, items }; serverRevision = `rev-${serverBoard.revision}`;
     return { board: serverBoard, itemId: id, replayed: false };
@@ -244,6 +247,96 @@ describe("NotesSurface actions", () => {
     expect(host.toasts.at(-1)).toBe("已恢复到「任务」");
   });
 
+  it("fetches history only on opening it, retries failures and restores the selected version", async () => {
+    serverBoard.items[0]!.historyCount = 1;
+    const history = { ...serverBoard.items[0]!, title: "以前的标题", body: "以前的正文", revision: 1 };
+    serverBoard.items[0]!.revision = 2;
+    let fail = true;
+    host.handlers.set("project-notes.history", async () => { if (fail) throw new Error("快照读取失败"); return { versions: [history], missing: false, missingCount: 0, itemRevision: 2 }; });
+    applyWrites();
+    const root = await mount();
+    await press(root, "上线检查");
+    expect(host.calls.filter(call => call.method === "project-notes.history")).toHaveLength(0);
+    await press(root, "修改快照 · 最近 1 版"); await advance(0);
+    expect(texts(root)).toContain("快照读取失败"); fail = false;
+    await press(root, "重试"); await advance(0);
+    await press(root, "第 1 版");
+    expect(texts(root)).toContain("以前的正文");
+    await press(root, "恢复第 1 版");
+    expect(writes().at(-1)!.input.operation).toEqual({ type: "restoreVersion", id: itemId, expectedRevision: 2, revision: 1 });
+  });
+
+  it("requires explicit confirmation for permanent deletion and clearing the recycle bin", async () => {
+    applyWrites();
+    const root = await mount();
+    await press(root, "上线检查"); await press(root, "删除");
+    await press(root, "更多操作"); await press(root, "回收站");
+    await press(root, "上线检查"); await press(root, "彻底删除");
+    expect(writes()).toHaveLength(1);
+    const confirm = root.find(node => node.props.label === "确认彻底删除" && node.props.variant === "secondary");
+    expect(confirm.props.tone).toBe("danger");
+    expect(texts(root).some(text => text.includes("无法恢复"))).toBe(true);
+    await press(root, "取消"); expect(writes()).toHaveLength(1);
+    await press(root, "彻底删除"); await press(root, "确认彻底删除"); await advance(0);
+    expect(writes().at(-1)!.input.operation).toEqual({ type: "purge", id: itemId, expectedRevision: 2 });
+    expect(texts(root)).toContain("回收站是空的");
+    serverBoard = { ...board(4), items: [{ ...board(4).items[0]!, deletedAt: now }] }; serverRevision = "rev-4";
+    await advance(5_000);
+    await press(root, "更多操作"); await press(root, "清空回收站");
+    expect(writes()).toHaveLength(2);
+    await press(root, "确认彻底删除"); await advance(0);
+    expect(writes().at(-1)!.input.operation).toEqual({ type: "emptyTrash", expectedRevision: 4 });
+    expect(texts(root)).toContain("回收站是空的");
+  });
+
+  it("states that emptying the recycle bin includes notes hidden by the search", async () => {
+    const visible = { ...board(3).items[0]!, title: "匹配条目", deletedAt: now };
+    serverBoard = { ...board(3), items: [visible, { ...visible, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", title: "隐藏条目" }] };
+    applyWrites(); const root = await mount();
+    await press(root, "更多操作"); await press(root, "回收站");
+    const search = root.find(node => is(node, "TextInput") && node.props.accessibilityLabel === "搜索回收站");
+    await act(async () => search.props.onChangeText("匹配")); await advance(200);
+    expect(texts(root)).not.toContain("隐藏条目");
+    await press(root, "更多操作"); await press(root, "清空回收站");
+    expect(texts(root).some(text => text.includes("全部 2 条手记（含搜索未显示的）"))).toBe(true);
+    expect(writes()).toHaveLength(0);
+    await press(root, "取消"); expect(serverBoard.items).toHaveLength(2);
+    await press(root, "更多操作"); await press(root, "清空回收站"); await press(root, "确认彻底删除");
+    expect(writes().at(-1)!.input.operation).toEqual({ type: "emptyTrash", expectedRevision: 3 });
+    expect(serverBoard.items).toHaveLength(0);
+  });
+
+  it("requires confirmation before abandoning missing snapshots and binds it to the read revision", async () => {
+    serverBoard.items[0] = { ...serverBoard.items[0]!, historyCount: 2, body: "保留当前正文", revision: 7 };
+    const version = { ...serverBoard.items[0]!, revision: 5, body: "保留仍在的历史" };
+    host.handlers.set("project-notes.history", async () => ({ versions: [version], missing: true, missingCount: 1, itemRevision: 7 }));
+    host.handlers.set("project-notes.write", async (input: WriteBoardInput) => {
+      expect(input.operation).toEqual({ type: "repairHistory", id: itemId, expectedRevision: 7 });
+      serverBoard = { ...serverBoard, revision: serverBoard.revision + 1, items: [{ ...serverBoard.items[0]!, historyCount: 1, revision: 8 }] };
+      host.handlers.set("project-notes.history", async () => ({ versions: [version], missing: false, missingCount: 0, itemRevision: 8 }));
+      return { board: serverBoard, itemId, replayed: false };
+    });
+    const root = await mount(); await press(root, "上线检查"); await press(root, "修改快照 · 最近 2 版"); await advance(0);
+    expect(texts(root).some(text => text.includes("有 1 个修改快照缺失"))).toBe(true);
+    await press(root, "放弃缺失的快照并继续"); expect(writes()).toHaveLength(0);
+    await press(root, "取消放弃"); expect(writes()).toHaveLength(0);
+    await press(root, "放弃缺失的快照并继续"); await press(root, "确认放弃缺失快照"); await advance(0);
+    expect(writes()).toHaveLength(1); expect(serverBoard.items[0]!.body).toBe("保留当前正文");
+    await press(root, "第 5 版"); expect(texts(root)).toContain("保留仍在的历史");
+    expect(texts(root).some(text => text.includes("有 1 个修改快照缺失"))).toBe(false);
+  });
+
+  it("retains the last server revision and requests only locally written projects on the next poll", async () => {
+    applyWrites();
+    const root = await mount();
+    await press(root, "上线检查：移到进行中"); await advance(0);
+    await press(root, "上线检查：移到已完成"); await advance(0);
+    await advance(5_000);
+    expect(dashboardCalls().at(-1)!.input).toEqual({ revision: "rev-1", refreshProjectIds: ["prj_git"] });
+    await advance(5_000);
+    expect(dashboardCalls().at(-1)!.input).toEqual({ revision: "rev-3" });
+  });
+
   it("stops saving an edit that another device overtook until 载入最新 loads the newer version", async () => {
     const root = await mount();
     await press(root, "上线检查");
@@ -326,5 +419,23 @@ describe("colour semantics", () => {
     const flat = (style: unknown): Record<string, unknown> => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
     const ring = toggle.findAll(node => is(node, "View") && flat(node.props.style).borderWidth !== undefined)[0]!;
     expect(flat(ring.props.style).borderColor).toBe(hue(theme, "blue"));
+  });
+});
+
+
+describe("large-board search", () => {
+  it("uses bounded virtual rows and waits for settled input before filtering 4000 notes", async () => {
+    const seed = board(1).items[0]!;
+    serverBoard = { ...board(1), items: Array.from({ length: 4000 }, (_, index) => ({ ...seed, id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, title: `任务 ${index}`, body: index === 3999 ? "目标内容" : "普通内容".repeat(500) })) };
+    const root = await mount();
+    const list = () => root.findAll(node => is(node, "FlatList"))[0]!;
+    expect(list().props.windowSize).toBe(5);
+    expect(texts(root).filter(text => /^任务 \d+$/.test(text)).length).toBeLessThanOrEqual(12);
+    const input = root.find(node => is(node, "TextInput") && node.props.placeholder === "搜索任务");
+    await act(async () => input.props.onChangeText("目标内容"));
+    expect(texts(root)).not.toContain("任务 3999");
+    await advance(160);
+    expect(texts(root)).toContain("任务 3999");
+    expect(texts(root)).not.toContain("任务 0");
   });
 });

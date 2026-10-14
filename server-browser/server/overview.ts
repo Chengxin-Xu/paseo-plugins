@@ -2,7 +2,7 @@ import { readdir } from 'node:fs/promises';
 import type { PluginHandlerContext } from '@getpaseo/plugin/server';
 import type { BrowserManager } from './browser-manager';
 import type { BrowserOverviewItem, BrowserSession, BrowserWorkspace } from '../shared/browser';
-import { listBrowserWorkspaces, type PaseoWorkspace } from './service';
+import { BrowserAgentDirectory, listBrowserWorkspaces, type PaseoWorkspace } from './service';
 import { contentRevision } from './revision';
 
 type Paseo = PluginHandlerContext['paseo'];
@@ -32,12 +32,14 @@ async function bounded<T>(operation:Promise<T>,timeoutMs:number):Promise<T>{
 export class BrowserOverviewService {
   private pending?:Promise<Overview>;
   private previous?:Overview;
-  constructor(private manager:Manager,private workspaces:(paseo:Paseo)=>Promise<PaseoWorkspace[]>=listBrowserWorkspaces){}
+  private generation=0;
+  constructor(private manager:Manager,private workspaces:(paseo:Paseo)=>Promise<PaseoWorkspace[]>=listBrowserWorkspaces,private agents=new BrowserAgentDirectory()){}
+  invalidate():void{this.generation++;this.previous=undefined;this.pending=undefined;}
   async list(paseo:Paseo):Promise<Overview>{
     if(this.pending)return this.pending;
     if(this.previous&&Date.now()-this.previous.checkedAt<800)return this.previous;
-    this.pending=this.read(paseo).then(result=>{this.previous=result;return result;});
-    try{return await this.pending;}finally{this.pending=undefined;}
+    const generation=this.generation,operation=this.read(paseo).then(result=>{if(generation===this.generation)this.previous=result;return result;});this.pending=operation;
+    try{return await operation;}finally{if(this.pending===operation)this.pending=undefined;}
   }
   private async read(paseo:Paseo):Promise<Overview>{
     const workspaces=await this.workspaces(paseo);
@@ -53,14 +55,9 @@ export class BrowserOverviewService {
         let session:BrowserSession;
         try{session=overviewSession(await bounded(this.manager.state(workspace.id),3500));}
         catch{session={workspaceId:workspace.id,status:'error',title:'状态暂不可用',url:'',mode:'manual',width:1120,height:720,tabs:[],agentId:null,error:'此工作区浏览器状态暂时无法读取，请稍后刷新。',agentBusy:false,activity:[]};}
-        let agent:BrowserOverviewItem['agent']=null;
-        if(session.agentId){
-          try{
-            const ref=paseo.agents.ref(session.agentId);await bounded(ref.refresh(),2500);const current=ref.current();
-            if(current&&current.workspaceId===workspace.id&&!current.archivedAt){agent={id:current.id,title:current.title||'浏览器 Agent',status:current.status,provider:current.provider,needsPermission:Boolean(current.pendingPermissions?.length)};}
-          }catch{ /* An unavailable Agent must not be guessed from unrelated running sessions. */ }
-        }
-        items.push({workspace,session,agent,observedAt:Date.now()});
+        const linked=await this.agents.inspect(paseo,workspace.id,session.agentId);
+        session={...session,agentAvailability:linked.availability};
+        items.push({workspace,session,agent:linked.agent,observedAt:Date.now()});
       }
     };
     await Promise.all(Array.from({length:Math.min(4,targets.length)},worker));

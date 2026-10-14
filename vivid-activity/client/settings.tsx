@@ -23,8 +23,9 @@ import {
   visibleExpansionTargets,
 } from "../shared/settings";
 import type { Density, ExpansionMode, ExpansionTarget, TakeoverScope } from "../shared/settings";
-import { foldRuntime } from "./fold-runtime";
-import { applyTakeover } from "./takeover";
+import { toneColor } from "./kit";
+
+export interface SettingsActions { onFoldSettings(value: { enabled?: boolean; scope?: TakeoverScope }): void; onTakeover(scope: TakeoverScope): void }
 
 type ReadySettings = Extract<SettingsState<typeof activitySettings.schema>, { status: "ready" }>;
 
@@ -79,7 +80,7 @@ function expansionDescription(target: ExpansionTarget, mode: ExpansionMode): str
   return "只展开最新的任务清单类工具行。";
 }
 
-function TakeoverControls({ settings }: { settings: ReadySettings }) {
+function TakeoverControls({ settings, actions }: { settings: ReadySettings; actions: SettingsActions }) {
   const scope = settings.values.takeover;
   const changeScope = (value: string) => {
     const parsed = takeoverScopeSchema.safeParse(value);
@@ -87,8 +88,8 @@ function TakeoverControls({ settings }: { settings: ReadySettings }) {
     const next = parsed.data;
     void settings.save({ ...settings.values, takeover: next }, settings.revision).then((saved) => {
       if (!saved) return;
-      foldRuntime.setSettings({ scope: next });
-      applyTakeover(next);
+      actions.onFoldSettings({ scope: next });
+      actions.onTakeover(next);
     });
   };
   return (
@@ -126,20 +127,24 @@ const FOLD_HINT =
   "一段思考和工具调用全部完成后收成一行：类别计数、失败数和用时，点一下展开，再点收起。" +
   "运行中的段只留运行中、等你批准、失败的行和最近两步，更早的收成「前面 N 步」。改动对所有设备生效。";
 
+const PIN_HINT =
+  "Agent 干了很久、中间说过几段话之后，把你这一轮的提问钉在最新一段活动的上方：默认显示三行，点一下看全文，可以复制。" +
+  "提问还在附近（大约一屏之内）时不显示。改动对所有设备生效。";
+
 function foldScopeNote(scope: TakeoverScope): string | null {
   if (scope === "reasoning") return "现在只接管思考行：只有相邻的思考行会折叠；工具行由 Paseo 显示，可用「设置 → 聊天 → 工具调用显示 → 摘要」合并。";
   if (scope === "off") return "接管已关闭，折叠和行密度在重新打开接管后生效。";
   return null;
 }
 
-function FoldControls({ settings }: { settings: ReadySettings }) {
+function FoldControls({ settings, actions }: { settings: ReadySettings; actions: SettingsActions }) {
   const fold = settings.values.fold;
   const density = settings.values.density;
   const note = foldScopeNote(settings.values.takeover);
   const changeFold = (value: boolean) => {
     if (value === fold) return;
     void settings.save({ ...settings.values, fold: value }, settings.revision).then((saved) => {
-      if (saved) foldRuntime.setSettings({ enabled: value });
+      if (saved) actions.onFoldSettings({ enabled: value });
     });
   };
   const changeDensity = (value: string) => {
@@ -147,8 +152,13 @@ function FoldControls({ settings }: { settings: ReadySettings }) {
     if (!parsed.success || parsed.data === density) return;
     void settings.save({ ...settings.values, density: parsed.data }, settings.revision);
   };
+  const pinPrompt = settings.values.pinPrompt;
+  const changePin = (value: boolean) => {
+    if (value === pinPrompt) return;
+    void settings.save({ ...settings.values, pinPrompt: value }, settings.revision);
+  };
   return (
-    <SettingsSection title="折叠与行距">
+    <SettingsSection title="折叠、行距与提问">
       <SettingsCard>
         <SettingsSwitch
           label="完成后折叠连续的思考与工具行"
@@ -164,6 +174,13 @@ function FoldControls({ settings }: { settings: ReadySettings }) {
           options={densityOptions}
           disabled={settings.saving}
           onValueChange={changeDensity}
+        />
+        <SettingsSwitch
+          label="钉住本轮提问"
+          hint={PIN_HINT}
+          value={pinPrompt}
+          disabled={settings.saving}
+          onValueChange={changePin}
         />
         {note ? <SettingsRow label="接管范围" hint={note} /> : null}
       </SettingsCard>
@@ -205,8 +222,8 @@ function ExpansionControls({ settings }: { settings: ReadySettings }) {
 
 function PaletteControls({ settings, theme }: { settings: ReadySettings; theme: PluginSurfaceProps["theme"] }) {
   const errorStyle = useMemo(
-    () => ({ color: theme.colors.statusDanger, fontSize: 13, lineHeight: 18 }),
-    [theme.colors.statusDanger],
+    () => ({ color: toneColor(theme, "danger"), fontSize: 13, lineHeight: 18 }),
+    [theme],
   );
   const changePalette = (value: string) => {
     const parsed = paletteModeSchema.safeParse(value);
@@ -233,7 +250,7 @@ function PaletteControls({ settings, theme }: { settings: ReadySettings; theme: 
   );
 }
 
-export function ActivitySettings({ theme }: PluginSurfaceProps) {
+export function ActivitySettings({ theme, actions }: PluginSurfaceProps & { actions: SettingsActions }) {
   const settings = useSettings(activitySettings);
   const textStyle = useMemo(() => ({ color: theme.colors.foreground }), [theme.colors.foreground]);
   if (settings.status === "loading") return <Text style={textStyle}>正在读取设置…</Text>;
@@ -256,8 +273,8 @@ export function ActivitySettings({ theme }: PluginSurfaceProps) {
   }
   return (
     <>
-      <TakeoverControls settings={settings} />
-      <FoldControls settings={settings} />
+      <TakeoverControls settings={settings} actions={actions} />
+      <FoldControls settings={settings} actions={actions} />
       <PaletteControls settings={settings} theme={theme} />
       <ExpansionControls settings={settings} />
     </>

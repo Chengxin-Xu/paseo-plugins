@@ -4,13 +4,14 @@ import type { PaseoApi } from "../paseo-types";
 import type { StatsRange } from "../../shared/stats";
 import type { TokenImportLimits, TokenResponse, TokenSnapshot } from "../../shared/tokens";
 import { StatsDirectory } from "../stats-directory";
+import { statsDayText, statsLocalDay, statsZone } from "../stats-types";
 import { telemetryDirectory } from "../telemetry";
-import { addCall, emptyData, pruneData, settleCall, type TokenData } from "./data";
+import { addCall, emptyData, noteThread, pruneData, sessionKey, settleCall, type TokenData } from "./data";
 import { TokenIngester } from "./ingester";
 import { TokenPersistence } from "./persistence";
 import { providerRoots, rootIdentity, type RootContext } from "./roots";
 import { buildTokenSnapshot } from "./snapshot";
-import { DAY, dayOf, iso, safeError, type LogRoot } from "./types";
+import { dayOf, iso, safeError, type LogRoot } from "./types";
 
 /** The daemon config is read for custom provider log roots at most this often. */
 const DISCOVERY_MS = 5 * 60_000;
@@ -51,11 +52,14 @@ export class TokenStore {
       onCall: (call, previous) => {
         addCall(this.data, call, previous, this.now());
         if (this.data.sessions.size > 5100) pruneData(this.data, this.now());
-      }, onSettle: call => settleCall(this.data, call, this.now()), onChange: () => this.changed() });
+      }, onSettle: call => settleCall(this.data, call, this.now()), onChange: () => this.changed(),
+      onThread: (child, parent) => { if (noteThread(this.data, child, parent)) this.changed(); } });
     this.initialized = this.persistence.restore(this.ingester).then(async saved => {
       this.data = saved.data; this.change += saved.change;
       pruneData(this.data, this.now()); this.lastPrune = dayOf(this.now());
       await this.ingester.scan();
+      // Once after upgrading to 2.13: Codex subagent threads imported earlier learn their parent session.
+      if (await this.ingester.probeThreads()) this.changed();
     });
     this.ready = this.initialized.then(() => this.ingester.backfillAll()).catch(error => {
       console.warn(`Token 导入失败（${safeError(error)}）。`);
@@ -89,8 +93,10 @@ export class TokenStore {
     else for (const [key, call] of this.data.recent) if (call.at < now - 75 * 60_000) this.data.recent.delete(key);
   }
   /**
-   * Custom providers (`extends: "claude" | "codex"`) that keep their logs elsewhere, from the daemon's provider config:
-   * their `env` or launcher text (see ./roots). New roots are watched from the next scan. Read at most every 5 minutes.
+   * Custom providers built on Claude Code, Codex, Grok CLI or Pi (see ./roots) that keep their logs elsewhere, from the
+   * daemon's provider config: their `env`, command line or launcher text, or Pi's settings. New roots are watched from the
+   * next scan. A root that only one custom provider uses, and that is not a standard one, is that provider's (gemini-B9):
+   * its sessions without a Paseo agent count for it. Read at most every 5 minutes.
    */
   discover(paseo: PaseoApi): Promise<void> {
     if (this.discovering) return this.discovering;
@@ -102,33 +108,60 @@ export class TokenStore {
       const { config } = await Promise.race([paseo.config.get(), new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error("timeout")), 10_000); timer.unref?.();
       })]).finally(() => clearTimeout(timer));
-      const found = await providerRoots(config.providers as Record<string, unknown> | undefined, this.rootContext);
-      const known = new Set(await Promise.all(this.ingester.roots.map(root => rootIdentity(root.path))));
-      const fresh: LogRoot[] = [];
+      // The built-in Pi provider needs no config entry; its settings may still move its sessions.
+      const providers = { pi: {}, ...config.providers as Record<string, unknown> | undefined };
+      const found = await providerRoots(providers, this.rootContext);
+      const identities = await Promise.all(this.ingester.roots.map(root => rootIdentity(root.path)));
+      const known = new Set(identities), standard = new Set(identities.slice(0, this.ingester.baseRoots));
+      const claims = new Map<string, Set<string>>(), fresh: LogRoot[] = [];
       for (const root of found) {
         const identity = await rootIdentity(root.path);
+        const providersOf = claims.get(identity) ?? new Set<string>(); providersOf.add(root.provider); claims.set(identity, providersOf);
         if (!known.has(identity)) { known.add(identity); fresh.push({ source: root.source, path: root.path }); }
       }
-      if (this.closed || !this.ingester.addRoots(fresh)) return;
+      if (this.closed) return;
+      const added = this.ingester.addRoots(fresh);
+      // Ownership follows the current config: a root another provider starts to share, or no provider names, loses it.
+      let owned = false;
+      for (const [index, root] of this.ingester.roots.entries()) {
+        const identity = identities[index] ?? await rootIdentity(root.path), owners = claims.get(identity);
+        const owner = !standard.has(identity) && owners?.size === 1 ? [...owners][0] : undefined;
+        if (root.provider !== owner) { if (owner) root.provider = owner; else delete root.provider; owned = true; }
+      }
+      if (!added && !owned) return;
       this.changed();
-      void this.poll(true);
+      if (added) void this.poll(true);
     })().catch(() => { /* the default roots keep working; the next read retries after the interval */ })
       .finally(() => { this.discovering = null; });
     return this.discovering;
   }
   coverage(): TokenSnapshot["coverage"] {
     return { earliestAt: this.data.earliestAt === null ? null : iso(this.data.earliestAt), latestAt: this.data.latestAt === null ? null : iso(this.data.latestAt),
-      backfill: { ...this.ingester.backfill }, roots: this.ingester.roots.map(root => ({ ...root, path: root.path.slice(0, 1024) })), truncated: { ...this.ingester.truncated } };
+      backfill: { ...this.ingester.backfill }, roots: this.ingester.roots.map(root => ({ source: root.source, path: root.path.slice(0, 1024), files: root.files, error: root.error })),
+      truncated: { ...this.ingester.truncated } };
   }
-  async read(input: { range: StatsRange; utcOffsetMinutes: number; revision?: string }, paseo?: PaseoApi): Promise<TokenResponse> {
+  /** Sessions read from a root one custom provider owns: session key → that provider (Provider 用量 for unmatched sessions). */
+  owners(): Map<string, string> {
+    const owners = new Map<string, string>();
+    for (const file of this.ingester.files.values()) {
+      const provider = this.ingester.roots[file.root]?.provider;
+      if (provider) for (const id of [file.state.sessionId, ...file.state.sessions]) owners.set(sessionKey(file.source, id), provider);
+    }
+    return owners;
+  }
+  async read(input: { range: StatsRange; utcOffsetMinutes: number; timeZone?: string; revision?: string }, paseo?: PaseoApi): Promise<TokenResponse> {
     await this.initialized;
     if (paseo) await this.directory.refresh(paseo);
-    const now = this.now(), today = Math.floor((now + input.utcOffsetMinutes * 60_000) / DAY);
+    const now = this.now();
     if (dayOf(now) !== this.lastPrune) { pruneData(this.data, now); this.lastPrune = dayOf(now); this.changed(); }
-    const revision = createHash("sha256").update(JSON.stringify([this.change, input.range, input.utcOffsetMinutes, today, this.directory.digest, this.ingester.roots, this.ingester.backfill, this.ingester.truncated])).digest("hex").slice(0, 24);
+    // The zone actually applied (null: the fixed offset) and its local today belong to the revision, so another zone, or the
+    // same zone past local midnight, never reuses an earlier projection (as observatory.stats.get does).
+    const zone = statsZone(input.utcOffsetMinutes, input.timeZone, now), today = statsDayText(statsLocalDay(now, zone));
+    const revision = createHash("sha256").update(JSON.stringify([this.change, input.range, input.utcOffsetMinutes, zone.name, today, this.directory.digest, this.ingester.roots, this.ingester.backfill, this.ingester.truncated])).digest("hex").slice(0, 24);
     if (input.revision === revision) return { mode: "unchanged", unchanged: true, revision };
     const cached = this.cached.get(revision); if (cached) return cached;
-    const result: Extract<TokenResponse, { mode: "full" }> = { ...buildTokenSnapshot(this.data, input, now, this.directory, this.coverage()), mode: "full", unchanged: false, revision };
+    const snapshot = buildTokenSnapshot(this.data, { range: input.range, utcOffsetMinutes: input.utcOffsetMinutes, timeZone: zone.name }, now, this.directory, this.coverage(), this.owners());
+    const result: Extract<TokenResponse, { mode: "full" }> = { ...snapshot, mode: "full", unchanged: false, revision };
     this.cached.set(revision, result);
     if (this.cached.size > 8) this.cached.delete(this.cached.keys().next().value!);
     return result;

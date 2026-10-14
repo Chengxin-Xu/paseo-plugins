@@ -7,6 +7,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { insightReportSchema, insightRunnerInfoSchema, insightRunnerSchema } from "./insights";
+import { statsTimeZoneSchema } from "./stats";
 
 type Finding = z.infer<typeof insightReportSchema>["findings"][number];
 export const FINDING_CATEGORIES = ["failure", "loop", "efficiency", "coordination", "quality"] as const satisfies readonly Finding["category"][];
@@ -56,7 +57,14 @@ export const suggestionReportSchema = z.object({
   watch: z.array(z.string().max(600)).max(5),
 });
 export const actionFeedbackSchema = z.object({ status: z.enum(["open", "adopted", "done", "dismissed"]), updatedAt: z.string() });
-const window = z.object({ days, from: z.string(), to: z.string(), reports: count, findings: count, agents: count });
+const offsetMinutes = z.number().int().min(-840).max(840);
+/**
+ * The days a suggestion read: from local midnight `days − 1` days back to `to` (grok-F3). `timeZone`: the device zone
+ * they were cut in; `utcOffsetMinutes`: its offset then (alone: a fixed offset). Neither (jobs from 2.13 and older, or
+ * automatic work before any client reported its zone): UTC days, which the page says.
+ */
+const window = z.object({ days, from: z.string(), to: z.string(), reports: count, findings: count, agents: count,
+  timeZone: z.string().max(64).nullable().optional(), utcOffsetMinutes: offsetMinutes.optional() });
 export const suggestionJobSchema = z.object({
   id: z.string().max(128), createdAt: z.string(), updatedAt: z.string(),
   status: z.enum(["queued", "collecting", "analyzing", "completed", "failed", "canceled", "skipped"]),
@@ -82,6 +90,8 @@ export const suggestionSummarySchema = z.object({
 
 export const insightOverviewSchema = z.object({
   generatedAt: z.string(), days, utcOffsetMinutes: z.number().int(),
+  /** The device zone the local days follow (each instant with its own offset); null: the fixed `utcOffsetMinutes`. */
+  timeZone: z.string().max(64).nullable().optional(),
   /** Local dates, inclusive. */
   from: z.string(), to: z.string(),
   autoEnabled: z.boolean(), runnerLabel: z.string().max(160),
@@ -117,9 +127,13 @@ export const insightOverviewSchema = z.object({
   reportsSinceSuggestions: count,
 });
 
+/**
+ * 7 / 30 days in the device's clock: `timeZone` (optional, as `observatory.stats.get` takes it) gives every past instant
+ * its own offset when the server knows the zone and it agrees with `utcOffsetMinutes` now; without it, the fixed offset.
+ */
 export const getInsightOverview = defineRpc({
   name: "observatory.insights.overview",
-  input: z.object({ days, utcOffsetMinutes: z.number().int().min(-840).max(840), revision: z.string().max(64).optional() }),
+  input: z.object({ days, utcOffsetMinutes: offsetMinutes, timeZone: statsTimeZoneSchema.optional(), revision: z.string().max(64).optional() }),
   output: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("unchanged"), unchanged: z.literal(true), revision: z.string() }),
     insightOverviewSchema.extend({ mode: z.literal("full"), unchanged: z.literal(false), revision: z.string() }),
@@ -130,8 +144,9 @@ export const getInsightSuggestions = defineRpc({
   name: "observatory.insights.suggestions", input: z.object({ jobId: z.string().min(1).max(128).optional() }),
   output: z.object({ job: suggestionJobSchema.nullable(), history: z.array(suggestionSummarySchema).max(20) }),
 });
+/** The device's clock cuts the window's days, as for the overview; without it, the zone a client reported last, or UTC. */
 export const startInsightSuggestions = defineRpc({
-  name: "observatory.insights.suggest", input: z.object({ days, runner: insightRunnerSchema.optional() }), output: suggestionJobSchema,
+  name: "observatory.insights.suggest", input: z.object({ days, runner: insightRunnerSchema.optional(), utcOffsetMinutes: offsetMinutes.optional(), timeZone: statsTimeZoneSchema.optional() }), output: suggestionJobSchema,
 });
 export const cancelInsightSuggestions = defineRpc({
   name: "observatory.insights.suggest-cancel", input: z.object({ jobId: z.string().min(1).max(128) }), output: suggestionJobSchema,
@@ -153,6 +168,15 @@ export type SuggestionEvidence = z.infer<typeof suggestionEvidenceSchema>;
 export type ActionFeedback = z.infer<typeof actionFeedbackSchema>;
 export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+const signed = (minutes: number) => `${minutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, "0")}:${String(Math.abs(minutes) % 60).padStart(2, "0")}`;
+/**
+ * How a suggestion's days were cut when not in a device zone (grok-F3): 「按 UTC 日期」 (older jobs, or automatic work
+ * before any client reported its zone) or 「按 UTC−07:00 的日期」 (a fixed offset). Null in a device zone: that is the norm.
+ */
+export function suggestionWindowNote(window: Pick<SuggestionJob["window"], "timeZone" | "utcOffsetMinutes">): string | null {
+  if (window.timeZone) return null;
+  return window.utcOffsetMinutes === undefined ? "按 UTC 日期" : `按 UTC${signed(window.utcOffsetMinutes)} 的日期`;
+}
 export interface OverviewState { revision: string; data: InsightOverview }
 export function mergeOverview(previous: OverviewState | undefined, response: InsightOverviewResponse): OverviewState {
   if (response.mode === "unchanged") {

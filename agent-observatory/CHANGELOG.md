@@ -1,5 +1,85 @@
 # Changelog
 
+## 2.15.2 — 2026-10-14
+
+Privacy fixes for what the observatory writes, sends and shows. Saved data carries over; what older versions kept that is no longer kept is cleaned when it is read.
+
+**AI reviews**
+- Grok CLI also records each review's prompt, with the session excerpt, in its own session-search index (`~/.grok/sessions/session_search.sqlite`), and the record stayed after the session was deleted, searchable from your other Grok sessions. Reviews now run with session search off (`GROK_SESSION_SEARCH=0`), and the run's record is deleted afterwards: freed pages are overwritten, the full-text index is merged and the write-ahead log emptied, with a second look a minute later. The startup sweep, and a second sweep an hour after start, remove records of interrupted reviews too. Only a record's directory, id and time are read, never its content. Two limits: while another program is reading the database the write-ahead log cannot be emptied, and the deleted text can stay in the log file until later writes overwrite it (search no longer finds it); leftovers are recognised by name, so any directory in the temp folder whose name starts with `paseo-insight-` counts as the observatory's, including one you named that way and the Grok sessions run in it.
+- The Grok CLI gets only the environment it needs (`PATH` with absolute entries only, `HOME`, user, locale, time zone, temp directory, proxy and certificate settings, `GROK_*` and `XAI_*`), not other providers' keys from the daemon's environment. A relative `PATH` entry is no longer searched for `grok`.
+- Masking covers more formats: npm, temporary AWS keys, Slack app and refresh tokens, Google OAuth tokens and client secrets, more GitLab tokens, Hugging Face, SendGrid, Stripe (`rk_`, `whsec_`), Groq, Composio (`ak_`), passwords in URLs of any scheme, Slack and Discord webhooks, and `key` / `sig` / `signature` URL parameters. Values in JSON that was stringified twice, and prefixes right after a `\n` escape, are recognised.
+- Text is masked before it is cut or turned into JSON: a cut could drop a private key's header or a token's prefix and send the rest as it was. In structured tool input and output, every string under a field whose name says it is a credential (`password`, `AWS_SESSION_TOKEN`, `api_key`, `Authorization`, `credentials`…) is masked whole, whatever it looks like, and the JSON is masked once more before it is cut (a cut could drop the field name and keep the whole value). Session details and the previous review are masked before they are cut too. The report and suggestions a model writes are masked again before they are stored (a provider reviewer can quote files it read on its own).
+- Analysis settings and the first review say that the session excerpt goes to the chosen model's provider and that masking is not exhaustive.
+
+**Scheduled runs**
+- For a failed turn the host records the Agent's last reply as the run's error, and the ledger kept its first 300 characters after the schedule was deleted. The ledger now keeps only the host's own error messages, or the `[System Error]` part the host adds after the reply (masked); anything else becomes a note that the error text was the Agent's reply and was not saved. Older ledgers are cleaned when read.
+- Merge and pull request links lose any `user:password@` (a push URL can carry a token), including links already stored in the ledger and the event history.
+- A damaged ledger, usage-limit history or suggestions file keeps a single backup, replaced the next time, instead of a new copy each time; log lines name the error instead of quoting the file.
+
+**Other**
+- 交给另一个 Provider and 交给 Agent get the profile list from the plugin server: id, name, provider, model, mode, thinking option, feature values and notes only. The device no longer receives the whole daemon config (provider environments, commands, plugin sources). Like the host, the list sets no length limits: the name and notes, which are only shown, are shortened when long (400 / 4,000 characters), the fields passed on to the new Agent are given as they are, and no profile is left out for a long value.
+- Send ledger: at most 3 copies of an unreadable ledger, for a week; temp files of interrupted writes are removed at the next start; log lines name the error only. The shared lock folder is tightened to 0700 and lock files are created 0600.
+
+## 2.15.1 — 2026-10-14
+
+- The server splits the lazily loaded interface chunk on its first request instead of at startup, and slices the source text instead of building strings character by character. This cuts startup CPU and resident memory; the RPC part budget and the interface stay the same.
+
+## 2.15.0 — 2026-10-13
+
+Lighter loading on phones and a fix for the Android app. Saved data carries over unchanged.
+
+- On connect the app receives only a small registration stub (`index.client.tsx`, compiled by Paseo, at most 32 KiB) and the sidebar needs-attention badge. The pages, panels and the badge popover, with its in-place approvals and quick replies, are fetched from the daemon in parts the first time one opens (each reply under 128 KiB), cached by content hash for the app session and evaluated afresh on every connection. A load shows a placeholder and can be retried; a version mismatch asks you to reconnect.
+- The badge stays resident: it refreshes every 20 seconds in the foreground, hides failed or stale counts and reports the device's time zone. The badge, the failed-run count, the popover and the dashboard share one needs-attention reading, so 知道了, 标记已读, an approval or a quick reply updates the badge at once.
+- Android: the sidebar status module failed to load under Hermes's default evaluator; it now uses a closure-based store. Client code no longer uses `class`, and a repository-wide check guards the Hermes build, the entry export and Paseo's interop patch.
+
+## 2.14.0 — 2026-10-12
+
+Fixes from a second review and a batch of features for handling things from your phone. Saved settings, receipts, snoozes, reports, statistics, token records and the schedule ledger carry over; new fields are optional. Downgrading to 2.13: token statistics can be re-imported only from the session logs that still exist (Claude Code keeps 30 days by default) and the old file is kept as `tokens.json.corrupt`; the 明细 → 观测 history is reset.
+
+**Needs attention**
+- One rule for the list, the sidebar badge, the popover and the detail: a turn that hit a usage limit, produced nothing or stopped half-way counts until you look at it, sub-agents included, and 稍后处理 (snooze) does not apply to it. Its button is 知道了 (got it), which clears the alert without a completion receipt. A turn still running when the host closed the session shows as 可能未收尾 and counts until you press 知道了 (kept across restarts).
+- 标记已读 (mark read) records the latest turn's completion time, verified by the server against the end time the plugin observed, so a result stays read after archiving, restarting or restoring, also when heartbeats run several turns in a row; a result can be marked read only while the page shows that very turn. Snoozes and quick replies follow turns the same way.
+- For agents the host has not loaded (all of them after a daemon restart), 标记已读 and 知道了 check the host's alert token and keep the receipt in the plugin instead of loading the agent; Paseo clears its own alert the next time the agent loads.
+- Screen-reader labels match each row's state, the popover fits the host's 440 px desktop limit, and storage warnings are full sentences.
+
+**In-place approvals and quick replies**
+- A pending tool approval can be answered from the popover (在这里审批) and the result page. It shows the full command or arguments (up to 64 KB per item, with a note when cut), files and working directory, and offers the provider's own options, answered exactly as chosen (lasting ones take a second tap), or 批准 / 拒绝 / 拒绝并中断. Never in bulk and never automatically; questions and plans stay in the chat.
+- Quick replies: when the latest reply asks whether to go on, or announces a next step and stops, the detail offers 继续，按你说的做 or 继续做完, and 先别动. The button's words are what is sent. A quick reply answers only its own turn: one per turn from any device, none once another turn has begun or when the plugin cannot verify the turn. Sentence patterns only; no model call, no stored reply text.
+- Quick replies and 发给这个 Agent (send to this agent) go through a send ledger on the plugin's server (`deferred-send.json`, the same code as Project Notes), which plans again from the agent's state under a per-agent lock: it steers into the running turn where the provider supports it, otherwise asks you to confirm the interruption for that turn or offers 等这一轮结束再发 (send when this turn ends), which queues the message until the turn ends and no approval is pending, even with the app closed. One message id per message, so a retry after a lost reply never sends twice.
+
+**Why a turn stopped**
+- Replies that only describe rate-limit or quota handling are no longer read as a usage limit; every Claude Code 2.1 limit notice is recognized; a reset time without a zone (resets 5am) is read in the device's time zone and marked as a guess; daylight-saving days are handled.
+
+**Resume after the limit resets**
+- The one-off resume heartbeat is written at a UTC time on a minute no other schedule uses and checked against the host's wake time. It counts as done only on proof tied to that run: the host's run record, or the resume prompt with the run's ids in the agent's own Claude Code, Codex or Pi session log (Grok sessions are never opened). When that cannot be told, the card says 未能确认续跑 (could not confirm) and nothing is resent automatically. A busy agent or a missed minute is retried for up to 6 hours; messaging the agent yourself cancels the resume; the stop card shows the real state and can cancel or reschedule.
+- The plugin deletes only its own one-off resume heartbeats, once a resume is done or canceled, and follows one whose time you moved in Paseo; one you changed otherwise is left to you.
+- New choices: 按额度窗口 (by usage window) when the reply gives no reset time, and 交给另一个 Provider… (hand over to another provider): a new agent in the same workspace whose editable first message points it at the original session.
+- Known limits of Paseo 0.11.1, which has no idempotent create and no conditional delete: a heartbeat the host writes more than two minutes late can still wake the agent after it was marked unconfirmed, and a heartbeat you edit in Paseo after the plugin last read it can still be deleted.
+
+**Time zones, usage limits and tokens**
+- The Token page, 今日 Token, the live rate, 明细 → 观测 and the analysis overview split days in the device's time zone, daylight-saving days included; hourly data is kept for 29 days.
+- Usage-limit capsules warn only on current readings (an old one shows 读数 08:30), and usage is sampled only while a page shows it.
+- New token sources: Grok CLI (each session's `usage.json` only) and Pi, also behind custom providers. Custom providers' log directories are taken from their env, command line and launcher script in the order their process gets them (read as text, never run). Long sessions with many sub-agents no longer re-read every log on each poll.
+
+**AI reviews (Grok CLI)**
+- The session Grok CLI saves for an analysis, which holds the whole prompt, is deleted when the analysis ends; leftovers of an interrupted run are removed at the next start (only the plugin's own `paseo-insight-*` groups). Built-in tools are removed with `--disallowed-tools` and cross-session memory is off.
+
+**Sessions, schedules and archiving**
+- Restoring a session runs as a server task with step-by-step progress; the timeline has find-in-page; 归档已读完成 (archive read results) leaves agents a heartbeat or an unfinished sub-agent still needs, and is unavailable while the schedules cannot all be read. The plugin's `agent.turn_ended` handlers are one host registration.
+
+## 2.13.0 — 2026-10-11
+
+Fixes from the review of 2.12 and features that show at a glance who is waiting for you and why. Saved data carries over; 2.12 ignores the new fields.
+
+- A needs-attention count beside Agent 观测台 in the sidebar, with a popover of up to 8 agents, oldest first, each with a one-line reason; the count is computed on the server with the page's rules and hidden whenever it cannot be trusted. The scheduled runs page shows failures of the last 24 hours.
+- One-line reasons without a model call: a question, a plan, a command awaiting approval, an error, a usage limit and its reset. Host alert text is kept in memory only (at most 160 characters, credentials masked).
+- Questions and plans no longer show as approvals. Turns that hit a usage limit, produced nothing or stopped after a tool call are labelled instead of 已完成 or 空闲, from the failure reason and the closing sentences only; nothing is stored. A one-off heartbeat you confirm can resume the agent after the limit resets.
+- Rows show todo progress, context use, links to merge and pull requests (only the link is stored) and heartbeat wake times; 归档已读完成 takes a second tap; 发给这个 Agent steers into the running turn where supported instead of interrupting it.
+- Statistics no longer drop late-evening turns in time zones west of UTC. The Token page adds usage per Paseo provider and the host's usage-limit windows (`providers.listUsage()`; account names stored only as hashes), and reads Codex's archived sessions.
+- Scheduled runs are recorded in the background (the schedules folder is watched), and cadences read as Chinese sentences.
+- Performance: one shared agent directory per host, rows updated in place, incremental timeline reads (a five-minute session went from 108 to 57 requests and from about 74 MB to 4 MB).
+- Uses Paseo 0.11's screen and sidebar APIs, with fallbacks for older hosts.
+
 ## 2.12.0 — 2026-10-10
 
 Security hardening after two external reviews of the published plugin. Saved settings, reports and statistics carry over unchanged; a saved built-in Grok choice keeps running grok-4.7 · xhigh.

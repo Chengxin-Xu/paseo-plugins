@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import Module from "node:module";
 import test from "node:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement } from "react";
 import { getInsightOverview, suggestionJobSchema, suggestionSummarySchema, type SuggestionJob, type SuggestionReport } from "../shared/insight-overview";
 import { insightJobSchema, type InsightJob, type InsightReport } from "../shared/insights";
 import { AUTO_SUGGESTION_COOLDOWN_MS, MAX_OVERVIEW_BYTES, buildInsightOverview, getInsightWindow, getSuggestionTiming, summarizeSuggestion, type BuildInsightOverviewOptions } from "../server/insight-overview";
@@ -185,4 +188,31 @@ test("adversarial UTF8 and JSON-escaped payloads remain under 30 KB including tw
     assert.equal(result.totals.reports, 60); assert.equal(result.totals.openFindings, 720); assert.equal(result.totals.tokens, Number.MAX_SAFE_INTEGER);
     assert.ok(result.projects.length && result.agents.length && result.findings.length); assert.equal(JSON.stringify(options), before);
   }
+});
+
+// The client hook reads AppState from react-native (Flow source node cannot load) and RPCs from the host: stub both, in the background.
+const loader = Module as unknown as { _resolveFilename(request: string, ...rest: unknown[]): string; _cache: Record<string, unknown> };
+const stubs: Record<string, unknown> = { "react-native": { AppState: { currentState: "background", addEventListener: () => ({ remove() {} }) } },
+  "@getpaseo/plugin/client": { useRpc: () => async () => { throw new Error("a server render never fetches"); } } };
+for (const [name, value] of Object.entries(stubs)) loader._cache[`\0stub:${name}`] = { id: `\0stub:${name}`, filename: `\0stub:${name}`, loaded: true, exports: value };
+const resolveFilename = loader._resolveFilename;
+loader._resolveFilename = function (request, ...rest) { return request in stubs ? `\0stub:${request}` : resolveFilename.call(this, request, ...rest); };
+// A server render runs the hook once, without effects or fetches. react-dom has no type declarations here; React Query is
+// imported statically above, so it is the same CommonJS instance the hook requires.
+const { renderToString } = require("react-dom/server") as { renderToString(element: ReturnType<typeof createElement>): string };
+
+test("总览 polling stops while the app is in the background and never refetches on window focus", async () => {
+  // Imported only now, after the stubs are in place.
+  const { overviewPollMs, useInsightOverview } = await import("../client/use-insight-overview");
+  assert.equal(overviewPollMs(true, "analyzing"), 3000); assert.equal(overviewPollMs(true, "completed"), 60_000); assert.equal(overviewPollMs(true, undefined), 60_000);
+  assert.equal(overviewPollMs(false, "queued"), false);
+  const client = new QueryClient();
+  function Overview() { useInsightOverview(7, true); return null; }
+  renderToString(createElement(QueryClientProvider, { client }, createElement(Overview)));
+  const query = client.getQueryCache().getAll()[0]!, options = query.options as Record<string, unknown>;
+  // Shown, with a suggestion job analyzing, but the app is in the background: no read and no 3 s poll.
+  query.setData({ revision: "r", data: { suggestionJob: { status: "analyzing" } } });
+  assert.equal(options.enabled, false); assert.equal((options.refetchInterval as (value: typeof query) => unknown)(query), false);
+  assert.equal(options.refetchOnWindowFocus, false); assert.ok(Number(options.staleTime) >= 5000);
+  client.clear();
 });

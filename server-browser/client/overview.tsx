@@ -3,6 +3,7 @@ import { Icon, ScrollView } from '@getpaseo/plugin/client/react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { memo, useEffect, useMemo, useState } from 'react';
 import { AppState, Image, Pressable, Text, View } from 'react-native';
+import { frameCache } from './frame-cache';
 import { frameRpc, overviewRpc, type BrowserActivity, type BrowserOverviewItem, type BrowserSession } from '../shared/browser';
 import { buildAgentTabGroups, controlLooks, type BrowserAgentTab } from './agent-tabs-model';
 import { Banner, Button, ChipBar, EmptyState, IconButton, MetaLine, ProjectMark, Row, SearchField, SectionHeader, Skeleton, Spacer, SyncStatus, Toolbar, fontSize, hairline, hue, hueFor, radius, relativeTime, space, toneColor, type Tone } from './kit';
@@ -32,8 +33,12 @@ export function useBrowserOverview(hostId: string, visible = true) {
   const query = useQuery({
     queryKey, enabled: active,
     queryFn: async () => { const previous = queryClient.getQueryData<OverviewData>(queryKey); return mergeOverview(previous, await read(overviewRequest(previous))); },
-    refetchInterval: active ? OVERVIEW_POLL_MS : false, refetchIntervalInBackground: false, retry: false, staleTime: 2000, gcTime: 10_000,
+    refetchInterval: active ? OVERVIEW_POLL_MS : false, refetchIntervalInBackground: false, retry: false, refetchOnWindowFocus: false, staleTime: 2000, gcTime: 10_000,
   });
+  useEffect(() => {
+    if (query.error) frameCache.clearHost(hostId);
+    else if (query.data) frameCache.retain(hostId, new Set(query.data.items.filter((item) => item.session.status === 'running').map((item) => item.workspace.id)));
+  }, [hostId, query.data, query.error]);
   const [expired, setExpired] = useState(false);
   useEffect(() => {
     const delay = staleDelay(query.dataUpdatedAt, Date.now());
@@ -46,22 +51,20 @@ export function useBrowserOverview(hostId: string, visible = true) {
 }
 
 /** Last frame each viewer received in this app session: instant thumbnails and a placeholder while switching back. */
-const lastFrames = new Map<string, Frame>();
-export function rememberFrame(hostId: string, workspaceId: string, frame: Frame): void { lastFrames.set(`${hostId}:${workspaceId}`, frame); }
-export function recallFrame(hostId: string, workspaceId: string): Frame | undefined { return lastFrames.get(`${hostId}:${workspaceId}`); }
+export function rememberFrame(hostId: string, workspaceId: string, frame: Frame): void { frameCache.set(hostId, workspaceId, frame); }
+export function recallFrame(hostId: string, workspaceId: string): Frame | undefined { return frameCache.get(hostId, workspaceId); }
 
-/** One small frame per running browser, fetched once per page (no polling); the viewer's own last frame shows meanwhile. */
+/** Small thumbnails have no full-frame fallback; stopped/offline cards unmount their query and release it immediately. */
 function Thumbnail({ theme, hostId, item, enabled }: { theme: Theme; hostId: string; item: BrowserOverviewItem; enabled: boolean }) {
   const { colors } = theme;
   const capture = useRpc(frameRpc);
   const running = item.session.status === 'running';
-  const [cached] = useState(() => recallFrame(hostId, item.workspace.id));
   const thumbnail = useQuery({
     queryKey: ['server-browser', hostId, 'thumbnail', item.workspace.id, item.session.url, item.session.title], enabled: enabled && running,
     queryFn: async () => (await capture({ workspaceId: item.workspace.id, quality: 'smooth', maxWidth: 480, maxHeight: 320 })).frame ?? null,
-    staleTime: 60_000, gcTime: 120_000, retry: false,
+    staleTime: 60_000, gcTime: 0, retry: false, refetchOnWindowFocus: false,
   });
-  const frame = thumbnail.data ?? (running ? cached : undefined);
+  const frame = enabled && running ? thumbnail.data : null;
   return <View style={{ aspectRatio: 16 / 10, backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
     {frame ? <Image accessibilityIgnoresInvertColors source={{ uri: frame.dataUrl }} resizeMode="cover" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} />
       : <View style={{ alignItems: 'center', gap: space.xs }}>
@@ -91,7 +94,7 @@ const OverviewCard = memo(function OverviewCard({ theme, hostId, entry, width, s
     onPress={() => onSelect(item.workspace.id)}
     style={(state) => ({ width, borderRadius: radius.lg, overflow: 'hidden', borderWidth: selected ? 2 : hairline, borderColor: selected ? colors.foregroundMuted : badge && !quietLook(badge) ? toneColor(theme, badge.tone, 'line') : colors.border, backgroundColor: (state as Interaction).hovered || state.pressed ? colors.surface1 : colors.surface0 })}>
     <View>
-      <Thumbnail theme={theme} hostId={hostId} item={item} enabled={thumbnails} />
+      {thumbnails && item.session.status === 'running' ? <Thumbnail theme={theme} hostId={hostId} item={item} enabled /> : <View style={{ aspectRatio: 16 / 10, backgroundColor: colors.surface2, alignItems: 'center', justifyContent: 'center' }}><Icon name="MonitorOff" size={20} color={colors.foregroundMuted} /></View>}
       {badge ? <View pointerEvents="none" style={{ position: 'absolute', top: space.sm, left: space.sm }}><StatePill theme={theme} look={badge} floating /></View> : null}
     </View>
     <View style={{ gap: 3, paddingHorizontal: space.md, paddingTop: 10, paddingBottom: space.md, borderTopWidth: hairline, borderTopColor: colors.border }}>
@@ -109,9 +112,9 @@ const quietLook = (look: Look) => look.tone === 'neutral' || look.tone === 'gray
 const filters: readonly { value: OverviewFilter; label: string; tone?: Tone; motion?: 'spin' | 'ping' }[] = [{ value: 'all', label: '全部' }, { value: 'agent', label: 'Agent 进行中', tone: 'info', motion: 'spin' }, { value: 'takeover', label: '待接管', tone: 'warning', motion: 'ping' }];
 
 /** All browsers: a thumbnail grid on wide layouts, a list on phones. Selecting only switches what this viewer watches. */
-export function BrowserOverview({ theme, compact, hostId, items, loading, error, selectedId, onSelect, onBack, onAddWorkspace, stale, active, pending, checkedAt, onRefresh }: {
+export function BrowserOverview({ theme, compact, hostId, items, loading, error, selectedId, onSelect, onBack, onAddWorkspace, stale, active, pending, checkedAt, onRefresh, onOpenOrphans }: {
   theme: Theme; compact: boolean; hostId: string; items: BrowserOverviewItem[]; loading: boolean; error: string | null; selectedId: string; onSelect: (id: string) => void; onBack?: () => void; onAddWorkspace: () => void;
-  stale: boolean; active: boolean; pending: boolean; checkedAt?: number; onRefresh: () => void;
+  stale: boolean; active: boolean; pending: boolean; checkedAt?: number; onRefresh: () => void; onOpenOrphans: () => void;
 }) {
   const [filter, setFilter] = useState<OverviewFilter>('all');
   const [search, setSearch] = useState('');
@@ -136,6 +139,7 @@ export function BrowserOverview({ theme, compact, hostId, items, loading, error,
         <Spacer />
         <View style={{ width: 260 }}><SearchField theme={theme} value={search} onChangeText={setSearch} placeholder="搜索项目、Agent 或页面" accessibilityLabel="搜索项目、工作区、Agent 或页面" /></View>
       </>}
+      <IconButton theme={theme} icon="MonitorOff" label="孤儿浏览器" testID="server-browser-overview-orphans" onPress={onOpenOrphans} />
       <View testID="server-browser-overview-freshness"><SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} /></View>
       <IconButton theme={theme} icon="RefreshCw" label="刷新浏览器总览" disabled={!active} testID="server-browser-overview-refresh" onPress={onRefresh} />
       {compact ? <IconButton theme={theme} icon="Plus" label="打开其他工作区的浏览器" testID="server-browser-workspace-add" onPress={onAddWorkspace} />
@@ -152,7 +156,7 @@ export function BrowserOverview({ theme, compact, hostId, items, loading, error,
         <SectionHeader theme={theme} title={section.title} count={section.entries.length} icon="Folder" tone={hueFor(section.identity)} />
         {section.entries.map((entry) => <OverviewRow key={entry.item.workspace.id} theme={theme} entry={entry} selected={entry.item.workspace.id === selectedId} onSelect={onSelect} />)}
       </View>) : sections.length ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, padding: space.md }}>
-        {sections.flatMap((section) => section.entries).map((entry) => <OverviewCard key={entry.item.workspace.id} theme={theme} hostId={hostId} entry={entry} width={cardWidth} selected={entry.item.workspace.id === selectedId} thumbnails={active} onSelect={onSelect} />)}
+        {sections.flatMap((section) => section.entries).map((entry) => <OverviewCard key={entry.item.workspace.id} theme={theme} hostId={hostId} entry={entry} width={cardWidth} selected={entry.item.workspace.id === selectedId} thumbnails={active && !error} onSelect={onSelect} />)}
       </View> : null}
     </ScrollView>
   </View>;

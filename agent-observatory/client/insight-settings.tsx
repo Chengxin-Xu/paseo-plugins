@@ -13,7 +13,7 @@ export function runnerLabelOf(job: Pick<InsightJob, "runner" | "model" | "effort
 }
 export const sameRunner = (a: InsightRunner | undefined, b: InsightRunner | undefined) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
 const accessLooks: Record<InsightRunnerOption["access"], { label: string; hue: Hue; icon: string; hint: string }> = {
-  none: { label: "不用工具", hue: "green", icon: "ShieldCheck", hint: "在临时目录里运行，不创建会话" },
+  none: { label: "不用工具", hue: "green", icon: "ShieldCheck", hint: "不提供工具，调用一律拒绝；Grok 会话和它的会话搜索记录在分析结束后立即删除" },
   read: { label: "只读", hue: "teal", icon: "Eye", hint: "以只读模式运行，可以查看代码但不能修改" },
   ask: { label: "需审批时拒绝", hue: "amber", icon: "ShieldAlert", hint: "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行" },
 };
@@ -174,6 +174,7 @@ export function InsightSettingsSheet({ theme, open, onClose, settings, pick }: {
         </View> : null}
       </> : null}
     </View>
+    <MetaLine theme={theme} numberOfLines={4} parts={["分析会把会话摘录（提示词、回复、工具调用和输出）连同项目信息发给所选模型的提供商；常见凭据会先打码，但不保证全部遮住。"]} />
     <MetaLine theme={theme} numberOfLines={5} parts={["选 Profile 或其他模型时，分析会作为被分析会话的子 Agent 在它的工作区里运行：有只读模式就用只读模式，否则用逐项审批的模式并拒绝每个审批请求；写完报告就自动归档，用量计入对应账号。没有这两种模式的提供商不能用来分析。"]} />
     {configure.error ? <Banner theme={theme} tone="danger" message={configure.error.message} /> : null}
   </Sheet>;

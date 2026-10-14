@@ -6,7 +6,7 @@ import { cancelInsight, getInsightState, getInsightReport, grokModelLabel, grokR
 import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
 import { assessTrajectory, buildAnalysisRequest, InsightReportError, isUsefulInsightReport, parseGrokReport, redactSecrets, trajectoryFingerprint } from "./insight-analysis";
 import { excerptText } from "../shared/evidence";
-import { ANALYSIS_SYSTEM_PROMPT, findGrokBinary, runGrokAnalysis } from "./grok-runner";
+import { ANALYSIS_SYSTEM_PROMPT, findGrokBinary, GrokTurnLimitError, runGrokAnalysis } from "./grok-runner";
 import { abortable, fetchTrajectory } from "./trajectory";
 import { telemetryDirectory } from "./telemetry";
 import { fitInsightReport, InsightStorage, retainInsightJobs, summarizeInsight, type InsightActivity, type InsightCooldown } from "./insight-storage";
@@ -16,15 +16,23 @@ import { isInsightAgent, isKnownInsightAgent, markInsightAgent } from "./insight
 import { getInsightOverview, getInsightSuggestions, startInsightSuggestions, cancelInsightSuggestions, setActionFeedback,
   suggestionReportSchema, type OverviewDays, type SuggestionJob, type ActionFeedback } from "../shared/insight-overview";
 import { buildInsightOverview, getSuggestionTiming, summarizeSuggestion } from "./insight-overview";
-import { collectSuggestionContext, buildSuggestionPrompt, parseSuggestionText, SUGGESTION_SYSTEM_PROMPT } from "./insight-suggestions";
+import { collectSuggestionContext, buildSuggestionPrompt, parseSuggestionText, suggestionZone, windowClock, SUGGESTION_SYSTEM_PROMPT, type SuggestionClock } from "./insight-suggestions";
 import { SuggestionStorage, retainSuggestionJobs } from "./insight-suggestions-storage";
 
 const ACTIVE = new Set<InsightJob["status"]>(["queued", "collecting", "analyzing"]);
 const defaults: InsightSettings = { autoEnabled: false, minTurns: 3, minTools: 3, cooldownHours: 6, runner: { kind: "auto" } };
 type ReportQueueEntry = { kind: "report"; id: string; paseo: PaseoApi; question?: string; mode: "full" | "incremental"; runner?: InsightRunner };
-type SuggestionQueueEntry = { kind: "suggestion"; id: string; paseo: PaseoApi; runner?: InsightRunner };
+/** `clock`: whose days the window is cut in, fixed when the job is queued (the client's, else the devices' last zone). */
+type SuggestionQueueEntry = { kind: "suggestion"; id: string; paseo: PaseoApi; runner?: InsightRunner; clock: SuggestionClock | null };
 type QueueEntry = ReportQueueEntry | SuggestionQueueEntry;
-export interface InsightManagerOptions { directory?: string; now?: () => number; findBinary?: typeof findGrokBinary; run?: typeof runGrokAnalysis; fetch?: typeof fetchTrajectory }
+export interface InsightManagerOptions {
+  directory?: string; now?: () => number; findBinary?: typeof findGrokBinary; run?: typeof runGrokAnalysis; fetch?: typeof fetchTrajectory;
+  /**
+   * The zone a client reported last (DeviceZone.device()), for suggestion windows queued without a client's clock:
+   * automatic suggestions in the background (grok-F3). Null or absent: UTC days, which the job then says.
+   */
+  zone?: () => string | null;
+}
 export class InsightManager {
   private settings = structuredClone(defaults);
   private readonly registries = new WeakMap<PaseoApi, InsightRunnerRegistry>();
@@ -44,6 +52,7 @@ export class InsightManager {
   private readonly run: typeof runGrokAnalysis;
   private readonly fetch: typeof fetchTrajectory;
   private readonly findBinary: typeof findGrokBinary;
+  private readonly zone: () => string | null;
   private binary: string | null = null;
   private ready: Promise<void>;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -58,6 +67,7 @@ export class InsightManager {
     this.storage = new InsightStorage(options.directory ?? telemetryDirectory());
     this.suggestionStorage = new SuggestionStorage(options.directory ?? telemetryDirectory()); this.now = options.now ?? Date.now;
     this.run = options.run ?? runGrokAnalysis; this.fetch = options.fetch ?? fetchTrajectory; this.findBinary = options.findBinary ?? findGrokBinary;
+    this.zone = options.zone ?? (() => null);
     this.ready = this.initialize();
   }
   private async initialize() {
@@ -93,10 +103,17 @@ export class InsightManager {
     return runners;
   }
   async models(paseo: PaseoApi, provider: string) { await this.ready; this.attach(paseo); return this.registry(paseo).models(provider); }
-  async overview(paseo: PaseoApi, days: OverviewDays, utcOffsetMinutes: number, revision?: string) {
+  /** 总览 in the client's clock: its offset, and its IANA zone when it knows one (grok-F3). */
+  async overview(paseo: PaseoApi, days: OverviewDays, utcOffsetMinutes: number, revision?: string, timeZone?: string) {
     await this.ready; this.attach(paseo);
     const runnerLabel = await this.runnerLabel(paseo);
-    return buildInsightOverview({ jobs: this.jobs, suggestionJobs: this.suggestionJobs, autoEnabled: this.settings.autoEnabled, runnerLabel, now: this.now(), days, utcOffsetMinutes, revision });
+    return buildInsightOverview({ jobs: this.jobs, suggestionJobs: this.suggestionJobs, autoEnabled: this.settings.autoEnabled, runnerLabel, now: this.now(), days, utcOffsetMinutes, timeZone, revision });
+  }
+  /** A client's clock when it sent one, else the zone a client reported last (automatic work), else none (UTC). */
+  private clockFor(clock?: SuggestionClock): SuggestionClock | null {
+    if (clock && (clock.timeZone || typeof clock.utcOffsetMinutes === "number")) return { timeZone: clock.timeZone ?? null, utcOffsetMinutes: clock.utcOffsetMinutes ?? null };
+    const device = this.zone();
+    return device ? { timeZone: device } : null;
   }
   private async available() {
     if (this.settings.runner.kind === "grok" || (this.settings.runner.kind === "auto" && this.binary)) return !!this.binary;
@@ -283,11 +300,11 @@ export class InsightManager {
           if (!this.binary) throw new Error("未找到 Grok CLI。安装并登录后可刷新重试，或在「分析设置」里换一个执行器。");
           const execution = this.run({ binary: this.binary, prompt: request.prompt, signal: abort.signal, model: plan.model, effort: plan.effort ?? undefined });
           this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
-          const output = await abortable(execution, abort.signal);
-          if (abort.signal.aborted || this.closed) break;
-          try { parsed = parseGrokReport(output, request.references); break; }
-          catch (error) { if (!(error instanceof InsightReportError) || attempt > 0) throw error; priorUsage = error.usage; retried = true;
-            this.update(job.id, { stage: "首份报告未通过质量检查，使用精简证据重试一次" }); request = buildAnalysisRequest(trajectory, entry.question, { ...context, compact: true }); }
+          // A Grok turn limit (GrokTurnLimitError) is an InsightReportError too: it gets the same one compact retry (opus-F72).
+          try { const output = await abortable(execution, abort.signal); if (abort.signal.aborted || this.closed) break; parsed = parseGrokReport(output, request.references); break; }
+          catch (error) { if (abort.signal.aborted || this.closed || !(error instanceof InsightReportError) || attempt > 0) throw error; priorUsage = error.usage; retried = true;
+            this.update(job.id, { stage: error instanceof GrokTurnLimitError ? "Grok 用完轮次仍没有报告，使用精简证据重试一次" : "首份报告未通过质量检查，使用精简证据重试一次" });
+            request = buildAnalysisRequest(trajectory, entry.question, { ...context, compact: true }); }
         }
         if (abort.signal.aborted || this.closed) continue; if (!parsed) throw new Error("分析未返回可用报告");
         if (retried) { const sum = (a: number | null | undefined, b: number | null | undefined) => a == null || b == null ? null : a + b;
@@ -313,7 +330,11 @@ export class InsightManager {
     return structuredClone({ job: (jobId ? history.find(job => job.id === jobId) : history.find(job => job.status === "completed" && job.report)) ?? null,
       history: history.map(summarizeSuggestion) });
   }
-  async suggest(paseo: PaseoApi, days: OverviewDays, runner?: InsightRunner, trigger: "manual" | "auto" = "manual"): Promise<SuggestionJob> {
+  /**
+   * Queues a suggestion set over `days` local days. `clock` is the requesting client's (manual); automatic jobs, and
+   * clients that send none, use the zone a client reported last, else UTC days (grok-F3).
+   */
+  async suggest(paseo: PaseoApi, days: OverviewDays, runner?: InsightRunner, trigger: "manual" | "auto" = "manual", clock?: SuggestionClock): Promise<SuggestionJob> {
     await this.ready;
     if (this.closed) throw new Error("分析服务正在关闭");
     if (trigger === "auto" && !this.settings.autoEnabled) throw new Error("自动分析已关闭");
@@ -323,18 +344,18 @@ export class InsightManager {
       if (trigger === "manual" && existing.trigger === "auto" && existing.status === "queued") {
         this.updateSuggestion(existing.id, { trigger: "manual", stage: "手动建议已提升队列优先级" });
         const entry = this.queue.find(entry => entry.id === existing.id);
-        if (entry?.kind === "suggestion") { this.queue = this.queue.filter(item => item !== entry); entry.runner = runner; this.enqueue(entry, "manual"); }
+        if (entry?.kind === "suggestion") { this.queue = this.queue.filter(item => item !== entry); entry.runner = runner; if (clock) entry.clock = this.clockFor(clock); this.enqueue(entry, "manual"); }
       }
       return structuredClone(this.suggestionJobs.find(job => job.id === existing.id)!);
     }
     if (this.queue.length >= 8) throw new Error("分析队列已满，请等待当前任务完成。");
-    const at = this.iso(), selection = runner ?? this.settings.runner;
+    const at = this.iso(), selection = runner ?? this.settings.runner, resolved = this.clockFor(clock);
     const job: SuggestionJob = { id: randomUUID(), createdAt: at, updatedAt: at, status: "queued", trigger, stage: "已加入建议队列",
-      window: { days, from: at, to: at, reports: 0, findings: 0, agents: 0 },
+      window: { days, from: at, to: at, reports: 0, findings: 0, agents: 0, ...windowClock(suggestionZone(resolved, this.now()), this.now()) },
       runner: selection.kind === "grok" ? grokPlan(selection).info : { ...BUILTIN_INSIGHT_RUNNER, kind: selection.kind, label: selection.kind === "auto" ? AUTO_RUNNER_LABEL : "等待解析分析执行器",
         provider: selection.kind === "provider" ? selection.provider : null, model: null, thinkingOptionId: null },
       usage: null, error: null, report: null, basis: [] };
-    this.suggestionJobs.unshift(job); this.enqueue({ kind: "suggestion", id: job.id, paseo, runner }, trigger); this.changed(); this.kick();
+    this.suggestionJobs.unshift(job); this.enqueue({ kind: "suggestion", id: job.id, paseo, runner, clock: resolved }, trigger); this.changed(); this.kick();
     return structuredClone(job);
   }
   private async runSuggestion(entry: SuggestionQueueEntry) {
@@ -343,7 +364,7 @@ export class InsightManager {
     const abort = new AbortController(); this.current = { id: job.id, abort };
     try {
       this.updateSuggestion(job.id, { status: "collecting", stage: "汇总近期报告与发现反馈" });
-      const context = collectSuggestionContext(this.jobs, job.window.days, this.now());
+      const context = collectSuggestionContext(this.jobs, job.window.days, this.now(), entry.clock);
       this.updateSuggestion(job.id, { window: context.window, basis: context.basis });
       if (!context.eligible) { this.updateSuggestion(job.id, { status: "skipped", stage: context.reason }); return; }
       if (this.cleanup) await abortable(this.cleanup, abort.signal);
@@ -371,10 +392,10 @@ export class InsightManager {
           const execution = this.run({ binary: this.binary, prompt: buildSuggestionPrompt(context, { compact: attempt > 0 }),
             signal: abort.signal, schema: suggestionReportSchema, systemPrompt: SUGGESTION_SYSTEM_PROMPT, model: plan.model, effort: plan.effort ?? undefined });
           this.executions.add(execution); void execution.then(() => this.executions.delete(execution), () => this.executions.delete(execution));
-          const output = await abortable(execution, abort.signal);
-          try { result = parseSuggestionText(output, context.references); }
-          catch (error) { if (!(error instanceof InsightReportError) || attempt) throw error; priorUsage = error.usage;
-            this.updateSuggestion(job.id, { stage: "首份建议未通过检查，使用精简报告重试一次" }); continue; }
+          // The run's own failure (a Grok turn limit) is inside the try, so it gets the one compact retry too (opus-F72).
+          try { result = parseSuggestionText(await abortable(execution, abort.signal), context.references); }
+          catch (error) { if (abort.signal.aborted || this.closed || !(error instanceof InsightReportError) || attempt) throw error; priorUsage = error.usage;
+            this.updateSuggestion(job.id, { stage: error instanceof GrokTurnLimitError ? "Grok 用完轮次仍没有建议，使用精简报告重试一次" : "首份建议未通过检查，使用精简报告重试一次" }); continue; }
           if (attempt) {
             const sum = (a: number | null | undefined, b: number | null | undefined) => a == null || b == null ? null : a + b;
             result.usage = { inputTokens: sum(priorUsage?.inputTokens, result.usage?.inputTokens), outputTokens: sum(priorUsage?.outputTokens, result.usage?.outputTokens), costUsd: sum(priorUsage?.costUsd, result.usage?.costUsd) };
@@ -436,15 +457,19 @@ export class InsightManager {
     await this.persist(); await this.storage.close(); await this.suggestionStorage.close();
   }
 }
-export function registerInsights(server: PluginServerContext): () => Promise<void> {
-  const manager = new InsightManager();
+/**
+ * `options.zone`: the zone a client reported last (index.server.ts passes `() => zones.device()`), for the day windows
+ * of suggestions queued without a client's clock (grok-F3). Without it those windows are UTC days and say so.
+ */
+export function registerInsights(server: PluginServerContext, options: { zone?: () => string | null } = {}): () => Promise<void> {
+  const manager = new InsightManager({ zone: options.zone });
   server.handle(getInsightState, ({ agentId }, { paseo }) => { manager.attach(paseo); return manager.state(agentId); });
   server.handle(listInsightJobs, ({ agentId, revision }, { paseo }) => { manager.attach(paseo); return manager.list(agentId, revision); });
   server.handle(listInsightRunners, (_, { paseo }) => manager.runners(paseo));
   server.handle(listInsightModels, ({ provider }, { paseo }) => manager.models(paseo, provider));
-  server.handle(getInsightOverview, ({ days, utcOffsetMinutes, revision }, { paseo }) => manager.overview(paseo, days, utcOffsetMinutes, revision));
+  server.handle(getInsightOverview, ({ days, utcOffsetMinutes, timeZone, revision }, { paseo }) => manager.overview(paseo, days, utcOffsetMinutes, revision, timeZone));
   server.handle(getInsightSuggestions, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.suggestions(jobId); });
-  server.handle(startInsightSuggestions, ({ days, runner }, { paseo }) => manager.suggest(paseo, days, runner));
+  server.handle(startInsightSuggestions, ({ days, runner, timeZone, utcOffsetMinutes }, { paseo }) => manager.suggest(paseo, days, runner, "manual", { timeZone, utcOffsetMinutes }));
   server.handle(cancelInsightSuggestions, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.cancelSuggestion(jobId); });
   server.handle(setActionFeedback, ({ jobId, actionId, status }, { paseo }) => { manager.attach(paseo); return manager.actionFeedback(jobId, actionId, status); });
   server.handle(getInsightReport, ({ jobId }, { paseo }) => { manager.attach(paseo); return manager.report(jobId); });

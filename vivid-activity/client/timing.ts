@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type RefObject } from "react";
-import { Platform } from "react-native";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { rowTimeText } from "../shared/timing";
 import { foldRuntime, type RowTiming } from "./fold-runtime";
 import { useForeground } from "./use-foreground";
@@ -50,34 +49,10 @@ export function useLiveNow(active: boolean): number | null {
   return on ? foldRuntime.serverNow() : null;
 }
 
-type Observed = { observe(node: unknown): void; disconnect(): void };
-declare const IntersectionObserver:
-  | (new (callback: (entries: Array<{ isIntersecting: boolean }>) => void) => Observed)
-  | undefined;
-
-/**
- * Whether the row is on screen: web asks the browser (only while `watch`, i.e. for live rows); native lists unmount rows
- * far off screen, so mounted counts as visible.
- */
-export function useOnScreen(ref: RefObject<unknown>, watch: boolean): boolean {
-  const [visible, setVisible] = useState(true);
-  useEffect(() => {
-    if (!watch) {
-      setVisible(true);
-      return;
-    }
-    if (Platform.OS !== "web" || typeof IntersectionObserver === "undefined" || !ref.current) return;
-    const observer = new IntersectionObserver((entries) => {
-      const entry = entries[entries.length - 1];
-      if (entry) setVisible(entry.isIntersecting);
-    });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [ref, watch]);
-  return visible;
-}
-
 /** The words for a row's time (shared/timing.ts `rowTimeText`). */
 export function timingText(timing: RowTiming | null, running: boolean, liveNow: number | null): string | null {
   return rowTimeText(timing, running, liveNow);
 }
+
+// Visibility checks need no fold runtime; detail chunks import this module directly through visibility.ts.
+export { useCardVisibility, useOnScreen } from "./visibility";

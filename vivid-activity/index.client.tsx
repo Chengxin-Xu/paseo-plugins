@@ -1,12 +1,17 @@
 import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { z } from "zod";
-import { ActivitySettings } from "./client/settings";
+import { createChunkLoader, lazySurfaces } from "./client/lazy-chunk";
+import { ActivityDetailsContext, PlainDetail } from "./client/activity-lazy";
+import { getClientChunk } from "./shared/ui-chunk";
+import { PI_CHUNK } from "./shared/generated/pi-chunk-manifest";
+import { UI_CHUNK } from "./shared/generated/ui-chunk-manifest";
+import { ActivityIndicator } from "react-native";
 import { ColorfulReasoning, ColorfulToolCall } from "./client/activity";
 import { FoldRow } from "./client/fold-row";
 import { foldRuntime } from "./client/fold-runtime";
-import { BOUNDARY_ITEM_TYPES, observeBoundary, transformReasoning, transformToolCall } from "./client/transform";
-import { isSettingsChange, setLiveTakeover, startTakeover, type TakeoverPart } from "./client/takeover";
+import { BOUNDARY_ITEM_TYPES, configurePiNotices, observeBoundary, transformReasoning, transformToolCall } from "./client/transform";
+import { applyTakeover, isSettingsChange, setLiveTakeover, startTakeover, type TakeoverPart } from "./client/takeover";
 import { installColorfulFonts } from "./client/web";
 import { foldIndexRpc } from "./shared/fold-index";
 import { activitySettings, foldFromValues } from "./shared/settings";
@@ -19,7 +24,9 @@ import {
   TOOL_CALL_RENDERER_KIND,
   TOOL_CALL_RENDERER_VERSION,
   reasoningItemDataSchema,
+  setPiNoticeReader,
   toolCallItemDataSchema,
+  type PiNoticeReader,
 } from "./shared/timeline";
 
 type EventObserver = (
@@ -60,6 +67,13 @@ function watchSettings(client: PluginClientContext, changed: () => void): () => 
 const NudgeRow = () => null;
 
 export default function contribute(client: PluginClientContext) {
+  const surface = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: "彩色活动行", fallback: (id, props) => id === "settings" ? <ActivityIndicator color={props.theme?.colors.foregroundMuted} /> : <PlainDetail {...props} /> });
+  const details = { DetailBody: surface("detail"), ReasoningText: surface("reasoning") };
+  const LazySettings = surface("settings");
+  const actions = { onFoldSettings: foldRuntime.setSettings, onTakeover: applyTakeover };
+  const ActivitySettings = (props: any) => <LazySettings {...props} actions={actions} />;
+  const ReasoningRow = (props: any) => <ActivityDetailsContext.Provider value={details}><ColorfulReasoning {...props} /></ActivityDetailsContext.Provider>;
+  const ToolRow = (props: any) => <ActivityDetailsContext.Provider value={details}><ColorfulToolCall {...props} /></ActivityDetailsContext.Provider>;
   const removeFonts = installColorfulFonts();
   client.addSettingsScreen({
     id: "display",
@@ -72,13 +86,13 @@ export default function contribute(client: PluginClientContext) {
     kind: REASONING_RENDERER_KIND,
     version: REASONING_RENDERER_VERSION,
     schema: reasoningItemDataSchema,
-    Component: ColorfulReasoning,
+    Component: ReasoningRow,
   });
   client.addTimelineRenderer({
     kind: TOOL_CALL_RENDERER_KIND,
     version: TOOL_CALL_RENDERER_VERSION,
     schema: toolCallItemDataSchema,
-    Component: ColorfulToolCall,
+    Component: ToolRow,
   });
   // 本地补丁：折叠摘要行。
   client.addTimelineRenderer({
@@ -100,6 +114,9 @@ export default function contribute(client: PluginClientContext) {
     }
   };
   foldRuntime.configure({ rpc: (input) => client.rpc(foldIndexRpc, input), nudge });
+  // 0.6.0-local.5: the Pi notice reader comes in its own small chunk, the first time a Pi notice row is drawn.
+  const piChunk = createChunkLoader(client, { rpc: getClientChunk, manifest: PI_CHUNK, label: "Pi 通知" });
+  configurePiNotices({ load: () => piChunk.load().then((surfaces) => surfaces.readPiNotice as unknown as PiNoticeReader), redraw: nudge });
 
   const readSettings = settingsRpc(activitySettings.id).read;
   const register = (part: TakeoverPart) => {
@@ -132,6 +149,8 @@ export default function contribute(client: PluginClientContext) {
   return () => {
     setLiveTakeover(null);
     takeover.stop();
+    configurePiNotices(null);
+    setPiNoticeReader(null);
     foldRuntime.configure(null);
     nudgeRegistration = null;
     removeFonts();

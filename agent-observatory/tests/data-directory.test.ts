@@ -494,3 +494,31 @@ test("an observation that cannot be established leaves polling reads working", a
     assert.ok(reads >= 2);
   } finally { store.stop(); }
 });
+
+test("a burst of live updates is one notification and one rebuild; reads always see the latest state", async () => {
+  const fake = fakeApi(async () => page(["a", "b", "c"]));
+  const store = createAgentDirectory(fake.api, { includeArchived: false, notifyDelayMs: 20 });
+  store.start();
+  await store.refresh();
+  let notified = 0;
+  store.subscribe(() => { notified += 1; });
+  const before = store.getSnapshot().agents;
+  for (let index = 0; index < 30; index++) {
+    fake.emit({ kind: "upsert", agent: { id: "b", status: "running", updatedAt: new Date(Date.parse(later) + index * 1000).toISOString(),
+      lastUsage: { contextWindowUsedTokens: 1000 + index, contextWindowMaxTokens: 200_000 } } });
+  }
+  assert.equal(notified, 0, "listeners hear about the burst once, after the delay");
+  // A read in between is current anyway: the list is rebuilt lazily.
+  assert.equal(store.getSnapshot().agents.find(agent => agent.id === "b")?.usage.contextUsed, 1029);
+  assert.notEqual(store.getSnapshot().agents, before);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(notified, 1);
+  // An update that cannot move the row (same priority, activity and title) replaces it in place.
+  const snapshot = store.getSnapshot().agents, index = snapshot.findIndex(agent => agent.id === "b");
+  const current = snapshot[index]!;
+  fake.emit({ kind: "upsert", agent: { id: "b", status: "running", updatedAt: current.updatedAt!, lastUsage: { contextWindowUsedTokens: 5, contextWindowMaxTokens: 200_000 } } });
+  const next = store.getSnapshot().agents;
+  assert.equal(next[index]!.id, "b"); assert.equal(next[index]!.usage.contextUsed, 5);
+  assert.deepEqual(next.map(agent => agent.id), snapshot.map(agent => agent.id));
+  store.stop();
+});

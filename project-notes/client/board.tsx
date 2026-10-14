@@ -1,5 +1,5 @@
 import { useRpc, useWorkspace, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { Icon, Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
+import { FlatList, Icon, Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text, View, type LayoutChangeEvent } from "react-native";
@@ -12,6 +12,7 @@ import { ProjectList } from "./projects";
 import { mergeDashboard, patchDashboard, pollInterval, type DashboardData } from "./sync";
 import { ALL_PROJECT_ID, GroupHeader, KINDS, KIND_ICONS, KIND_LABELS, KIND_TONES, NoteCard, NoteRow, PickerButton, PrimaryIconButton, STATUSES, STATUS_LABELS, STATUS_TONES, ScopeMark, StatusGlyph, itemKey, statusColor, statusText, type NoteActions } from "./ui";
 import { useForeground } from "./visibility";
+import { searchText } from "./search";
 
 type HostProps = PluginSurfaceProps;
 type Sheet = { mode: "detail"; key: string } | { mode: "editor"; editor: Editor; returnTo: string | null };
@@ -61,14 +62,15 @@ function NotesApp(props: HostProps & { defaultProjectId?: string }) {
   const [collapsed, setCollapsed] = useState(false);
   const visible = useForeground() && !collapsed;
   const dashboard = useQuery({
-    queryKey, retry: false, refetchIntervalInBackground: false,
+    queryKey, retry: false, staleTime: 5_000, refetchOnWindowFocus: false, refetchIntervalInBackground: false,
     queryFn: async (): Promise<DashboardData> => {
       // The query cache is shared by every open view of this host: its revision describes exactly what they show.
-      const known = queryClient.getQueryData<DashboardData>(queryKey)?.revision;
-      const update = await loadDashboard(known ? { revision: known } : {});
+      const before = queryClient.getQueryData<DashboardData>(queryKey);
+      const known = before?.revision;
+      const update = await loadDashboard({ ...(known ? { revision: known } : {}), ...(before?.pendingProjectIds?.length ? { refreshProjectIds: before.pendingProjectIds } : {}) });
       const current = queryClient.getQueryData<DashboardData>(queryKey);
       if (update.unchanged && !current) return mergeDashboard(undefined, await loadDashboard({}), Date.now());
-      return mergeDashboard(current, update, Date.now());
+      return mergeDashboard(current, update, Date.now(), before?.writeEpoch ?? 0);
     },
     refetchInterval: query => pollInterval(visible, query.state.data, Date.now()),
   });
@@ -114,6 +116,8 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   const [menuHint, setMenuHint] = useState("");
   const [operationError, setOperationError] = useState<string | null>(null);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [erase, setErase] = useState<{ item: BoardItem } | { boards: BoardSnapshot[]; count: number } | null>(null);
+  const [erasing, setErasing] = useState(false);
   const [launchItem, setLaunchItem] = useState<BoardItem | null>(null);
   const [launchOpen, setLaunchOpen] = useState(false);
   // Only an explicit refresh shows 同步中; background polls must not re-render the board.
@@ -136,9 +140,38 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
       return null;
     } finally { inFlight.current = false; if (mounted.current) setPendingKey(null); }
   };
+  const eraseConfirmed = async () => {
+    if (!erase || erasing || inFlight.current) return;
+    setErasing(true);
+    try {
+      if ("item" in erase) {
+        const item = erase.item;
+        if (!await perform(item.projectId, { type: "purge", id: item.id, expectedRevision: item.revision }, itemKey(item))) return;
+        setSheet(current => current?.mode === "detail" && current.key === itemKey(item) ? null : current);
+      } else {
+        // The id is an argument, not the loop's `snapshot`: the app's Hermes gives a loop variable one slot for every
+        // iteration, and React may run this update after the next iteration has started.
+        const erased = (projectId: string) => setErase(current => current && "boards" in current ? { ...current, boards: current.boards.filter(board => board.projectId !== projectId) } : current);
+        for (const snapshot of erase.boards) {
+          if (!await perform(snapshot.projectId, { type: "emptyTrash", expectedRevision: snapshot.revision })) return;
+          // Completed projects leave the confirmation, so retry after a later failure does not erase twice.
+          erased(snapshot.projectId);
+        }
+      }
+      setErase(null); toast.show("已彻底删除", { variant: "success" });
+    } finally { setErasing(false); }
+  };
   const copy = async (value: string) => {
     try { await copyText(value); toast.show("已复制", { variant: "success" }); }
     catch (error) { setOperationError(`复制失败：${errorText(error)}`); }
+  };
+  const restoreVersion = (item: BoardItem, revision: number) => void perform(item.projectId, { type: "restoreVersion", id: item.id, expectedRevision: item.revision, revision }, itemKey(item)).then(result => {
+    if (result && mounted.current) toast.show(`已恢复第 ${revision} 版`, { variant: "success" });
+  });
+  const repairHistory = async (item: BoardItem, expectedRevision: number) => {
+    const result = await perform(item.projectId, { type: "repairHistory", id: item.id, expectedRevision }, itemKey(item));
+    if (result && mounted.current) toast.show("已放弃缺失快照，当前正文和其余快照已保留", { variant: "success" });
+    return result !== null;
   };
   const refresh = async () => {
     if (refreshing) return;
@@ -178,9 +211,12 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     perProject.set(ALL_PROJECT_ID, total);
     return { activeItems: active, trashedItems: trashed, counts: tally, perProject };
   }, [allItems, scopeId]);
-  const needle = search.trim().toLowerCase();
-  const items = useMemo(() => (trash ? trashedItems : activeItems.filter(item => item.kind === kind))
-    .filter(item => !needle || `${item.title}\n${item.body}`.toLowerCase().includes(needle)).sort(trash ? byDeletion : compareItems), [activeItems, trashedItems, trash, kind, needle]);
+  const [settledSearch, setSettledSearch] = useState("");
+  useEffect(() => { const timer = setTimeout(() => setSettledSearch(search), 160); return () => clearTimeout(timer); }, [search]);
+  const needle = settledSearch.trim().toLowerCase();
+  const sorted = useMemo(() => (trash ? [...trashedItems] : activeItems.filter(item => item.kind === kind)).sort(trash ? byDeletion : compareItems), [activeItems, trashedItems, trash, kind]);
+  const indexed = useMemo(() => sorted.map(item => ({ item, text: searchText(item) })), [sorted]);
+  const items = useMemo(() => indexed.filter(entry => !needle || entry.text.includes(needle)).map(entry => entry.item), [indexed, needle]);
   const boardView = kind === "task" && !trash && !groupByProject && !compact;
   const split = !compact && !boardView;
   const showProject = scopeId === ALL_PROJECT_ID;
@@ -300,6 +336,10 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     {sync}{create}{more}
   </Toolbar>;
   const menuActions: MenuAction[] = trash ? [
+    { key: "empty-trash", label: "清空回收站", icon: "Trash2", tone: "danger", disabled: erasing || !trashedItems.length,
+      hint: `${trashedItems.length} 条，将彻底删除`, onPress: () => {
+        setOperationError(null); setErase({ boards: boards.filter(board => (scopeId === ALL_PROJECT_ID || board.projectId === scopeId) && board.items.some(item => item.deletedAt !== null)), count: trashedItems.length });
+      } },
     { key: "back", label: "返回手记", icon: "ArrowLeft", onPress: () => { setTrash(false); setSearch(""); } },
     { key: "refresh", label: "刷新", icon: "RefreshCw", hint: menuHint, onPress: () => void refresh() },
   ] : [
@@ -319,18 +359,24 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     return <EmptyState theme={theme} icon={KIND_ICONS[kind]} tone={KIND_TONES[kind]} title={`${scopeId === ALL_PROJECT_ID ? "" : `「${scope.name}」`}还没有${KIND_LABELS[kind]}`} action={{ label: createLabel, icon: "Plus", onPress: () => openCreate() }} />;
   };
   const row = (item: BoardItem) => <NoteRow key={itemKey(item)} theme={theme} item={item} project={showProject && !groupByProject ? projectOf(item.projectId) : null} selected={selectedItem !== null && itemKey(item) === itemKey(selectedItem)} busy={pendingKey === itemKey(item)} actions={actions} />;
-  const list = <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: space.xs, paddingBottom: space.xxl }}>
-    {sections.map(section => {
-      const open = !section.collapsible || Boolean(needle) || !closedSections.has(section.key);
-      return <View key={section.key}>
-        {section.title ? <GroupHeader theme={theme} title={section.title} count={section.items.length} open={open} onToggle={section.collapsible && !needle ? () => toggleSection(section.key) : undefined}
-          leading={section.status ? <StatusGlyph theme={theme} status={section.status} size={14} /> : section.projectId ? <ScopeMark theme={theme} project={projectOf(section.projectId)} size={16} /> : undefined}
-          color={section.status ? statusText(theme, section.status) : section.projectId ? colors.foreground : undefined} /> : null}
-        {open ? section.items.map(row) : null}
-        {open && section.collapsible && !section.items.length ? <Text style={{ paddingHorizontal: space.md, paddingTop: space.xs, paddingBottom: space.sm, color: colors.foregroundMuted, fontSize: fontSize.small }}>暂无</Text> : null}
-      </View>;
-    })}
-  </ScrollView>;
+  type ListEntry = { key: string; item: BoardItem } | { key: string; section: Section; open: boolean } | { key: string; empty: true };
+  const listEntries = useMemo<ListEntry[]>(() => sections.flatMap(section => {
+    const open = !section.collapsible || Boolean(needle) || !closedSections.has(section.key);
+    const entries: ListEntry[] = section.title ? [{ key: `head:${section.key}`, section, open }] : [];
+    if (open) entries.push(...section.items.map(item => ({ key: itemKey(item), item })));
+    if (open && section.collapsible && !section.items.length) entries.push({ key: `empty:${section.key}`, empty: true });
+    return entries;
+  }), [sections, needle, closedSections]);
+  const list = <FlatList data={listEntries} keyExtractor={entry => entry.key} initialNumToRender={12} maxToRenderPerBatch={12} windowSize={5}
+    style={{ flex: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: space.xs, paddingBottom: space.xxl }}
+    renderItem={({ item: entry }) => {
+      if ("item" in entry) return row(entry.item);
+      if ("empty" in entry) return <Text style={{ paddingHorizontal: space.md, paddingTop: space.xs, paddingBottom: space.sm, color: colors.foregroundMuted, fontSize: fontSize.small }}>暂无</Text>;
+      const { section, open } = entry;
+      return <GroupHeader theme={theme} title={section.title} count={section.items.length} open={open} onToggle={section.collapsible && !needle ? () => toggleSection(section.key) : undefined}
+        leading={section.status ? <StatusGlyph theme={theme} status={section.status} size={14} /> : section.projectId ? <ScopeMark theme={theme} project={projectOf(section.projectId)} size={16} /> : undefined}
+        color={section.status ? statusText(theme, section.status) : section.projectId ? colors.foreground : undefined} />;
+    }} />;
   // Column heads carry the status color: glyph, name and count, over a rule in the same color.
   const column = (status: TaskStatus) => <View key={status} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 40, paddingLeft: space.xs }}>
@@ -341,12 +387,12 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
       <IconButton theme={theme} icon="Plus" size="sm" label={`新建${STATUS_LABELS[status]}任务`} disabled={!board.data} onPress={() => openCreate(status)} />
     </View>
     <View style={{ height: 2, marginBottom: space.sm, borderRadius: 1, backgroundColor: status === "todo" ? colors.border : statusColor(theme, status) }} />
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: space.sm, paddingBottom: space.xl }}>
-      {byStatus[status].map(item => <NoteCard key={itemKey(item)} theme={theme} item={item} project={showProject ? projectOf(item.projectId) : null} busy={pendingKey === itemKey(item)} actions={actions} />)}
-      {!byStatus[status].length ? <View style={{ minHeight: 64, alignItems: "center", justifyContent: "center", borderRadius: radius.md, borderWidth: 1, borderStyle: "dashed", borderColor: toneColor(theme, STATUS_TONES[status], "line") }}>
+    <FlatList data={byStatus[status]} keyExtractor={itemKey} initialNumToRender={10} maxToRenderPerBatch={10} windowSize={5}
+      style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: space.xl }} ItemSeparatorComponent={() => <View style={{ height: space.sm }} />}
+      renderItem={({ item }) => <NoteCard theme={theme} item={item} project={showProject ? projectOf(item.projectId) : null} busy={pendingKey === itemKey(item)} actions={actions} />}
+      ListEmptyComponent={<View style={{ minHeight: 64, alignItems: "center", justifyContent: "center", borderRadius: radius.md, borderWidth: 1, borderStyle: "dashed", borderColor: toneColor(theme, STATUS_TONES[status], "line") }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>暂无</Text>
-      </View> : null}
-    </ScrollView>
+      </View>} />
   </View>;
   let content: ReactNode;
   if (board.isPending) content = boardView ? <View style={{ flex: 1, flexDirection: "row", gap: space.md, paddingHorizontal: space.md, paddingTop: 50 }}>{STATUSES.map(status => <View key={status} style={{ flex: 1 }}><Skeleton theme={theme} rows={3} /></View>)}</View> : <Skeleton theme={theme} rows={6} />;
@@ -355,7 +401,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   else if (boardView) content = <View style={{ flex: 1, minHeight: 0, flexDirection: "row", gap: space.md, paddingHorizontal: space.md }}>{STATUSES.map(column)}</View>;
   else if (split) content = <SplitView theme={theme} compact={false} showDetail listWidth={Math.round(Math.min(420, Math.max(320, width * 0.36)))} list={list}
     detail={selectedItem ? <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: space.xl, maxWidth: 760 }}>
-      <NoteDetail theme={theme} item={selectedItem} project={projectOf(selectedItem.projectId)} actions={actions} busy={pendingKey === itemKey(selectedItem)} compact={false} />
+      <NoteDetail key={itemKey(selectedItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: selectedItem }); }} item={selectedItem} project={projectOf(selectedItem.projectId)} actions={actions} busy={pendingKey === itemKey(selectedItem)} compact={false} onRestoreVersion={revision => restoreVersion(selectedItem, revision)} onRepairHistory={revision => repairHistory(selectedItem, revision)} />
     </ScrollView> : null} />;
   else content = list;
 
@@ -372,7 +418,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
       <Modal.Content scrollable={!editor} contentContainerStyle={editor ? { padding: 0, gap: 0 } : { padding: space.xl, gap: space.lg }}>
         {sheet?.mode === "detail" && sheetItem ? <>
           {operationError ? <Banner theme={theme} tone="danger" message={operationError} onDismiss={() => setOperationError(null)} /> : null}
-          <NoteDetail theme={theme} item={sheetItem} project={projectOf(sheetItem.projectId)} actions={actions} busy={pendingKey === itemKey(sheetItem)} compact={compact} />
+          <NoteDetail key={itemKey(sheetItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: sheetItem }); }} item={sheetItem} project={projectOf(sheetItem.projectId)} actions={actions} busy={pendingKey === itemKey(sheetItem)} compact={compact} onRestoreVersion={revision => restoreVersion(sheetItem, revision)} onRepairHistory={revision => repairHistory(sheetItem, revision)} />
         </> : null}
         {editor ? <EditorForm theme={theme} editor={editor} projects={projects} projectName={projectName} busy={mutation.isPending} compact={compact} error={operationError} changedElsewhere={editorChangedElsewhere}
           onChange={updateDraft} onProject={projectId => setSheet(current => current?.mode === "editor" && !current.editor.original ? { ...current, editor: { ...current.editor, projectId } } : current)}
@@ -383,6 +429,16 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     <Modal title="选择项目" open={scopeOpen} onOpenChange={setScopeOpen}>
       <Modal.Content contentContainerStyle={{ paddingHorizontal: space.md, paddingVertical: space.md, gap: 0 }}>
         <ProjectList theme={theme} projects={scopeOptions} selectedId={scopeId} counts={perProject} unavailable={unavailableIds} loading={board.isPending} onSelect={project => { setScopeId(project.id); setScopeOpen(false); }} />
+      </Modal.Content>
+    </Modal>
+    <Modal title={erase && "item" in erase ? "彻底删除手记" : "清空回收站"} open={erase !== null} onOpenChange={open => { if (!open && !erasing) { setErase(null); setOperationError(null); } }}>
+      <Modal.Content contentContainerStyle={{ padding: space.xl, gap: space.lg }}>
+        <Banner theme={theme} tone="danger" message={erase && "item" in erase ? `将彻底删除「${erase.item.title}」及其全部修改快照，无法恢复。` : `将彻底删除当前范围回收站内全部 ${erase && "count" in erase ? erase.count : 0} 条手记（含搜索未显示的）及其全部修改快照，无法恢复。`} />
+        {operationError ? <Banner theme={theme} tone="danger" message={operationError} /> : null}
+        <View style={{ flexDirection: "row", gap: space.md }}>
+          <Button theme={theme} label="取消" disabled={erasing} grow onPress={() => { setErase(null); setOperationError(null); }} />
+          <Button theme={theme} label="确认彻底删除" icon="Trash2" tone="danger" variant="secondary" busy={erasing} grow onPress={() => void eraseConfirmed()} />
+        </View>
       </Modal.Content>
     </Modal>
     <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menuActions} />

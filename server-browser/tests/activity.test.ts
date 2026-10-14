@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { BrowserActivityLog, activityAction, activityUrl } from '../server/activity';
-import { BrowserManager } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
 import { defaultRuntimeRoot } from '../server/runtime';
 
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -67,9 +67,12 @@ test('manual and Agent browser activity remains private, per-workspace, and comp
   await manager.action(workspaceId,{kind:'newTab'});
   await manager.action(workspaceId,{kind:'navigate',url:`${origin}/second?token=${secret}`});
   const secondId=(await manager.state(workspaceId)).tabs.find(tab=>tab.active)!.id;
-  await Promise.all([manager.action(workspaceId,{kind:'tab',tabId:firstId}),manager.action(workspaceId,{kind:'text',text:secret})]);
+  const beforeSwitch=await manager.state(workspaceId),seen={tabId:secondId,viewRevision:beforeSwitch.viewRevision!};
+  const queued=await Promise.allSettled([manager.action(workspaceId,{kind:'tab',tabId:firstId},seen),manager.action(workspaceId,{kind:'text',text:secret},seen)]);
+  assert.equal(queued[0].status,'fulfilled');assert.equal(queued[1].status,'rejected','The queued input cannot silently switch to the preceding action\'s target');
+  await manager.action(workspaceId,{kind:'text',text:secret});
   const queuedInput=(await manager.state(workspaceId)).activity![0];
-  assert.equal(queuedInput.action,'输入文字');assert.equal(queuedInput.tabId,firstId,'Queued inputs capture the page at execution after the preceding tab switch');
+  assert.equal(queuedInput.action,'输入文字');assert.equal(queuedInput.tabId,firstId,'A newly refreshed input records the page the viewer actually selected');
   await manager.action(workspaceId,{kind:'tab',tabId:secondId});
   await manager.action(workspaceId,{kind:'mode',mode:'agent'});
   const lease=await control('acquire',{write:true,tabId:firstId,toolName:'browser_click'});assert.equal(lease.status,200);
@@ -95,14 +98,14 @@ test('manual and Agent browser activity remains private, per-workspace, and comp
   assert(!(await readFile(path.join(dataRoot,workspaceId,'state.json'),'utf8')).includes('activity'),'Activities are not persisted');
 
   processForLease=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});assert(processForLease.pid);
-  const orphan=await control('acquire',{write:false,tabId:firstId,toolName:'browser_snapshot',pid:processForLease.pid});assert.equal(orphan.status,200);
+  const orphan=await control('acquire',{write:false,tabId:firstId,toolName:'browser_take_screenshot',pid:processForLease.pid});assert.equal(orphan.status,200);
   const orphanId=(await manager.state(workspaceId)).activity![0].id;
   const exited=new Promise<void>(resolve=>processForLease!.once('exit',()=>resolve()));processForLease.kill('SIGTERM');await exited;
   assert.equal((await manager.state(workspaceId)).activity!.find(item=>item.id===orphanId)?.status,'failed','Dead bridge processes cannot leave activities running');
   processForLease=undefined;
 
   await manager.action(workspaceId,{kind:'settings',settings:{autoRecover:false}});
-  const crashLease=await control('acquire',{write:false,toolName:'browser_snapshot'});assert.equal(crashLease.status,200);
+  const crashLease=await control('acquire',{write:false,toolName:'browser_take_screenshot'});assert.equal(crashLease.status,200);
   const crashActivity=(await manager.state(workspaceId)).activity![0].id;
   const metadata=JSON.parse(await readFile(manager.metadataPath(workspaceId),'utf8'));
   const argv=(await readFile(`/proc/${metadata.browserPid}/cmdline`,'utf8')).split('\0');

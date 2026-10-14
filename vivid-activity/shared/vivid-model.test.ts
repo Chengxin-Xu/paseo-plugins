@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PASEO_TOOL_ICONS, paseoToolLabel, resolveToolCallPresentation } from "./presentation";
-import { failureText, lookFor, looks, PASEO_TOOL_ZH, rowLabel, rowMotion, statusLabel, statusLooks, washAlpha, zh } from "./vivid-model";
+import { failureText, lookFor, looks, PASEO_TOOL_ZH, rowLabel, rowMotion, statusLabel, statusLooks, VIVID_CATEGORY_HUES, washAlpha, zh } from "./vivid-model";
+import { piSubagentPresentation } from "./pi-subagents";
 
 const HAN = /[一-鿿]/;
 // Words that stay as-is inside Chinese labels: product and protocol names.
@@ -85,6 +86,35 @@ describe("Chinese labels", () => {
 
   it("keeps raw tool names (data) untouched", () => {
     expect(zh("Bots List Bots")).toBe("Bots List Bots");
+  });
+
+  it("names every Pi sub-agent row in Chinese, status included (0.5.0)", () => {
+    const result = "Agent: 44066ba2c296\nType: explore | Status: completed | Tool uses: 2 | 14 token\nDescription: inspect payloads\n\npong";
+    const cases: Array<[string, unknown, string]> = [
+      ["Agent", {}, "派出子 Agent"],
+      ["steer_subagent", {}, "引导子 Agent"],
+      ["get_subagent_result", { wait: true }, "等待 Agent"],
+      ["get_subagent_result", { wait: false }, "查看子 Agent 结果"],
+      ["get_subagent_result", {}, "子 Agent 结果"],
+    ];
+    for (const [name, input, shown] of cases) {
+      const presentation = piSubagentPresentation(name, input, result);
+      expect(zh(presentation.label), name).toBe(shown);
+      expect(englishWords(zh(presentation.label)), name).toEqual([]);
+      expect(presentation.summary, name).toBe("inspect payloads · 已完成");
+    }
+    expect(statusLabel("background")).toBe("后台运行");
+    expect(statusLabel("queued")).toBe("排队中");
+  });
+});
+
+describe("vivid palette categories (0.5.0)", () => {
+  it("tints each category with the hue of its icon: sub-agents magenta, not green", () => {
+    expect(VIVID_CATEGORY_HUES).toEqual({
+      reasoning: looks.think.hue, shell: looks.shell.hue, file: looks.read.hue, search: looks.search.hue,
+      agent: looks.agent.hue, plan: looks.plan.hue, communication: looks.mcp.hue, unknown: null,
+    });
+    expect(VIVID_CATEGORY_HUES.agent).toBe("fuchsia");
   });
 });
 

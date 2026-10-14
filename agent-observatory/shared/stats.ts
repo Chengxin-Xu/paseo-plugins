@@ -8,8 +8,10 @@ import { z } from "zod";
  *
  * Sources: `sessions`/`childSessions` come from the directory (`createdAt`, exact in any timezone); turn metrics come
  * from lifecycle hooks (backfilled once from the analytics store); message/tool/code metrics come from the timeline
- * delta passed to `agent.turn_ended` and exist only from `contentSince` on. Days and hours are local to
- * `utcOffsetMinutes` (UTC+8 → 480); weekday 0 = Monday … 6 = Sunday.
+ * delta passed to `agent.turn_ended` and exist only from `contentSince` on. Days and hours are local to the device:
+ * its IANA `timeZone` when the server knows that zone (each UTC hour converted with its own offset, so a range across
+ * a daylight-saving change stays exact), else the fixed `utcOffsetMinutes` (UTC+8 → 480, UTC−7 → -420);
+ * weekday 0 = Monday … 6 = Sunday.
  */
 export const STATS_RANGES = ["7d", "30d", "90d"] as const;
 export type StatsRange = typeof STATS_RANGES[number];
@@ -19,6 +21,8 @@ const count = z.number().int().nonnegative();
 const duration = z.number().nonnegative().finite();
 const iso = z.iso.datetime();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** An IANA zone name as `Intl.DateTimeFormat().resolvedOptions().timeZone` reports it (Europe/Berlin, Etc/GMT+8, UTC). */
+export const statsTimeZoneSchema = z.string().min(1).max(64).regex(/^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/);
 
 /** Additive per-period metrics, except `peakParallel`, which aggregates with max. */
 export const statsMetricsSchema = z.object({
@@ -68,6 +72,8 @@ export const statsSnapshotSchema = z.object({
   generatedAt: iso,
   range: z.enum(STATS_RANGES),
   utcOffsetMinutes: z.number().int().min(-840).max(840),
+  /** The IANA zone the days were grouped in; null (or absent from older servers) when the fixed offset was used. */
+  timeZone: statsTimeZoneSchema.nullable().optional(),
   /** Local calendar days of the range, oldest first; the last one is today. */
   from: day, to: day,
   /** Earliest turn observation (incl. backfill) and start of timeline content collection. */
@@ -111,7 +117,9 @@ export const statsResponseSchema = z.discriminatedUnion("mode", [
 export type StatsResponse = z.infer<typeof statsResponseSchema>;
 export const getStats = defineRpc({
   name: "observatory.stats.get",
-  input: z.object({ range: z.enum(STATS_RANGES), utcOffsetMinutes: z.number().int().min(-840).max(840), revision: revision.optional() }),
+  // `timeZone` is optional so older clients keep working (fixed offset); the server also falls back to the offset for a
+  // zone it does not know, or whose current offset disagrees with the device's (outdated time zone data on either side).
+  input: z.object({ range: z.enum(STATS_RANGES), utcOffsetMinutes: z.number().int().min(-840).max(840), timeZone: statsTimeZoneSchema.optional(), revision: revision.optional() }),
   output: statsResponseSchema,
 });
 export type StatsState = StatsSnapshot & { revision?: string };

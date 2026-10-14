@@ -41,19 +41,38 @@ export function normalizeNavigationUrl(value: string): string {
 }
 
 /**
- * Query parameters that usually carry a one-time or secret value: OAuth codes and state, tokens, signatures,
- * tickets, session ids, one-time passwords and magic links. Matched on the lower-case name with "-" read as "_".
+ * Parameter names that usually carry a one-time or secret value: OAuth codes, state and assertions, tokens, signatures and
+ * hashes, tickets, session ids, one-time passwords, PINs, verification and invite codes, and magic links. A heuristic on the
+ * lower-case name with "-" read as "_", checked once as it is and once with a camelCase boundary read as "_" too (oobCode is
+ * oob_code, passWord stays password); names that only describe a place, language or currency (country_code, zipCode…) are ordinary.
  */
-const SECRET_NAMES = new Set(['code', 'state', 'token', 'auth', 'key', 'sig', 'signature', 'ticket', 'session', 'sid', 'otp', 'magic', 'password', 'passwd', 'pwd', 'secret', 'nonce', 'jwt']);
-const SECRET_PARTS = /token|secret|passw|signature|credential|session|saml|magic|verifier|api_?key|access_?key|private_?key|auth_?code|otp_|_otp/;
+const SECRET_NAMES = new Set(['code', 'state', 'token', 'auth', 'key', 'sig', 'signature', 'ticket', 'session', 'sid', 'otp', 'ott', 'magic', 'password', 'passwd', 'pwd', 'pass', 'pin', 'hash', 'secret', 'nonce', 'jwt']);
+const SECRET_PARTS = /token|secret|passw|passcode|passphrase|signature|credential|session|sessid|saml|assertion|hmac|totp|magic|verifier|api_?key|access_?key|private_?key|auth_?code|otp_|_otp|_code$|^code_/;
+const ORDINARY_CODES = new Set(['country_code', 'region_code', 'area_code', 'zip_code', 'postal_code', 'currency_code', 'language_code', 'lang_code', 'locale_code']);
 export function isSecretParameter(name: string): boolean {
-  const key = name.toLowerCase().replace(/-/g, '_');
-  return SECRET_NAMES.has(key) || SECRET_PARTS.test(key);
+  const plain = name.toLowerCase().replace(/-/g, '_'), split = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/-/g, '_');
+  return [plain, split].some(key => SECRET_NAMES.has(key) || (!ORDINARY_CODES.has(key) && SECRET_PARTS.test(key)));
 }
 
 /**
- * The address a tab may be saved and reopened with: HTTP(S) only, no credentials, no fragment, and no query
- * parameter that looks like a one-time credential. Other query parameters stay so ordinary pages reopen as they were.
+ * A page address for viewers and the Agent: never the account and password an address can carry ("https://user:pass@host/").
+ * The rest stays (query and fragment included): Playwright MCP shows the Agent full tab addresses in its own replies anyway.
+ */
+export function withoutCredentials(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { return value; }
+  if (!url.username && !url.password) return value;
+  url.username = ''; url.password = '';
+  return url.toString();
+}
+
+function parameterName(raw: string): string {
+  try { return decodeURIComponent(raw.replace(/\+/g, ' ')); } catch { return raw; }
+}
+
+/**
+ * The address a tab may be saved and reopened with: HTTP(S) only, no credentials, no fragment, and no query or path
+ * parameter (";jsessionid=…") that looks like a one-time credential. Other parameters stay so ordinary pages reopen as they were.
  */
 export function restorableUrl(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -61,13 +80,9 @@ export function restorableUrl(value: unknown): string | null {
   try { url = new URL(value); } catch { return null; }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || isBlockedHost(url.hostname)) return null;
   url.hash = '';
-  // Filter the raw query so the parameters that stay keep their exact encoding.
-  const kept = url.search.slice(1).split('&').filter(part => {
-    const raw = part.split('=')[0];
-    let name = raw;
-    try { name = decodeURIComponent(raw.replace(/\+/g, ' ')); } catch { /* keep the raw name */ }
-    return !isSecretParameter(name);
-  });
+  // Filter the raw query and path so the parameters that stay keep their exact encoding.
+  url.pathname = url.pathname.split('/').map(segment => segment.split(';').filter((part, index) => index === 0 || !isSecretParameter(parameterName(part.split('=')[0]))).join(';')).join('/');
+  const kept = url.search.slice(1).split('&').filter(part => !isSecretParameter(parameterName(part.split('=')[0])));
   url.search = kept.some(Boolean) ? `?${kept.join('&')}` : '';
   return url.toString();
 }

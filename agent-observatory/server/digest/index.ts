@@ -17,6 +17,8 @@ interface Dependencies {
 interface Cached extends History { revision: string; digest: Digest }
 interface Full { digest: Digest; revision: string }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32);
+/** While a turn runs, open durations grow with time alone; the revision moves on this grain, matching the 30 s client poll (client/use-digest.ts). */
+export const ACTIVE_CLOCK_MS = 30_000;
 
 /** Bounded per-agent LRU; one in-flight fetch/build services all concurrent revision requests. */
 export class DigestService {
@@ -51,10 +53,12 @@ export class DigestService {
     if (this.closed || signal.aborted) throw new Error("复盘读取已结束");
     const now = this.now(), active = agent.status === "running" || agent.status === "initializing" || !!agent.activeTurn;
     const events = telemetry.events.filter(event => event.agentId === agentId);
-    // Counts alone miss updates to an existing token call and telemetry's fixed-size eviction window.
+    // Counts alone miss updates to an existing token call and telemetry's fixed-size eviction window. A source that versions
+    // its calls (the logs' identity, size and read position) is hashed by that version instead of every call (opus-F70).
+    const tokens = tokenHistory?.version ? [tokenHistory.source, tokenHistory.version] : tokenHistory;
     const revision = hash({ epoch: history.state.epoch, seq: history.state.lastSeq, version: history.version, status: agent.status, active,
       sessionId, cwd: agent.cwd, rows: history.state.rows, truncated: history.state.truncated,
-      tokens: tokenHistory, events: events.map(({ id, at, type, durationMs }) => [id, at, type, durationMs]), clock: active ? Math.floor(now / 10_000) : null });
+      tokens, events: events.map(({ id, at, type, durationMs }) => [id, at, type, durationMs]), clock: active ? Math.floor(now / ACTIVE_CLOCK_MS) : null });
     const digest = previous?.revision === revision ? previous.digest : buildDigest(history.state, { now, status: agent.status, activeTurn: !!agent.activeTurn, events }, tokenHistory);
     this.cache.delete(agentId); this.cache.set(agentId, { ...history, revision, digest });
     while (this.cache.size > 24) this.cache.delete(this.cache.keys().next().value!);

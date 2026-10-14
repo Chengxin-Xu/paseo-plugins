@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { fetchAgentResult, recognizeTestCommands, registerResults } from "../server/results";
+import { applyTelemetry, normalizeAgent, sameResultSource, type AgentSource } from "../shared/model";
+import type { AgentTelemetry } from "../shared/telemetry";
 const stamp = "2026-09-17T00:01:00Z";
 const row = (seq: number, type: string, text: string) => ({ seqStart: seq, seqEnd: seq, timestamp: stamp, item: { type, text } });
 function api(head: unknown[], tail: unknown[], minSeq = 1, running = false) {
@@ -45,10 +47,17 @@ test("a newer host user turn prevents a stale tail reply from becoming the curre
   assert.equal(result.latestReply, null); assert.equal(result.latestUserInput, null); assert.equal(result.isFinal, false);
 });
 
+test("a prompt row stamped a millisecond before the Agent's lastUserMessageAt is the same turn: its reply is shown", async () => {
+  const head = [row(1, "user_message", "整理发布说明")];
+  const fixture = api(head, [{ ...row(1, "user_message", "整理发布说明"), timestamp: "2026-09-17T00:00:59.999Z" }, row(8, "assistant_message", "已更新发布说明。")]);
+  const result = await fetchAgentResult(fixture.value, "agent");
+  assert.equal(result.latestReply?.text, "已更新发布说明。"); assert.equal(result.isFinal, true);
+});
+
 test("result source versions are returned and explicit stale tokens fail before reading history", async () => {
   const fixture = api([row(1, "user_message", "First")], [row(10, "user_message", "Latest"), row(11, "assistant_message", "Answer")]);
   const result = await fetchAgentResult(fixture.value, "agent", null, { expectedLastUserMessageAt: stamp, expectedAttentionTimestamp: stamp });
-  assert.deepEqual(result.source, { lastUserMessageAt: stamp, attentionTimestamp: stamp });
+  assert.deepEqual(result.source, { lastUserMessageAt: stamp, attentionTimestamp: stamp, completionAt: stamp, roundEndedAt: null }, "one turn: the host's stamp is the completion, no round of its own");
   const requests = fixture.calls.length;
   await assert.rejects(fetchAgentResult(fixture.value, "agent", null, { expectedLastUserMessageAt: "2026-09-16T00:00:00Z", expectedAttentionTimestamp: stamp }), /版本已变化/);
   assert.equal(fixture.calls.length, requests);
@@ -109,12 +118,70 @@ test("polled results short-circuit while nothing but the capture time changed", 
   } finally { remove(); }
 });
 
-test("opening a stopped session records whether its final reply asks the user, without passing the text on", async () => {
+test("opening a stopped session records whether its final reply asks the user (and what it invites), without passing the text on", async () => {
   const seen: unknown[] = [];
   const asking = api([row(1, "user_message", "修一下")], [row(1, "user_message", "修一下"), row(2, "assistant_message", "改好了。要不要现在发版？")]);
   await fetchAgentResult(asking.value, "agent", null, {}, reply => seen.push(reply));
-  assert.deepEqual(seen, [{ userAt: new Date(stamp).toISOString(), at: new Date(stamp).toISOString(), asks: true }]);
+  // 「要不要现在发版？」 asks to go ahead with something specific: 快捷回复 offers 继续 (opus-B26); only the category leaves.
+  // A copy: asserting on `seen` itself would narrow its type for the pushes below.
+  assert.deepEqual([...seen], [{ userAt: new Date(stamp).toISOString(), at: new Date(stamp).toISOString(), asks: true, nudge: "go-ahead" }]);
   const running = api([row(1, "user_message", "修一下")], [row(1, "user_message", "修一下"), row(2, "assistant_message", "还在跑")], 1, true);
   await fetchAgentResult(running.value, "agent", null, {}, reply => seen.push(reply));
   assert.equal(seen.length, 1, "a running turn has no final reply yet");
+  const linked = api([row(1, "user_message", "提个 MR")], [row(1, "user_message", "提个 MR"), row(2, "assistant_message", "已提交：https://git.example.com/team/app/-/merge_requests/42 ，等你合并。")]);
+  await fetchAgentResult(linked.value, "agent", null, {}, reply => seen.push(reply));
+  assert.deepEqual(seen.at(-1), { userAt: new Date(stamp).toISOString(), at: new Date(stamp).toISOString(), asks: false, nudge: null, link: { url: "https://git.example.com/team/app/-/merge_requests/42", label: "!42", kind: "mr" } },
+    "only the link to the merge request leaves the reply");
+});
+
+// codex-obs-attn-F1: a heartbeat starts its turn with a system notification (no user message: lastUserMessageAt stays T0) and,
+// while the first result is unread, the host's attention keeps T1. Results of both rounds used to carry the same source.
+const [r0, r1, r2, r3] = [0, 1, 2, 3].map(hour => `2026-10-12T0${hour}:00:00.000Z`);
+const beat = { id: "beat", status: "idle", createdAt: "2026-10-11T23:00:00.000Z", lastUserMessageAt: r0, requiresAttention: true, attentionReason: "finished", attentionTimestamp: r1, activeTurn: null, pendingPermissions: [] };
+const observedTurn = (turnStartedAt: string, turnEndedAt: string | null): AgentTelemetry => ({ agentId: "beat", turnStartedAt, turnEndedAt, outcome: turnEndedAt ? "completed" : null,
+  completedTurns: 2, failedTurns: 0, canceledTurns: 0, totalRunMs: 0, permissionWaitMs: 0 });
+function beatApi(reply: () => string) {
+  let reads = 0;
+  const rows = () => [{ seqStart: 1, seqEnd: 1, timestamp: r0, item: { type: "user_message", text: "每小时检查一次构建" } }, { seqStart: 2, seqEnd: 2, timestamp: r3, item: { type: "assistant_message", text: reply() } }];
+  const paseo = { agents: { ref: () => ({ refresh: async () => ({ agent: beat }), current: () => beat,
+    timeline: { refetch: async () => { reads++; return { epoch: "e", window: { minSeq: 1 }, rows: rows(), hasOlder: false, hasNewer: false }; } } }) } } as unknown as PaseoApi;
+  return { paseo, reads: () => reads };
+}
+
+test("a heartbeat's result names its own turn though the host's tokens stay; an earlier round's fails the later round's check (codex-obs-attn-F1)", async () => {
+  const { paseo } = beatApi(() => "构建正常");
+  const expected = { expectedLastUserMessageAt: r0, expectedAttentionTimestamp: r1 };
+  const first = await fetchAgentResult(paseo, "beat", observedTurn("2026-10-12T00:00:00.020Z", "2026-10-12T01:00:00.005Z"), expected);
+  const second = await fetchAgentResult(paseo, "beat", observedTurn(r2, r3), expected);
+  assert.deepEqual(first.source, { lastUserMessageAt: r0, attentionTimestamp: r1, completionAt: r1, roundEndedAt: null });
+  assert.deepEqual(second.source, { lastUserMessageAt: r0, attentionTimestamp: r1, completionAt: r3, roundEndedAt: r3 });
+  // The page's record of round 2, derived as the dashboard does: only its own result passes 标记已读's check.
+  const page = applyTelemetry(normalizeAgent(beat as unknown as AgentSource), observedTurn(r2, r3));
+  assert.deepEqual([sameResultSource(page, first.source), sameResultSource(page, second.source)], [false, true]);
+  // Read while the heartbeat's turn has not been seen ending: no completion, which no finished round's record shows.
+  const open = await fetchAgentResult(paseo, "beat", observedTurn(r2, null), expected);
+  assert.deepEqual([open.source?.completionAt, open.source?.roundEndedAt], [null, null]);
+  assert.equal(sameResultSource(page, open.source), false);
+});
+
+test("the server never serves a result cached for one turn for a heartbeat's next turn, whose request is the same (codex-obs-attn-F1)", async () => {
+  const handlers = new Map<string, (input: unknown, context: { paseo: PaseoApi }) => Promise<unknown>>();
+  // No turn hooks reach this cache here: the observed turn alone keys it (a hook can also run before telemetry records the end).
+  const server = { handle(contract: { name: string }, handler: (input: unknown, context: { paseo: PaseoApi }) => Promise<unknown>) { handlers.set(contract.name, handler); return () => {}; },
+    on() { return () => {}; } } as unknown as Parameters<typeof registerResults>[0];
+  let observed = observedTurn("2026-10-12T00:00:00.020Z", "2026-10-12T01:00:00.005Z"), reply = "第一轮：构建正常";
+  const remove = registerResults(server, async () => observed);
+  const { paseo, reads } = beatApi(() => reply);
+  try {
+    const read = handlers.get("observatory.results.get")!, input = { agentId: "beat", expectedLastUserMessageAt: r0, expectedAttentionTimestamp: r1 };
+    const first = await read(input, { paseo }) as { source: { completionAt: string }; latestReply: { text: string } };
+    const cached = reads();
+    assert.deepEqual([first.source.completionAt, first.latestReply.text], [r1, "第一轮：构建正常"]);
+    await read(input, { paseo });
+    assert.equal(reads(), cached, "the same turn within five seconds: cached");
+    observed = observedTurn(r2, r3); reply = "第二轮：发现一个失败用例";
+    const second = await read(input, { paseo }) as { source: { completionAt: string; roundEndedAt: string }; latestReply: { text: string } };
+    assert.ok(reads() > cached, "read again");
+    assert.deepEqual([second.source.completionAt, second.source.roundEndedAt, second.latestReply.text], [r3, r3, "第二轮：发现一个失败用例"]);
+  } finally { remove(); }
 });

@@ -2,6 +2,7 @@ import type { PaseoApi } from "./paseo-types";
 import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
 import { normalizeTimelinePage, object, projectTimelineRows, string, type TimelineCursor, type TimelineRow } from "../shared/timeline";
 import { excerptText } from "../shared/evidence";
+import { isCredentialField, redactSecrets } from "./insight-analysis";
 
 export interface TrajectoryOptions { limit?: number; maxCharacters?: number; signal?: AbortSignal; after?: TimelineCursor }
 /** Stop logical work immediately even when a host RPC cannot cancel its wire read. */
@@ -18,24 +19,29 @@ const textOrNull = (value: unknown): string | null => string(value) || null;
 function dateOrNull(value: unknown): string | null {
   const text = string(value); return text && Number.isFinite(Date.parse(text)) ? text : null;
 }
-/** Summarize tool intent/result, not entire embedded source files and SDK payloads. */
+/**
+ * Summarize tool intent/result, not entire embedded source files and SDK payloads. Everything is masked before it is cut: each
+ * string whole (redactSecrets), every string under a credential field name whole whatever it looks like (`AWS_SESSION_TOKEN`,
+ * `password`), and the JSON of a structured value once more. A cut could part a value from its key, prefix or header, and JSON
+ * escaping hides a value from the patterns.
+ */
 export function summarizeTrajectoryRow(row: TimelineRow): { text: string; truncated: boolean } {
   const item = row.item;
-  if (typeof item.text === "string") return excerptText(item.text, item.type === "reasoning" ? 1500 : 6000);
-  if (typeof item.message === "string") return excerptText(item.message, 6000);
+  if (typeof item.text === "string") return excerptText(redactSecrets(item.text), item.type === "reasoning" ? 1500 : 6000);
+  if (typeof item.message === "string") return excerptText(redactSecrets(item.message), 6000);
   let truncated = false;
-  const compact = (value: unknown, depth = 0): unknown => {
-    if (typeof value === "string") { const excerpt = excerptText(value, 700); truncated ||= excerpt.truncated; return excerpt.text; }
+  const compact = (value: unknown, depth = 0, secret = false): unknown => {
+    if (typeof value === "string") { const excerpt = excerptText(secret && value ? "[redacted]" : redactSecrets(value), 700); truncated ||= excerpt.truncated; return excerpt.text; }
     if (depth > 3) { truncated = true; return "[嵌套结构已摘要]"; }
-    if (Array.isArray(value)) { truncated ||= value.length > 8; return value.slice(0, 8).map(entry => compact(entry, depth + 1)); }
-    if (value && typeof value === "object") { const entries = Object.entries(value); truncated ||= entries.length > 15; return Object.fromEntries(entries.slice(0, 15).map(([key, entry]) => [key, compact(entry, depth + 1)])); }
+    if (Array.isArray(value)) { truncated ||= value.length > 8; return value.slice(0, 8).map(entry => compact(entry, depth + 1, secret)); }
+    if (value && typeof value === "object") { const entries = Object.entries(value); truncated ||= entries.length > 15; return Object.fromEntries(entries.slice(0, 15).map(([key, entry]) => [key, compact(entry, depth + 1, secret || isCredentialField(key))])); }
     return value;
   };
   const lines: string[] = [];
   const add = (label: string, value: unknown, limit = 1200) => {
     if (value === undefined || value === null || value === "") return;
-    const raw = typeof value === "string" ? value : JSON.stringify(compact(value));
-    const excerpt = excerptText(raw ?? "", limit); truncated ||= excerpt.truncated;
+    const raw = redactSecrets(typeof value === "string" ? value : JSON.stringify(compact(value)) ?? "");
+    const excerpt = excerptText(raw, limit); truncated ||= excerpt.truncated;
     lines.push(`${label}: ${excerpt.text}`);
   };
   if (item.type === "tool_call") {
@@ -47,7 +53,7 @@ export function summarizeTrajectoryRow(row: TimelineRow): { text: string; trunca
     add("error", item.error, 1200);
     const input = detail.input ?? item.input ?? item.arguments;
     if (input !== undefined && !detail.command) add("input", input, 1200);
-    const output = detail.output ?? detail.result ?? detail.log ?? detail.content ?? detail.text;
+    const found = detail.output ?? detail.result ?? detail.log ?? detail.content ?? detail.text, output = typeof found === "string" ? redactSecrets(found) : found;
     add("output", output, item.status === "failed" || item.error ? 2800 : 2000);
     if (typeof output === "string" && output.length > 2000) {
       const signals: string[] = [];

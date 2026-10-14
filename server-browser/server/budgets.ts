@@ -29,6 +29,8 @@ export const BUDGETS = {
   measureMs: 5_000,
   /** Server: the login and content check in page diagnostics. */
   diagnosticsScriptMs: 3_000,
+  /** Server: a takeover from Agent mode waits this long for the Agent's current step; the panel's request must finish within 30 s. */
+  takeoverWaitMs: 10_000,
 };
 export type Budgets = typeof BUDGETS;
 

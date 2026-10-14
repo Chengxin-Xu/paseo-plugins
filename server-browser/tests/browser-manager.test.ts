@@ -8,7 +8,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
-import { BrowserManager, normalizeNavigationUrl } from '../server/browser-manager';
+import { TestBrowserManager as BrowserManager } from './manual-action';
+import { normalizeNavigationUrl } from '../server/browser-manager';
 
 test('navigation permits websites and rejects local files, code and embedded passwords',()=>{
   assert.equal(normalizeNavigationUrl('example.com'),'https://example.com/');
@@ -59,8 +60,9 @@ test('real shared browser: frames, MCP writes, manual takeover, tab selection an
     const unchanged=await manager.frame('test-main',first.frame!.id);
     assert.equal(unchanged.frame,null);
     client=await mcp(manager.bridgePath,manager.metadataPath('test-main'));
-    const before=await client.call('browser_snapshot');assert(!before.isError,text(before));
-    const find=await client.call('browser_find',{regex:'\\d{6}'});assert(!find.isError,text(find));
+    // While the user is in control the Agent cannot read the page structure; it looks with a screenshot.
+    for(const [name,args] of [['browser_snapshot',{}],['browser_find',{regex:'\\d{6}'}],['browser_wait_for',{time:0.1}]] as const){const refused=await client.call(name,args);assert.equal(refused.isError,true,name);assert.match(text(refused),/browser_take_screenshot/,name);}
+    const screenshot=await client.call('browser_take_screenshot',{type:'png'});assert(!screenshot.isError,text(screenshot));
     const article=await client.call('browser_read_page',{mode:'visible',query:'Agent',maxChars:1000});
     assert(!article.isError,text(article));assert.match(text(article),/Agent/);
     const diagnose=await client.call('browser_diagnostics');assert(!diagnose.isError,text(diagnose));assert.match(text(diagnose),/accessible/);
@@ -69,6 +71,8 @@ test('real shared browser: frames, MCP writes, manual takeover, tab selection an
     assert.equal(denied.isError,true);assert.match(text(denied),/手动/);
     await manager.action('test-main',{kind:'mode',mode:'agent'});
     await assert.rejects(manager.action('test-main',{kind:'text',text:'should not type'}),/手动/);
+    const before=await client.call('browser_snapshot');assert(!before.isError,text(before));
+    const find=await client.call('browser_find',{regex:'\\d{6}'});assert(!find.isError,text(find));
     const wrote=await client.call('browser_evaluate',{function:"() => { document.body.dataset.agentProof='mcp-shared'; document.title='Shared MCP proof'; return {proof:document.body.dataset.agentProof,platform:navigator.platform}; }"});
     assert(!wrote.isError,text(wrote));assert.match(text(wrote),/mcp-shared/);assert.match(text(wrote),/Linux/);
     assert.equal((await manager.state('test-main')).title,'Shared MCP proof');
@@ -174,6 +178,36 @@ test('MCP form login retains HttpOnly authentication after browser restart and i
     assert.equal(protectedReads,3,'v0.2 restores the saved page once, then the explicit navigation reads it again');assert.equal(unauthenticatedReads,2);
     await mkdir('artifacts',{recursive:true});
     await writeFile('artifacts/login-verification.json',JSON.stringify({passed:true,verifiedAt:new Date().toISOString(),kind:'Controlled local HTTP login fixture; synthetic credentials only',browserTools:'Actual server_browser MCP bridge with no Desktop host or viewer client',checks:{formLogin:true,authenticatedPageRead:true,httpOnlyCookie:true,browserRestartRetainsLogin:true,secondWorkspaceRequiresOwnLogin:true},successfulLogins:logins,authenticatedPageReads:protectedReads,realExternalAccountsTested:false},null,2)+'\n');
+  }finally{
+    await client?.close();await manager.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dataRoot,{recursive:true,force:true});
+  }
+});
+
+test('a password typed while the user is in control never reaches the Agent, though Playwright MCP snapshots show field values', {timeout:120000}, async()=>{
+  const dataRoot=await mkdtemp(path.join(tmpdir(),'paseo-browser-password-test-'));
+  const manager=new BrowserManager({dataRoot});
+  const password=`typed-${randomBytes(8).toString('hex')}`;
+  const server=createServer((_request,response)=>{response.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});response.end('<!doctype html><title>Sign in</title><h1>Sign in</h1><form><label>Password <input id="password" type="password" autofocus></label><button>Sign in</button></form><script>document.getElementById("password").focus()</script>');});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();assert(address&&typeof address!=='string');
+  let client:Awaited<ReturnType<typeof mcp>>|undefined;
+  try{
+    await manager.start('typed-password');
+    await manager.action('typed-password',{kind:'navigate',url:`http://127.0.0.1:${address.port}/login`});
+    // The user types into the focused password field from the panel.
+    await manager.action('typed-password',{kind:'text',text:password});
+    client=await mcp(manager.bridgePath,manager.metadataPath('typed-password'));
+    const replies:unknown[]=[];
+    for(const [name,args] of [['browser_snapshot',{}],['browser_find',{regex:'typed'}],['browser_wait_for',{text:'Sign in'}]] as const){
+      const refused=await client.call(name,args);replies.push(refused);assert.equal(refused.isError,true,name);assert.match(text(refused),/browser_take_screenshot/,name);
+    }
+    for(const [name,args] of [['browser_take_screenshot',{type:'png'}],['browser_read_page',{mode:'visible'}],['browser_diagnostics',{}],['browser_tabs',{action:'list'}]] as const){
+      const allowed=await client.call(name,args);replies.push(allowed);assert(!allowed.isError,text(allowed));
+    }
+    assert(!JSON.stringify(replies).includes(password),'nothing the Agent received while the user was in control carries the password');
+    // Why: back in the Agent's hands, the real Playwright MCP snapshot lists the typed value of the password field.
+    await manager.action('typed-password',{kind:'mode',mode:'agent'});
+    assert.match(text(await client.call('browser_snapshot')),new RegExp(`textbox "Password"[^\\n]*${password}`));
   }finally{
     await client?.close();await manager.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(dataRoot,{recursive:true,force:true});
   }

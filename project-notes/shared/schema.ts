@@ -27,6 +27,11 @@ export const fieldsSchema = z.object({
   priority: z.enum(["normal", "high"]),
   pinned: z.boolean(),
 });
+export const noteVersionSchema = fieldsSchema.extend({
+  revision: z.number().int().positive(),
+  updatedAt: z.string(),
+  deletedAt: z.string().nullable(),
+});
 export const itemSchema = fieldsSchema.extend({
   id: z.string().uuid(),
   projectId: z.string().min(1).max(512),
@@ -34,6 +39,7 @@ export const itemSchema = fieldsSchema.extend({
   createdAt: z.string(),
   updatedAt: z.string(),
   deletedAt: z.string().nullable(),
+  historyCount: z.number().int().nonnegative().optional(),
 });
 export const snapshotSchema = z.object({
   projectId: z.string(),
@@ -68,7 +74,11 @@ export const dashboardSchema = z.object({
  */
 export const dashboardUpdateSchema = z.union([
   z.object({ unchanged: z.literal(true), revision: z.string() }),
-  dashboardSchema.partial({ projects: true }).extend({ unchanged: z.literal(false).optional(), revision: z.string().optional() }),
+  dashboardSchema.partial({ projects: true }).extend({
+    unchanged: z.literal(false).optional(), revision: z.string().optional(),
+    mode: z.enum(["full", "delta"]).optional(), baseRevision: z.string().optional(),
+    removedProjectIds: z.array(z.string()).optional(),
+  }),
 ]);
 export const writeBoardInputSchema = z.object({
   projectId: z.string().min(1).max(512),
@@ -81,8 +91,13 @@ export const writeBoardInputSchema = z.object({
     }),
     z.object({ type: z.literal("delete"), id: z.string().uuid(), expectedRevision: z.number().int().positive() }),
     z.object({ type: z.literal("restore"), id: z.string().uuid(), expectedRevision: z.number().int().positive() }),
+    z.object({ type: z.literal("purge"), id: z.string().uuid(), expectedRevision: z.number().int().positive() }),
+    z.object({ type: z.literal("emptyTrash"), expectedRevision: z.number().int().nonnegative() }),
+    z.object({ type: z.literal("repairHistory"), id: z.string().uuid(), expectedRevision: z.number().int().positive() }),
+    z.object({ type: z.literal("restoreVersion"), id: z.string().uuid(), expectedRevision: z.number().int().positive(), revision: z.number().int().positive() }),
   ]),
 });
+export type NoteVersion = z.infer<typeof noteVersionSchema>;
 export type NoteKind = z.infer<typeof kindSchema>;
 export type TaskStatus = z.infer<typeof statusSchema>;
 export type NoteFields = z.infer<typeof fieldsSchema>;
