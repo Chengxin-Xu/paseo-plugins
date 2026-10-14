@@ -1,4 +1,4 @@
-import type { PaseoAgentListResult, PaseoAgentUpdate } from "@getpaseo/client";
+import type { PaseoAgentListResult, PaseoAgentUpdate } from "./paseo-types";
 import type { PluginButtonContentProps, PluginButtonIconProps, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, type ComponentType } from "react";

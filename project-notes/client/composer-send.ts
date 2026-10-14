@@ -1,4 +1,4 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi } from "./paseo-types";
 import { deferOffer, type DeferredSendResult } from "../shared/deferred-rpc";
 import { confirmOffer } from "./deferred-state";
 import { consentFor, newMessageId, sendPlan, usableTarget, type Consent, type SendPlan } from "./send-plan";
