@@ -57,9 +57,22 @@ const MAX_BYTES = 2 * 1024 * 1024;
 /** A reply must stay under the host's RPC message size (kit client-chunks leaves 8 KiB of 128 for the envelope). */
 const PART_BYTES = 100 * 1024;
 const KEEP_BUILT = 8;
+/** What a client shows before it needs the rest: the plugin's `boot` section and kit's lazy-loading words. */
+const BOOT_SECTIONS = ["boot", "kitLazy", "kitText"];
 
 interface CustomFile { code: string; file: string; check: CatalogCheck; signature: string }
-interface Built { language: string; hash: string; text: string; catalog: Catalog; parts?: string[] }
+interface Built { language: string; hash: string; text: string; catalog: Catalog; parts?: string[]; boot?: { hash: string; text: string } }
+
+/** The boot text of a built catalog, kept with it: small enough for one reply, with its own hash. */
+function bootOf(entry: Built): { hash: string; text: string } {
+  if (!entry.boot) {
+    const subset: { [section: string]: Catalog[string] } = {};
+    for (const section of BOOT_SECTIONS) if (entry.catalog[section]) subset[section] = entry.catalog[section];
+    const text = JSON.stringify(subset);
+    entry.boot = { text, hash: createHash("sha256").update(`boot\n${entry.language}\n${text}`).digest("hex").slice(0, 16) };
+  }
+  return entry.boot;
+}
 
 /** `PASEO_HOME` (a leading `~` expands), else Paseo's default `~/.paseo`. */
 export function paseoHome(env: Record<string, string | undefined> = process.env): string {
@@ -297,6 +310,10 @@ export function createLocaleService(server: PluginServerContext, options: Locale
     const entry = await current(normalizeLanguage(input.device) || device);
     if (normalizeLanguage(input.device) === device) bindServer(entry);
     if (input.have === entry.hash) return { status: "unchanged" as const, language: entry.language, hash: entry.hash };
+    if (input.scope === "boot") {
+      const boot = bootOf(entry);
+      return { status: "ok" as const, language: entry.language, hash: boot.hash, part: 0, parts: 1, text: boot.text };
+    }
     const parts = entry.parts ?? (entry.parts = splitReply(entry.text, PART_BYTES));
     return { status: "ok" as const, language: entry.language, hash: entry.hash, part: 0, parts: parts.length, text: parts[0]! };
   });

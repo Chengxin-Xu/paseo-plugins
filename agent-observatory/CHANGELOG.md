@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.16.1 · 2026-10-15
+
+Connecting no longer downloads the full language catalog (about 160 KB). The app gets a few hundred bytes of boot text (sidebar titles, in the chosen language) and the rest when an Observatory view first opens, together with its code. Web and desktop still start from their cached copy.
+
 ## 2.16.0 · 2026-10-15
 
 Added English, Simplified Chinese, and user language files, with Follow system as the default. Language can be changed in Observation settings or Paseo plugin settings. Interface text, accessibility labels, feedback, and server messages use shared catalogs. New analyses request the selected language; stored reports keep their original text.

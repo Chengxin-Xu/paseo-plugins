@@ -12,7 +12,8 @@ import { createAttentionStores } from "./client/use-attention";
 
 // The manifest requires Paseo 0.11.1, whose screen and sidebar APIs are always present.
 export default function contribute(client: PluginClientContext) {
-  const i18n = createClientI18n(client, { pluginId: "agent-observatory", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } } });
+  // Only views opened later need the full catalog; the resident stub draws boot text.
+  const i18n = createClientI18n(client, { pluginId: "agent-observatory", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } }, load: "lazy" });
   const lazy = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n });
   // One set of attention stores per registration, shared by resident badges and lazy views.
   const attentionStores = createAttentionStores();

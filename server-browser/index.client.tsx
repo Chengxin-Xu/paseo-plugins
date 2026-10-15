@@ -20,7 +20,8 @@ function BrowserSidebar({ currentScreen, openScreen }: PluginSidebarItemProps) {
 }
 export default function contribute(client: PluginClientContext) {
   const cleanups: Array<() => void> = [];
-  const i18n = createClientI18n(client, { pluginId: 'server-browser', boot: { 'zh-CN': { boot: bootZh }, en: { boot: bootEn } } });
+  // Only views opened later need the full catalog; the resident stub draws boot text.
+  const i18n = createClientI18n(client, { pluginId: 'server-browser', boot: { 'zh-CN': { boot: bootZh }, en: { boot: bootEn } }, load: 'lazy' });
   const lifetime = createChunkLifetime();
   const lazy = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t('boot.name'), text: i18n });
   const Browser = lazy('server-browser'), Workspace = lazy('workspace-browser');

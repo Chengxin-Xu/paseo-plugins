@@ -254,6 +254,113 @@ test("a large catalog travels in several parts", async (context) => {
   bindTranslator(null);
 });
 
+test("a boot-only request gets the boot text alone, in the chosen language", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "kit-i18n-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const server = fakeServer("zh-CN");
+  const service = createLocaleService(server.context, { pluginId: "demo", home, builtins: { "zh-CN": [zhPlugin, kitZh as Catalog], en: [enPlugin, kitEn as Catalog] } });
+  await service.ready;
+  const full = await readCatalog(server, "en-US");
+  const boot = await server.call("i18n.catalog", { device: "en-US", part: 0, scope: "boot" });
+  assert.deepEqual([boot.status, boot.language, boot.part, boot.parts], ["ok", "zh-CN", 0, 1]);
+  assert.notEqual(boot.hash, full.hash);
+  const text = JSON.parse(boot.text);
+  assert.deepEqual(Object.keys(text).sort(), ["boot", "kitLazy", "kitText"]);
+  assert.deepEqual(text.boot, { title: "观测台" });
+  assert.deepEqual(text.kitLazy, full.catalog.kitLazy);
+  // A client that holds the current full catalog only hears that it is current.
+  assert.deepEqual(await server.call("i18n.catalog", { device: "en-US", have: full.hash, part: 0, scope: "boot" }), { status: "unchanged", language: "zh-CN", hash: full.hash });
+  await server.setLanguage("en");
+  const english = await server.call("i18n.catalog", { device: "en-US", have: full.hash, part: 0, scope: "boot" });
+  assert.deepEqual([english.status, english.language, JSON.parse(english.text).boot.title], ["ok", "en", "Observatory"]);
+  service.dispose();
+  bindTranslator(null);
+});
+
+test("a lazy client asks for boot text at start and for the catalog only when a view waits for it", async () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const full = { language: "zh-CN", hash: "cccccccccccccccc", text: JSON.stringify({ boot: { title: "观测台" }, kitUi: { search: "搜索" } }) };
+  const boot = { language: "zh-CN", hash: "dddddddddddddddd", text: JSON.stringify({ boot: { title: "观测台" } }) };
+  const calls: { device: string; have?: string; part: number; scope?: string }[] = [];
+  let snapshot: (() => void) | undefined, update: ((message: unknown) => void) | undefined;
+  const client = {
+    rpc: async (_contract: unknown, input: { device: string; have?: string; part: number; scope?: string }) => {
+      calls.push(input);
+      if (input.have === full.hash) return { status: "unchanged", language: full.language, hash: full.hash };
+      const reply = input.scope === "boot" ? boot : full;
+      return { status: "ok", language: reply.language, hash: reply.hash, part: 0, parts: 1, text: reply.text };
+    },
+    paseo: {
+      observeEvents: () => ({
+        subscribe: (observer: { snapshot(): void; update(message: unknown): void }) => { snapshot = observer.snapshot; update = observer.update; return () => undefined; },
+        release: async () => undefined,
+      }),
+    },
+  };
+  const scopes = () => calls.map((call) => call.scope ?? "full");
+  delete (globalThis as Record<string, unknown>).__paseoI18nCatalogsV1;
+  const store = new Map<string, string>();
+  (globalThis as Record<string, unknown>).localStorage = {
+    getItem: (name: string) => store.get(name) ?? null,
+    setItem: (name: string, value: string) => { store.set(name, value); },
+    removeItem: (name: string) => { store.delete(name); },
+  };
+  const options = { pluginId: "lazy-plugin", boot: { en: { boot: { title: "Observatory (boot)" } } }, load: "lazy" as const };
+  const i18n = createClientI18n(client as never, options);
+  await settle();
+  // Boot text in the chosen language (the device's own boot text is English); nothing else yet.
+  assert.deepEqual(scopes(), ["boot"]);
+  assert.equal(t("boot.title"), "观测台");
+  assert.equal(t("kitUi.search"), "");
+  assert.equal(i18n.isReady(), false);
+  // The first snapshot comes with the start; a language change before any view opens fetches boot text again.
+  snapshot?.();
+  await settle();
+  assert.deepEqual(scopes(), ["boot"]);
+  update?.({ type: "status", payload: { status: "plugin_settings_changed", pluginId: "x", settingsId: "language" } });
+  await settle();
+  assert.deepEqual(scopes(), ["boot", "boot"]);
+  // A view opens and waits: now the full catalog, kept for the next start.
+  await i18n.ready();
+  assert.deepEqual(scopes(), ["boot", "boot", "full"]);
+  assert.equal(t("kitUi.search"), "搜索");
+  assert.match(store.get("paseo-i18n-v1:lazy-plugin") ?? "", /搜索/);
+  // A later snapshot (a reconnect) only checks the full catalog.
+  snapshot?.();
+  await settle();
+  assert.deepEqual(calls.at(-1), { device: calls[0]!.device, have: full.hash, part: 0 });
+  i18n.dispose();
+
+  // The next start speaks the kept catalog at once; the boot check hears "unchanged" and nothing more is fetched.
+  delete (globalThis as Record<string, unknown>).__paseoI18nCatalogsV1;
+  let before = calls.length;
+  const again = createClientI18n(client as never, options);
+  assert.equal(again.isReady(), true);
+  assert.equal(t("kitUi.search"), "搜索");
+  await settle();
+  assert.deepEqual(calls.slice(before).map((call) => [call.scope ?? "full", call.have]), [["boot", full.hash]]);
+  again.dispose();
+
+  // The language changed on another device meanwhile: the kept catalog goes, boot text shows, the rest waits for a view.
+  Object.assign(full, { language: "en", hash: "eeeeeeeeeeeeeeee", text: JSON.stringify({ boot: { title: "Observatory" }, kitUi: { search: "Search" } }) });
+  Object.assign(boot, { language: "en", hash: "ffffffffffffffff", text: JSON.stringify({ boot: { title: "Observatory" } }) });
+  delete (globalThis as Record<string, unknown>).__paseoI18nCatalogsV1;
+  before = calls.length;
+  const stale = createClientI18n(client as never, options);
+  assert.equal(stale.isReady(), true);
+  await settle();
+  assert.equal(stale.isReady(), false);
+  assert.equal(t("boot.title"), "Observatory");
+  assert.equal(t("kitUi.search"), "");
+  assert.equal(store.has("paseo-i18n-v1:lazy-plugin"), false);
+  await stale.ready();
+  assert.equal(t("kitUi.search"), "Search");
+  assert.deepEqual(calls.slice(before).map((call) => call.scope ?? "full"), ["boot", "full"]);
+  stale.dispose();
+  delete (globalThis as Record<string, unknown>).localStorage;
+  bindTranslator(null);
+});
+
 test("the client speaks boot text at once, swaps in the catalog, caches it and follows setting changes", async () => {
   const replies: { language: string; text: string; hash: string }[] = [
     { language: "en", hash: "aaaaaaaaaaaaaaaa", text: JSON.stringify({ boot: { title: "Observatory" }, kitUi: { search: "Search" } }) },

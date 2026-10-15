@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 (2026-10-15)
+
+- Shared language layer update: one fewer duplicate catalog check on connect. Rows need the full catalog, so it still loads at once.
+
 ## 0.7.0 (2026-10-15)
 
 - Add English and Simplified Chinese with Follow system as the default and a Language section in settings.

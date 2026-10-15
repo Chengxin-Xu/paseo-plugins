@@ -22,7 +22,8 @@ function openNotes(host: PluginCommandCapabilities) {
 let quickSequence = 0;
 
 export default function contribute(client: PluginClientContext) {
-  const i18n = createClientI18n(client, { pluginId: "project-notes", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } } });
+  // Only views opened later need the full catalog; the resident stub draws boot text.
+  const i18n = createClientI18n(client, { pluginId: "project-notes", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } }, load: "lazy" });
   const lazy = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n });
   const NotesSurface = lazy("notes"), PromptScreen = lazy("prompts"), NotesWorkspacePanel = lazy("project-notes");
   const removers: (() => void)[] = [];
