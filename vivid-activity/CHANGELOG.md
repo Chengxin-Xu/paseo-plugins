@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 (2026-10-15)
+
+- Add English and Simplified Chinese with Follow system as the default and a Language section in settings.
+- Translate rows, folds, times, tool details, Claude/Pi notices and server-generated subagent summaries. Open views update when the language changes.
+- Support custom language files in `~/.paseo/plugin-data/vivid-activity/locales/`, with templates, coverage, placeholder checks and English fallback.
+- Wait for text before taking over timeline rows, and share the selected language with both lazy chunks.
+
+
 ## 0.6.2 (2026-10-14)
 
 Documentation only; the code is unchanged.

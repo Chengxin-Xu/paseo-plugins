@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PaseoApi } from "./paseo-types";
 import type { SessionTrajectory, TrajectoryRow } from "../shared/trajectory";
 import { normalizeTimelinePage, object, projectTimelineRows, string, type TimelineCursor, type TimelineRow } from "../shared/timeline";
@@ -9,7 +10,7 @@ export interface TrajectoryOptions { limit?: number; maxCharacters?: number; sig
 export function abortable<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return pending;
   return new Promise<T>((resolve, reject) => {
-    const canceled = () => { cleanup(); reject(Object.assign(new Error("分析已取消"), { name: "AbortError" })); };
+    const canceled = () => { cleanup(); reject(Object.assign(new Error(t("serverTrajectory.m001")), { name: "AbortError" })); };
     const cleanup = () => signal.removeEventListener("abort", canceled);
     pending.then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
     if (signal.aborted) canceled(); else signal.addEventListener("abort", canceled, { once: true });
@@ -32,7 +33,7 @@ export function summarizeTrajectoryRow(row: TimelineRow): { text: string; trunca
   let truncated = false;
   const compact = (value: unknown, depth = 0, secret = false): unknown => {
     if (typeof value === "string") { const excerpt = excerptText(secret && value ? "[redacted]" : redactSecrets(value), 700); truncated ||= excerpt.truncated; return excerpt.text; }
-    if (depth > 3) { truncated = true; return "[嵌套结构已摘要]"; }
+    if (depth > 3) { truncated = true; return t("serverTrajectory.m002"); }
     if (Array.isArray(value)) { truncated ||= value.length > 8; return value.slice(0, 8).map(entry => compact(entry, depth + 1, secret)); }
     if (value && typeof value === "object") { const entries = Object.entries(value); truncated ||= entries.length > 15; return Object.fromEntries(entries.slice(0, 15).map(([key, entry]) => [key, compact(entry, depth + 1, secret || isCredentialField(key))])); }
     return value;
@@ -57,7 +58,7 @@ export function summarizeTrajectoryRow(row: TimelineRow): { text: string; trunca
     add("output", output, item.status === "failed" || item.error ? 2800 : 2000);
     if (typeof output === "string" && output.length > 2000) {
       const signals: string[] = [];
-      for (const match of output.matchAll(/^.*(?:error|failed|exception|traceback|assertion|permission denied|timed?\s*out|exit code|失败|错误|拒绝).*$/gmi)) {
+      for (const match of output.matchAll(/^.*(?:error|failed|exception|traceback|assertion|permission denied|timed?\s*out|exit code|失败|错误|拒绝).*$/gmi)) { // i18n-ignore: Match original Chinese provider/user text; this is parser data.
         signals.push(match[0].slice(0, 220)); if (signals.length >= 5) break;
       }
       add("errorSignals", signals.join("\n"), 1100);
@@ -81,12 +82,12 @@ function mergePageRows(existing: TimelineRow[], incoming: TimelineRow[]): Timeli
 }
 /** Read-only, bounded source acquisition shared by evidence and model analysis. */
 export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options: TrajectoryOptions = {}): Promise<SessionTrajectory> {
-  if (options.signal?.aborted) throw Object.assign(new Error("分析已取消"), { name: "AbortError" });
+  if (options.signal?.aborted) throw Object.assign(new Error(t("serverTrajectory.m003")), { name: "AbortError" });
   const limit = Math.max(1, Math.min(1500, Math.floor(options.limit ?? 1500)));
   const maxCharacters = Math.max(1000, Math.min(400000, Math.floor(options.maxCharacters ?? 400000)));
   const handle = paseo.agents.ref(agentId);
   const initial = await abortable(handle.refresh(), options.signal);
-  if (!initial?.agent) throw new Error("此历史会话已不在当前宿主中");
+  if (!initial?.agent) throw new Error(t("serverTrajectory.m004"));
   let source = object(initial.agent);
   let rows: TimelineRow[] = [];
   let epoch = "";
@@ -100,13 +101,13 @@ export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options:
   for (;;) {
     let payload: unknown;
     try {
-      if (options.signal?.aborted) throw Object.assign(new Error("分析已取消"), { name: "AbortError" });
+      if (options.signal?.aborted) throw Object.assign(new Error(t("serverTrajectory.m005")), { name: "AbortError" });
       payload = await abortable(handle.timeline.refetch({ direction: cursor ? direction : "tail",
         ...(cursor ? { cursor } : {}), projection: "projected", limit: Math.min(150, limit) }), options.signal);
     } catch (error) {
       if (options.signal?.aborted) throw error;
       if (!rows.length) throw error;
-      reasons.push(`较早历史读取失败：${error instanceof Error ? error.message : "宿主未响应"}`);
+      reasons.push(t("serverTrajectory.m006", { value1: error instanceof Error ? error.message : t("serverTrajectory.m007") }));
       truncated = true; hasOlder = true; break;
     }
     const page = normalizeTimelinePage(payload);
@@ -114,7 +115,7 @@ export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options:
     if (direction === "after" && (page.reset || options.after?.epoch !== page.epoch)) { direction = "before"; rows = []; visited.clear(); cursor = undefined; }
     if (epoch && page.epoch !== epoch) {
       rows = []; visited.clear(); resetCount++;
-      if (resetCount > 1) { reasons.push("读取期间会话多次重建，请稍后重新分析"); truncated = true; break; }
+      if (resetCount > 1) { reasons.push(t("serverTrajectory.m008")); truncated = true; break; }
     }
     epoch = page.epoch;
     const compactRows = projectTimelineRows(page.rows).map(row => {
@@ -135,16 +136,16 @@ export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options:
     if (pages === 1 || page.reset || direction === "after") { hasNewer = page.hasNewer; coveredEndSeq = page.endCursor?.seq ?? coveredEndSeq; }
     gap ||= page.gap;
     truncated ||= page.truncated;
-    if (rows.length >= limit) { if (rows.length > limit) { rows = rows.slice(-limit); hasOlder = true; } if (hasOlder) reasons.push("已达到轨迹条数上限"); break; }
+    if (rows.length >= limit) { if (rows.length > limit) { rows = rows.slice(-limit); hasOlder = true; } if (hasOlder) reasons.push(t("serverTrajectory.m009")); break; }
     const nextCursor = direction === "after" ? page.endCursor : page.startCursor;
     if (!(direction === "after" ? hasNewer : hasOlder) || !nextCursor || !page.rows.length) break;
     const nextKey = `${nextCursor.epoch}:${nextCursor.seq}`;
     const stalled = cursor && cursor.epoch === nextCursor.epoch && (direction === "after" ? nextCursor.seq <= cursor.seq : nextCursor.seq >= cursor.seq);
     if (visited.has(nextKey) || stalled && !page.reset) {
-      reasons.push("宿主历史游标未继续前进"); truncated = true; break;
+      reasons.push(t("serverTrajectory.m010")); truncated = true; break;
     }
     visited.add(nextKey); cursor = nextCursor;
-    if (pages >= 20) { reasons.push("已达到历史读取页数上限"); truncated = true; break; }
+    if (pages >= 20) { reasons.push(t("serverTrajectory.m011")); truncated = true; break; }
   }
   // Read across the available turns before allocating a fair content budget.
   // A huge recent shell script must not crowd earlier user instructions out.
@@ -167,9 +168,9 @@ export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options:
       kind: row.item.type, text, toolName: row.item.type === "tool_call" ? textOrNull(row.item.name) : null,
       toolStatus: row.item.type === "tool_call" ? textOrNull(row.item.status) : null });
   }
-  if (gap) reasons.push("宿主报告了历史缺口");
-  if (hasOlder && !reasons.length) reasons.push("当前轨迹仅覆盖最近的部分历史");
-  if (truncated && !reasons.length) reasons.push("长脚本与工具输出已提取摘要，保留意图、首尾结果、错误信号和来源引用");
+  if (gap) reasons.push(t("serverTrajectory.m012"));
+  if (hasOlder && !reasons.length) reasons.push(t("serverTrajectory.m013"));
+  if (truncated && !reasons.length) reasons.push(t("serverTrajectory.m014"));
   source = object(handle.current?.() ?? initial.agent);
   const placement = object(initial.project), checkout = object(placement.checkout);
   const projectId = string(placement.projectKey);
@@ -186,7 +187,7 @@ export async function fetchTrajectory(paseo: PaseoApi, agentId: string, options:
         || textOrNull(checkout.worktreeRoot) || textOrNull(checkout.cwd) } : null,
     capturedAt: new Date().toISOString(), rows: evidence,
     coverage: { complete: !hasOlder && !hasNewer && !gap && !truncated, hasOlder, hasNewer, gap, truncated,
-      reason: reasons.length ? [...new Set(reasons)].join("；") : null, projectedItems: evidence.length, characters, pages,
+      reason: reasons.length ? [...new Set(reasons)].join(t("serverTrajectory.m015")) : null, projectedItems: evidence.length, characters, pages,
       firstAt: evidence.find(row => row.at)?.at ?? null, lastAt: [...evidence].reverse().find(row => row.at)?.at ?? null, epoch, endSeq: coveredEndSeq },
     counts: { userTurns: evidence.filter(row => row.kind === "user_message").length,
       assistantMessages: evidence.filter(row => row.kind === "assistant_message").length,

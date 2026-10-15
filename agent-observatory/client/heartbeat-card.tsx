@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useMemo } from "react";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -46,20 +47,20 @@ function WakeBadge({ theme, heartbeats, now }: { theme: PluginTheme; heartbeats:
 const awaitsApproval = (run: HeartbeatSummary["lastRun"]) => run?.status === "failed" && /is waiting for permission/.test(run.error ?? "");
 /** The state pill of one heartbeat: 唤醒中 blue, 等待唤醒 pink (即将唤醒 solid), 已暂停 grey, 已完成 green, 已唤醒 amber or 已结束 red / grey. */
 function stateOf(heartbeat: HeartbeatSummary, now: number): { label: string; hue: Hue; icon?: string; solid?: boolean } {
-  if (heartbeat.lastRun?.status === "running") return { label: "唤醒中", hue: "run" };
-  if (heartbeat.status === "paused") return { label: "已暂停", hue: "muted", icon: "CirclePause" };
-  if (heartbeat.status === "completed") return heartbeat.lastRun?.status === "succeeded" ? { label: "已完成", hue: "ok", icon: "Check" }
-    : awaitsApproval(heartbeat.lastRun) ? { label: "已唤醒", hue: "amber", icon: "Hand" }
-    : heartbeat.lastRun?.status === "failed" ? { label: "已结束", hue: "fail", icon: "X" } : { label: "已结束", hue: "muted", icon: "CircleStop" };
+  if (heartbeat.lastRun?.status === "running") return { label: t("coreHeartbeatCard.waking"), hue: "run" };
+  if (heartbeat.status === "paused") return { label: t("coreHeartbeatCard.paused"), hue: "muted", icon: "CirclePause" };
+  if (heartbeat.status === "completed") return heartbeat.lastRun?.status === "succeeded" ? { label: t("coreHeartbeatCard.completed"), hue: "ok", icon: "Check" }
+    : awaitsApproval(heartbeat.lastRun) ? { label: t("coreHeartbeatCard.woken"), hue: "amber", icon: "Hand" }
+    : heartbeat.lastRun?.status === "failed" ? { label: t("coreHeartbeatCard.ended"), hue: "fail", icon: "X" } : { label: t("coreHeartbeatCard.ended"), hue: "muted", icon: "CircleStop" };
   const at = parseTime(heartbeat.nextRunAt);
-  return at && at <= now ? { label: "即将唤醒", hue: "pink", icon: "AlarmClock", solid: true } : { label: "等待唤醒", hue: "pink", icon: "AlarmClock" };
+  return at && at <= now ? { label: t("coreHeartbeatCard.wakingSoon"), hue: "pink", icon: "AlarmClock", solid: true } : { label: t("coreHeartbeatCard.waitingToWake"), hue: "pink", icon: "AlarmClock" };
 }
 /** 下次 今天 22:35（3 小时后）. */
 function nextWake(heartbeat: HeartbeatSummary, now: number): string | null {
   const at = heartbeat.status === "active" ? parseTime(heartbeat.nextRunAt) : 0;
   if (!at) return null;
   const until = untilLabel(heartbeat.nextRunAt, now);
-  return `下次 ${dayWord(at, now)} ${clockOf(at)}${until ? `（${until}）` : ""}`;
+  return t("coreHeartbeatCard.next", { value1: dayWord(at, now), value2: clockOf(at), value3: until ? t("coreHeartbeatCard.message", { value1: until }) : "" });
 }
 
 /**
@@ -81,7 +82,7 @@ export function HeartbeatCard({ theme, heartbeats, onOpenAll }: { theme: PluginT
     <Flash count={changes} color={tint(pink, tintAlpha(theme) + 0.1)} radius={radius.lg} />
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
       <Breathe active={running || soon}><Icon name="HeartPulse" size={15} color={pink} /></Breathe>
-      <Text style={{ color: hueColor(theme, "pink", "text"), fontSize: fontSize.meta, fontWeight: "700" }}>心跳</Text>
+      <Text style={{ color: hueColor(theme, "pink", "text"), fontSize: fontSize.meta, fontWeight: "700" }}>{t("coreHeartbeatCard.heartbeat")}</Text>
       <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{primary.name}</Text>
       <Spacer />
       {running ? <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}><Spinner size={12} color={hueColor(theme, "run")} /><PhasePill theme={theme} hue="run" label={state.label} /></View>
@@ -94,16 +95,16 @@ export function HeartbeatCard({ theme, heartbeats, onOpenAll }: { theme: PluginT
       <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
         {waiting ? <Icon name="Hand" size={14} color={hueColor(theme, "amber")} /> : <RunGlyph theme={theme} status={last.status} size={14} />}
         <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.small }}>
-          {last.status === "running" ? `这次从 ${runMoment(last.startedAt)} 开始` : `上次${waiting ? "唤醒" : runLooks[last.status].label} · ${runMoment(last.endedAt ?? last.startedAt)}`}
+          {last.status === "running" ? t("coreHeartbeatCard.thisRunStarted", { value1: runMoment(last.startedAt) }) : t("coreHeartbeatCard.last", { value1: waiting ? t("coreHeartbeatCard.wake") : runLooks[last.status].label, value2: runMoment(last.endedAt ?? last.startedAt) })}
         </Text>
       </View>
-      {waiting ? <Text numberOfLines={2} style={{ color: hueColor(theme, "amber", "text"), fontSize: fontSize.small, lineHeight: 19 }}>提示已送达，Agent 在等你审批（宿主把这次运行记为失败）</Text> : null}
+      {waiting ? <Text numberOfLines={2} style={{ color: hueColor(theme, "amber", "text"), fontSize: fontSize.small, lineHeight: 19 }}>{t("coreHeartbeatCard.thePromptWasDeliveredTheAgentIs")}</Text> : null}
       {error ? <Text numberOfLines={2} style={{ color: hueColor(theme, "fail", "text"), fontSize: fontSize.small, lineHeight: 19 }}>{error}</Text> : null}
-    </View> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>还没有运行过</Text>}
+    </View> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("coreHeartbeatCard.hasNotRunYet")}</Text>}
     {others.length ? <View style={{ gap: 2, paddingTop: 2 }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "600" }}>另有 {others.length} 个心跳</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "600" }}>{t("coreHeartbeatCard.otherHeartbeats", { count: others.length })}</Text>
       {others.slice(0, 3).map(other => <MetaLine key={other.scheduleId} theme={theme} parts={[other.name, cadenceText(other, zone, now), stateOf(other, now).label]} />)}
     </View> : null}
-    {onOpenAll ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} size="sm" tone="pink" icon="CalendarRange" label="在定时运行中查看" onPress={() => onOpenAll(primary.scheduleId)} /></View> : null}
+    {onOpenAll ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} size="sm" tone="pink" icon="CalendarRange" label={t("coreHeartbeatCard.viewInScheduledRuns")} onPress={() => onOpenAll(primary.scheduleId)} /></View> : null}
   </View>;
 }

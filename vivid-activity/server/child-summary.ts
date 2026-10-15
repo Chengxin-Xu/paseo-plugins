@@ -1,3 +1,4 @@
+import { t, type MessageId } from "../shared/text";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { childLoaded, childReadable, CHILD_TIMELINE_PAGE_SIZE, recentChildTimelineEntries, type ChildRecord } from "../shared/child-agent";
@@ -5,7 +6,7 @@ import type { ChildSummaryInput, ChildSummaryOutput, ChildSummaryRow } from "../
 import { formatReasoningText, resolveToolCallPresentation } from "../shared/presentation";
 import { zh } from "../shared/vivid-model";
 
-const LEVELS: Record<string, string> = { info: "通知", warning: "警告", warn: "警告", error: "错误", success: "成功" };
+const LEVELS: Record<string, MessageId> = { info: "childSummary.notification", warning: "childSummary.warning", warn: "childSummary.warning", error: "childSummary.error", success: "childSummary.success" };
 
 /** Byte limits include multibyte Chinese/emoji and JSON escapes, so previews stay small for every language. */
 function clip(value: string | undefined, bytes: number): string | undefined {
@@ -23,23 +24,23 @@ function clip(value: string | undefined, bytes: number): string | undefined {
 
 export function childSummaryRow(entry: { seqStart: number; seqEnd: number; item: AgentTimelineItem }): ChildSummaryRow {
   const item = entry.item;
-  const row: ChildSummaryRow = { k: String(entry.seqStart), i: "Puzzle", t: "动态", c: "unknown" };
+  const row: ChildSummaryRow = { k: String(entry.seqStart), i: "Puzzle", t: t("childSummary.activity"), c: "unknown" };
   switch (item.type) {
-    case "reasoning": Object.assign(row, { i: "Brain", t: "思考", x: formatReasoningText(item.text), c: "reasoning" }); break;
+    case "reasoning": Object.assign(row, { i: "Brain", t: t("childSummary.thinking"), x: formatReasoningText(item.text), c: "reasoning" }); break;
     case "tool_call": {
       const presentation = resolveToolCallPresentation(item);
       Object.assign(row, { i: presentation.icon, t: zh(presentation.label), x: presentation.summary, c: presentation.category, s: item.status });
       break;
     }
-    case "assistant_message": Object.assign(row, { i: "MessageSquare", t: "Agent", x: item.text, c: "communication" }); break;
-    case "user_message": Object.assign(row, { i: "MessageSquare", t: "提示词", x: item.text, c: "communication" }); break;
-    case "todo": Object.assign(row, { i: "ListChecks", t: "任务", x: `已完成 ${item.items.filter((task) => task.completed).length}/${item.items.length} 项`, c: "plan" }); break;
-    case "error": Object.assign(row, { i: "CircleX", t: "错误", x: item.message, c: "failed" }); break;
-    case "notification": Object.assign(row, { i: "Bell", t: LEVELS[item.level] ?? item.level, x: item.message, c: item.level === "error" ? "failed" : "communication" }); break;
-    case "compaction": Object.assign(row, { i: "Archive", t: "上下文已压缩", c: "plan", s: item.status }); break;
+    case "assistant_message": Object.assign(row, { i: "MessageSquare", t: t("childSummary.agent"), x: item.text, c: "communication" }); break;
+    case "user_message": Object.assign(row, { i: "MessageSquare", t: t("childSummary.prompt"), x: item.text, c: "communication" }); break;
+    case "todo": Object.assign(row, { i: "ListChecks", t: t("childSummary.tasks"), x: t("childSummary.completed", { done: item.items.filter((task) => task.completed).length, total: item.items.length }), c: "plan" }); break;
+    case "error": Object.assign(row, { i: "CircleX", t: t("childSummary.error"), x: item.message, c: "failed" }); break;
+    case "notification": Object.assign(row, { i: "Bell", t: LEVELS[item.level] ? t(LEVELS[item.level]!) : item.level, x: item.message, c: item.level === "error" ? "failed" : "communication" }); break;
+    case "compaction": Object.assign(row, { i: "Archive", t: t("childSummary.compacted"), c: "plan", s: item.status }); break;
     case "plugin": row.t = item.kind; break;
   }
-  row.t = clip(row.t, 36) ?? "动态";
+  row.t = clip(row.t, 36) ?? t("childSummary.activity");
   row.x = clip(row.x, 72);
   return row;
 }

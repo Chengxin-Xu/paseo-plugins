@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { DeferredSend, type DeferredAgentSnapshot, type DeferredGuard } from "./deferred-send";
@@ -38,16 +39,16 @@ const instant = (value: string | null | undefined) => { const at = value ? Date.
  */
 export function answeringGuard(turns: ObservedTurns) {
   return async ({ agentId, guard, agent }: { agentId: string; guard: DeferredGuard; agent: DeferredAgentSnapshot }): Promise<string | null> => {
-    const title = (agent as { title?: string | null }).title?.trim().slice(0, 60) || "这个 Agent";
-    if (instant(agent.lastUserMessageAt) !== instant(guard.prompt) || !!agent.activeTurn || agent.status === "running") return `「${title}」已经开始新的一轮，这条快捷回复不再适用`;
-    if (agent.status !== "idle" && agent.status !== "closed") return `「${title}」的状态变了，这条快捷回复不再适用`;
+    const title = (agent as { title?: string | null }).title?.trim().slice(0, 60) || t("serverSendLedger.m001");
+    if (instant(agent.lastUserMessageAt) !== instant(guard.prompt) || !!agent.activeTurn || agent.status === "running") return t("serverSendLedger.m002", { title: title });
+    if (agent.status !== "idle" && agent.status !== "closed") return t("serverSendLedger.m003", { title: title });
     const round = instant(guard.round);
     if (round === null) return null;
     const observed = await turns.snapshot(agentId);
-    if (observed.persistenceError) throw new Error(`观测台的记录暂时有问题，核实不了「${title}」最近一轮`);
+    if (observed.persistenceError) throw new Error(t("serverSendLedger.m004", { title: title }));
     const seen = instant(observed.agents.find(item => item.agentId === agentId)?.turnStartedAt);
-    if (seen === null || seen < round) throw new Error(`观测台读不到「${title}」最近一轮的记录`);
-    return seen > round ? `「${title}」之后又跑了一轮，这条快捷回复答的是之前那一轮，不再适用` : null;
+    if (seen === null || seen < round) throw new Error(t("serverSendLedger.m005", { title: title }));
+    return seen > round ? t("serverSendLedger.m006", { title: title }) : null;
   };
 }
 

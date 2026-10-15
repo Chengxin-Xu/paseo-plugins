@@ -1,3 +1,4 @@
+import { t, type MessageId } from "./text";
 /**
  * 本地补丁：Claude Code 的后台任务通知。
  *
@@ -111,12 +112,12 @@ interface Parsed {
   state: NoticeState | null;
 }
 
-const STATE_WORDS: Record<NoticeStatus, string> = { completed: "已完成", failed: "失败", canceled: "已停止" };
+const STATE_WORDS: Record<NoticeStatus, MessageId> = { completed: "notice.completed", failed: "notice.failed", canceled: "notice.stopped" };
 const stateOf = (status: NoticeStatus): NoticeState => (status === "failed" ? "failed" : status === "canceled" ? "stopped" : "done");
 const exitCode = (tail: string) => /exit(?: code)? (-?\d+)/i.exec(tail)?.[1];
 const withCode = (words: string, tail: string) => {
   const code = exitCode(tail);
-  return code !== undefined ? `${words}（退出码 ${code}）` : words;
+  return code !== undefined ? t("notice.exitCode", { words, code }) : words;
 };
 /** `failed: Unknown error` → 失败：Unknown error. */
 const afterColon = (tail: string) => tail.replace(/^[^:]*:\s*/, "").trim();
@@ -139,64 +140,64 @@ export function stillRunning(tail: string): [ran: string, quiet: string] | null 
 }
 
 function commandTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/^completed\b/i.test(tail)) return { tail: withCode("已完成", tail), state: null };
-  if (/^failed\b/i.test(tail)) return { tail: withCode("失败", tail), state: "failed" };
-  if (/^was stopped because the system is running low on memory/i.test(tail)) return { tail: "已停止（内存不足）", state: "stopped" };
-  if (/^was stopped after reaching its background time limit/i.test(tail)) return { tail: "已停止（到了后台运行时限）", state: "stopped" };
-  if (/^was (stopped|killed)\b/i.test(tail)) return { tail: "已停止", state: "stopped" };
+  if (/^completed\b/i.test(tail)) return { tail: withCode(t("notice.completed"), tail), state: null };
+  if (/^failed\b/i.test(tail)) return { tail: withCode(t("notice.failed"), tail), state: "failed" };
+  if (/^was stopped because the system is running low on memory/i.test(tail)) return { tail: t("notice.lowMemory"), state: "stopped" };
+  if (/^was stopped after reaching its background time limit/i.test(tail)) return { tail: t("notice.timeLimit"), state: "stopped" };
+  if (/^was (stopped|killed)\b/i.test(tail)) return { tail: t("notice.stopped"), state: "stopped" };
   const running = stillRunning(tail);
-  if (running) return { tail: `仍在运行（已运行 ${running[0]}，${running[1]} 没有新输出）`, state: "info" };
-  if (/^appears to be waiting for interactive input/i.test(tail)) return { tail: "像是在等交互输入", state: "blocked" };
+  if (running) return { tail: t("notice.stillRunning", { ran: running[0], quiet: running[1] }), state: "info" };
+  if (/^appears to be waiting for interactive input/i.test(tail)) return { tail: t("notice.waitingInput"), state: "blocked" };
   return { tail: "", state: null };
 }
 
 function agentTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/^finished\b/i.test(tail)) return { tail: "已完成", state: "done" };
+  if (/^finished\b/i.test(tail)) return { tail: t("notice.completed"), state: "done" };
   const limit = /^stopped at its (\d+)-turn limit/i.exec(tail);
-  if (limit) return { tail: `到了 ${limit[1]} 轮上限，停在半路（只有部分结果）`, state: "stopped" };
+  if (limit) return { tail: t("notice.turnLimit", { count: limit[1] }), state: "stopped" };
   if (/^failed\b/i.test(tail)) {
     const reason = afterColon(tail);
-    return { tail: reason && reason !== tail ? `失败：${reason}` : "失败", state: "failed" };
+    return { tail: reason && reason !== tail ? t("notice.failedReason", { reason }) : t("notice.failed"), state: "failed" };
   }
-  if (/^was stopped by user\b/i.test(tail)) return { tail: "被你停止", state: "stopped" };
-  if (/^was stopped by Claude\b/i.test(tail)) return { tail: "被 Claude 停止", state: "stopped" };
-  if (/^was stopped:/i.test(tail)) return { tail: `已停止：${afterColon(tail)}`, state: "stopped" };
-  if (/^was stopped\b/i.test(tail)) return { tail: "已停止", state: "stopped" };
-  if (/^was resumed by the user\b/i.test(tail)) return { tail: "被你恢复，又在运行了", state: "info" };
-  if (/^was resumed by another agent\b/i.test(tail)) return { tail: "交给了另一个 Agent，结果不再发到这里", state: "info" };
+  if (/^was stopped by user\b/i.test(tail)) return { tail: t("notice.stoppedByUser"), state: "stopped" };
+  if (/^was stopped by Claude\b/i.test(tail)) return { tail: t("notice.stoppedByClaude"), state: "stopped" };
+  if (/^was stopped:/i.test(tail)) return { tail: t("notice.stoppedReason", { reason: afterColon(tail) }), state: "stopped" };
+  if (/^was stopped\b/i.test(tail)) return { tail: t("notice.stopped"), state: "stopped" };
+  if (/^was resumed by the user\b/i.test(tail)) return { tail: t("notice.resumedByUser"), state: "info" };
+  if (/^was resumed by another agent\b/i.test(tail)) return { tail: t("notice.resumedByAgent"), state: "info" };
   return { tail: "", state: null };
 }
 
 function monitorTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/^ended without producing output/i.test(tail)) return { tail: withCode("已结束，没有输出", tail), state: "done" };
-  if (/^stream ended\b/i.test(tail)) return { tail: "输出流已结束", state: "done" };
-  if (/^script failed\b/i.test(tail)) return { tail: withCode("脚本失败", tail), state: "failed" };
-  if (/^stopped\b/i.test(tail)) return { tail: "已停止", state: "stopped" };
+  if (/^ended without producing output/i.test(tail)) return { tail: withCode(t("notice.endedNoOutput"), tail), state: "done" };
+  if (/^stream ended\b/i.test(tail)) return { tail: t("notice.streamEnded"), state: "done" };
+  if (/^script failed\b/i.test(tail)) return { tail: withCode(t("notice.scriptFailed"), tail), state: "failed" };
+  if (/^stopped\b/i.test(tail)) return { tail: t("notice.stopped"), state: "stopped" };
   return { tail: "", state: null };
 }
 
 function remoteTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/^completed\b/i.test(tail)) return { tail: "已完成", state: "done" };
-  if (/^failed\b/i.test(tail)) return { tail: "失败", state: "failed" };
-  if (/^is blocked:/i.test(tail)) return { tail: `卡住了：${afterColon(tail)}`, state: "blocked" };
-  if (/^is blocked\b/i.test(tail)) return { tail: "卡住了，在等输入", state: "blocked" };
-  if (/^was stopped\b/i.test(tail)) return { tail: "已停止", state: "stopped" };
+  if (/^completed\b/i.test(tail)) return { tail: t("notice.completed"), state: "done" };
+  if (/^failed\b/i.test(tail)) return { tail: t("notice.failed"), state: "failed" };
+  if (/^is blocked:/i.test(tail)) return { tail: t("notice.blockedReason", { reason: afterColon(tail) }), state: "blocked" };
+  if (/^is blocked\b/i.test(tail)) return { tail: t("notice.blocked"), state: "blocked" };
+  if (/^was stopped\b/i.test(tail)) return { tail: t("notice.stopped"), state: "stopped" };
   return { tail: "", state: null };
 }
 
 function taskTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/^was stopped by the user\b/i.test(tail)) return { tail: "被你停止", state: "stopped" };
+  if (/^was stopped by the user\b/i.test(tail)) return { tail: t("notice.stoppedByUser"), state: "stopped" };
   const by = /^was stopped by (.+?)\.?$/i.exec(tail);
-  if (by) return { tail: `被 ${by[1]} 停止`, state: "stopped" };
+  if (by) return { tail: t("notice.stoppedBy", { name: by[1] }), state: "stopped" };
   return { tail: "", state: null };
 }
 
 /** Any other tail: the plain state words, with the exit code when there is one. */
 function genericTail(tail: string): Pick<Parsed, "tail" | "state"> {
-  if (/\b(fail|failed|error)\b/i.test(tail)) return { tail: withCode("失败", tail), state: "failed" };
-  if (/\btimed out\b/i.test(tail)) return { tail: "超时", state: "stopped" };
-  if (/\b(stopp?ed|killed|cancell?ed|interrupted)\b/i.test(tail)) return { tail: "已停止", state: "stopped" };
-  if (/\b(completed?|finished|succeeded|done)\b/i.test(tail)) return { tail: withCode("已完成", tail), state: null };
+  if (/\b(fail|failed|error)\b/i.test(tail)) return { tail: withCode(t("notice.failed"), tail), state: "failed" };
+  if (/\btimed out\b/i.test(tail)) return { tail: t("notice.timeout"), state: "stopped" };
+  if (/\b(stopp?ed|killed|cancell?ed|interrupted)\b/i.test(tail)) return { tail: t("notice.stopped"), state: "stopped" };
+  if (/\b(completed?|finished|succeeded|done)\b/i.test(tail)) return { tail: withCode(t("notice.completed"), tail), state: null };
   return { tail: "", state: null };
 }
 
@@ -310,7 +311,7 @@ export function parseNoticeSummary(summary: string, taskType: string | null = nu
   if (taskType === "tool_call" || /^The \S+ call (finished|ended without a result)\b/i.test(head)) {
     const tool = /^The (\S+) call/i.exec(head)?.[1] ?? null;
     const failed = /^The \S+ call ended without a result/i.test(head);
-    return { kind: "repeat", subject: tool && shown(tool), tail: failed ? "没有结果就结束了" : "结果已送达", state: failed ? "failed" : null };
+    return { kind: "repeat", subject: tool && shown(tool), tail: failed ? t("notice.endedNoResult") : t("notice.resultDelivered"), state: failed ? "failed" : null };
   }
   // `Monitor event: "<name>"`; words after the closing quote (a hand-written or newer summary) stay, after a colon.
   const event = /^Monitor event:\s*(?:["“]([^"”]*)["”]\s*([\s\S]*)|([\s\S]*))$/i.exec(head);
@@ -332,14 +333,14 @@ export function parseNoticeSummary(summary: string, taskType: string | null = nu
       : kind === "monitor" ? monitorTail(tail)
       : kind === "remote" ? remoteTail(tail)
       : kind === "task" ? taskTail(tail)
-      : /could not be resumed/i.test(tail) ? { tail: "没能恢复", state: "failed" as const } : { tail: "", state: null };
+      : /could not be resumed/i.test(tail) ? { tail: t("notice.resumeFailed"), state: "failed" as const } : { tail: "", state: null };
     const words = own.tail ? own : genericTail(tail);
     return { kind, subject, tail: shown(words.tail), state: words.state };
   }
-  if (/^Remote workflow completed:/i.test(head)) return { kind: "remote", subject: null, tail: `远程工作流已完成：${shown(afterColon(head))}`, state: "done" };
-  if (/^Remote task blocked on input:/i.test(head)) return { kind: "remote", subject: null, tail: `远程任务卡住了：${shown(afterColon(head))}`, state: "blocked" };
-  if (/^Cloud review completed\b/i.test(head)) return { kind: "remote", subject: null, tail: "云端评审已完成", state: "done" };
-  if (/^Cloud review failed:/i.test(head)) return { kind: "remote", subject: null, tail: `云端评审失败：${shown(afterColon(head))}`, state: "failed" };
+  if (/^Remote workflow completed:/i.test(head)) return { kind: "remote", subject: null, tail: t("notice.remoteCompleted", { name: shown(afterColon(head)) }), state: "done" };
+  if (/^Remote task blocked on input:/i.test(head)) return { kind: "remote", subject: null, tail: t("notice.remoteBlocked", { reason: shown(afterColon(head)) }), state: "blocked" };
+  if (/^Cloud review completed\b/i.test(head)) return { kind: "remote", subject: null, tail: t("notice.cloudCompleted"), state: "done" };
+  if (/^Cloud review failed:/i.test(head)) return { kind: "remote", subject: null, tail: t("notice.cloudFailed", { reason: shown(afterColon(head)) }), state: "failed" };
   // Paseo's own fallbacks when Claude Code sent no summary.
   if (/^Background task notification$/i.test(value)) return { kind: "other", subject: null, tail: "", state: "info" };
   if (!value || TEMPLATE_START.test(head)) return { kind: "other", subject: null, tail: genericTail(head).tail, state: genericTail(head).state };
@@ -492,16 +493,16 @@ export function rowResultText(item: { detail?: unknown; error?: unknown }): stri
   }
 }
 
-const NOUNS: Record<NoticeKind, string> = {
-  command: "后台命令",
-  agent: "后台 Agent",
-  monitor: "监控",
-  event: "监控事件",
-  remote: "远程任务",
-  task: "后台任务",
-  workflow: "后台工作流",
-  repeat: "前台调用",
-  other: "后台任务",
+const NOUNS: Record<NoticeKind, MessageId> = {
+  command: "notice.backgroundCommand",
+  agent: "notice.backgroundAgent",
+  monitor: "notice.monitor",
+  event: "notice.monitorEvent",
+  remote: "notice.remoteTask",
+  task: "notice.backgroundTask",
+  workflow: "notice.backgroundWorkflow",
+  repeat: "notice.foregroundCall",
+  other: "notice.backgroundTask",
 };
 
 /** Row look of a notice: sub-agent magenta for agents and remote tasks, command orange for the rest. */
@@ -533,19 +534,19 @@ export function noticeIcon(kind: NoticeKind): string {
 export function noticeHeadline(
   notice: Pick<TaskNotice, "summary" | "status" | "kind" | "state" | "subject"> & Partial<Pick<TaskNotice, "hostStatus">>,
 ): { title: string; summary: string } {
-  const title = NOUNS[notice.kind];
+  const title = t(NOUNS[notice.kind]);
   const parsed = parseNoticeSummary(notice.summary, null, hostStatusOf(notice));
   // The summary's own words, unless they say another ending than the notice's status (the host's status wins, see readTaskNotice).
   const implied = parsed.state === null ? "completed" : STATUS_OF_STATE[parsed.state];
   const tail = implied === null || implied === notice.status ? parsed.tail : "";
-  const words = tail || (notice.state === "info" ? "" : STATE_WORDS[notice.status]);
+  const words = tail || (notice.state === "info" ? "" : t(STATE_WORDS[notice.status]));
   if (notice.kind === "repeat") {
     return notice.subject && /^The \S+ call/i.test(notice.summary)
-      ? { title, summary: `「${notice.subject}」${words}` }
+      ? { title, summary: words ? t("notice.subjectState", { subject: notice.subject, words }) : t("notice.eventSubject", { subject: notice.subject }) }
       : { title, summary: notice.subject ?? words };
   }
-  if (notice.kind === "event") return { title, summary: notice.subject ? `「${notice.subject}」${words ? `：${words}` : ""}` : words };
-  if (notice.subject) return { title, summary: `「${notice.subject}」${words}` };
+  if (notice.kind === "event") return { title, summary: notice.subject ? words ? t("notice.eventSubjectWords", { subject: notice.subject, words }) : t("notice.eventSubject", { subject: notice.subject }) : words };
+  if (notice.subject) return { title, summary: words ? t("notice.subjectState", { subject: notice.subject, words }) : t("notice.eventSubject", { subject: notice.subject }) };
   return { title, summary: words };
 }
 
@@ -557,7 +558,7 @@ function hostStatusOf(notice: Pick<TaskNotice, "status"> & Partial<Pick<TaskNoti
 
 /** 「后台 Agent」 and words without a name before them get a space between: 后台 Agent 到了 30 轮上限 (codex-vivid-F9). */
 function joined(title: string, words: string): string {
-  return /[A-Za-z0-9]$/.test(title) && words && !/^[\s「]/.test(words) ? `${title} ${words}` : `${title}${words}`;
+  return /[A-Za-z0-9]$/.test(title) && words && !/^[\s「]/.test(words) ? t("notice.joinedSpaced", { title, words }) : t("notice.joined", { title, words });
 }
 
 /** The notice's one-line Chinese text: 后台命令「构建」已完成（退出码 0）. */
@@ -568,8 +569,8 @@ export function noticeTextZh(notice: Pick<TaskNotice, "summary" | "status"> & Pa
   // As in readTaskNotice: a completed row takes its ending from the summary's template, any other status stands.
   const status = notice.status === "completed" ? STATUS_OF_STATE[state] ?? "completed" : notice.status;
   const { title, summary } = noticeHeadline({ summary: notice.summary, status, kind, state, subject: notice.subject ?? parsed.subject, hostStatus: hostStatusOf(notice) });
-  if (kind === "repeat" && !/^The \S+ call/i.test(notice.summary)) return summary || joined(title, STATE_WORDS[status]);
-  if (!summary) return state === "info" && kind === "other" ? "后台任务通知" : joined(title, STATE_WORDS[status]);
+  if (kind === "repeat" && !/^The \S+ call/i.test(notice.summary)) return summary || joined(title, t(STATE_WORDS[status]));
+  if (!summary) return state === "info" && kind === "other" ? t("notice.backgroundNotification") : joined(title, t(STATE_WORDS[status]));
   return joined(title, summary);
 }
 

@@ -1,3 +1,5 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 /**
  * Why a turn stopped when that is not simply "done": the provider's usage or rate limit (with when it resets), a turn that
  * produced nothing, or one that stopped after a tool call without a closing message. Decided on the server when a turn
@@ -51,8 +53,8 @@ const LIMIT_LOOSE = [
   /^(you['’]ve|you have) (hit|reached|exceeded) (your|the) [\p{L}\p{N}'’ .-]{0,40}?\blimits?\b/iu,
   /^(claude( ai| code)?|codex|gemini|grok|cursor)?\s*((usage|rate|session|weekly|daily|5-hour|five-hour)[ -])+limits? (reached|exceeded|hit)\b/i,
   /^(rate|usage) limit(ed)? ?(reached|exceeded|hit)?\b.{0,40}(try again|resets?|retry)/i,
-  /^(当前账[号户]|你的账[号户]|您的账[号户]|你|您)?(已经?)?(达到|用完|用尽|超出|超过)了?\s*(当前|本周|本月|今日|今天|每日|每周|\d+\s*小时|五小时)?\s*的?\s*(使用|用量|调用|请求)?\s*(额度|限额|上限|配额)/,
-  /^(本周|本月|今日|今天|当前)?的?(使用|用量|调用)?(额度|配额|限额)已经?(用完|用尽|耗尽|达到上限)/,
+  /^(当前账[号户]|你的账[号户]|您的账[号户]|你|您)?(已经?)?(达到|用完|用尽|超出|超过)了?\s*(当前|本周|本月|今日|今天|每日|每周|\d+\s*小时|五小时)?\s*的?\s*(使用|用量|调用|请求)?\s*(额度|限额|上限|配额)/, // i18n-ignore: Match original Chinese provider/user text; this is parser data.
+  /^(本周|本月|今日|今天|当前)?的?(使用|用量|调用)?(额度|配额|限额)已经?(用完|用尽|耗尽|达到上限)/, // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 ];
 /** A loose English limit phrase in a reply counts only with when it comes back right after it (THEN_RESET, F6). */
 const LIMIT_LOOSE_REPLY = [
@@ -63,16 +65,17 @@ const LIMIT_LOOSE_REPLY = [
 ];
 const SHORT_NOTICE = 300;
 /** Addressed to the user's account (「您已达到…」「当前账号…」), or saying when it comes back (「将于明天重置」「…后恢复。」). */
-const ZH_ACCOUNT = /^(你|您)(的账[号户])?已|(当前|你的|您的)账[号户]/;
-const ZH_RETURNS = /[将会](于|在)[^，。,.；;！!？?]{0,24}(恢复|重置)|(后|之后)(恢复|重置)(使用)?(?=[。！!，,；;\s]|$)|(恢复|重置)时间/;
+const ZH_ACCOUNT = /^(你|您)(的账[号户])?已|(当前|你的|您的)账[号户]/; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
+const ZH_RETURNS = /[将会](于|在)[^，。,.；;！!？?]{0,24}(恢复|重置)|(后|之后)(恢复|重置)(使用)?(?=[。！!，,；;\s]|$)|(恢复|重置)时间/; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 /** How a reply describes a change it made (「超出配额时现在会自动降级」「已加上单测」「改为…」): never a limit notice (F6). */
-const ZH_WORK = /现在会|时会|会自动|已经?(加上|加了|补上|补了|添加|新增|实现|改为|改成)|改为|改成|新增|实现了/;
+const ZH_WORK = /现在会|时会|会自动|已经?(加上|加了|补上|补了|添加|新增|实现|改为|改成)|改为|改成|新增|实现了/; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 /** In an error message (a failed turn, an error item) the vocabulary may be broader: it is never ordinary prose. */
-const LIMIT_ERROR = /\b(rate[ _-]?limit(ed)?|usage[ _-]?limit|quota|insufficient_quota|too many requests|limit (reached|exceeded)|resource[ _-]?exhausted)\b|\b429\b|额度|限额|配额|限流|用量上限/i;
+const LIMIT_ERROR = /\b(rate[ _-]?limit(ed)?|usage[ _-]?limit|quota|insufficient_quota|too many requests|limit (reached|exceeded)|resource[ _-]?exhausted)\b|\b429\b|额度|限额|配额|限流|用量上限/i; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 /** A failure reason that reads like one of the notices above is a limit too (opus-F36), wherever it starts ("Error: You've hit your limit"). */
+// i18n-ignore: Literal Chinese syntax is matched against provider or user content.
 const LIMIT_IN_ERROR = [...LIMIT_STRICT, ...LIMIT_LOOSE].map(pattern => new RegExp(pattern.source.replace(/^\^/, "(?:^|[\\s:：>\\]】)])"), pattern.flags));
 /** "maximum context length" / "max tokens" are limits too, but not ones a wait resolves. */
-const NOT_QUOTA = /context (window|length)|max(imum)?[ _-]?(output[ _-]?)?tokens|prompt is too long|上下文/i;
+const NOT_QUOTA = /context (window|length)|max(imum)?[ _-]?(output[ _-]?)?tokens|prompt is too long|上下文/i; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 const MAX_NOTICE = 800;
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -131,11 +134,14 @@ export function parseReset(text: string, now: number, hostZone?: string): { at: 
   const iso = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2}))\b/.exec(text);
   if (iso) { const found = plausible(Date.parse(iso[1]!)); if (found) return found; }
   const relative = /\b(?:try again|retry|resets?|available again|wait)\s+(?:in|after)\s+((?:\d+(?:\.\d+)?\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b\s*(?:and\s*|,\s*)?)+)/i.exec(text)
-    ?? /(\d+(?:\.\d+)?\s*(?:天|小时|分钟|秒)(?:\s*\d+(?:\.\d+)?\s*(?:天|小时|分钟|秒))*)\s*(?:后|之后)(?:重置|恢复|再试)/.exec(text);
+    ?? /(\d+(?:\.\d+)?\s*(?:天|小时|分钟|秒)(?:\s*\d+(?:\.\d+)?\s*(?:天|小时|分钟|秒))*)\s*(?:后|之后)(?:重置|恢复|再试)/.exec(text); // i18n-ignore: Match original Chinese provider/user text; this is parser data.
   if (relative) {
     let total = 0;
-    for (const [, amount, unit] of relative[1]!.matchAll(/(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s|天|小时|分钟|秒)(?![a-z])/gi)) {
+    for (const [, amount, unit] of relative[1]!.matchAll(/(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s|天|小时|分钟|秒)(?![a-z])/gi)) { // i18n-ignore: Match original Chinese provider/user text; this is parser data.
       const u = unit!.toLowerCase();
+// i18n-ignore: Literal Chinese syntax is matched against provider or user content.
+// i18n-ignore: Literal Chinese syntax is matched against provider or user content.
+// i18n-ignore: Literal Chinese syntax is matched against provider or user content.
       total += Number(amount) * (u.startsWith("d") || u === "天" ? 86_400_000 : u.startsWith("h") || u === "小时" ? 3_600_000 : u.startsWith("s") || u === "秒" ? 1000 : 60_000);
     }
     const found = total > 0 ? plausible(now + total) : null;
@@ -262,4 +268,9 @@ export function tailStop(rows: readonly TimelineRow[], userAt: number, now: numb
   return turnStop({ outcome: "completed", items: [prompt.item, ...after.map(row => row.item)], now, hostZone });
 }
 
-export const stopLabels: Record<StopKind, string> = { quota: "额度用尽", silent: "空轮", unfinished: "可能未收尾" };
+export let stopLabels: Record<StopKind, string> = { quota: t("sharedStopReason.m005"), silent: t("sharedStopReason.m006"), unfinished: t("sharedStopReason.m007") };
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  stopLabels = { quota: t("sharedStopReason.m005"), silent: t("sharedStopReason.m006"), unfinished: t("sharedStopReason.m007") };
+});

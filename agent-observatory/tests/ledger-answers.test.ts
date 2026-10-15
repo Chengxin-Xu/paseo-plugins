@@ -1,10 +1,11 @@
+import { t } from "../shared/text";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { ledgerNotice, onItsWayLabel } from "../client/deferred-state";
+import { ledgerNotice, onItsWayLabel, deferredSourceLabel } from "../client/deferred-state";
 import { isSendRefused, ledgerInput } from "../client/send-check";
 import type { DeferredView } from "../shared/deferred-rpc";
 
@@ -25,7 +26,7 @@ function callbacks(file: string, names: readonly string[], scope: Record<string,
   assert.deepEqual([...found.keys()].sort(), [...names].sort(), `${file}: every callback found`);
   const body = `(function () {\n${names.map(name => found.get(name)).join("\n")}\nreturn { ${names.join(", ")} };\n})`;
   const js = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  return (runInNewContext(js, { ...scope, Error, Promise }) as () => Record<string, (...args: unknown[]) => Promise<void>>)();
+  return (runInNewContext(js, { ...scope, t, deferredSourceLabel, Error, Promise }) as () => Record<string, (...args: unknown[]) => Promise<void>>)();
 }
 
 const view = (state: DeferredView["state"], patch: Partial<DeferredView> = {}): DeferredView =>

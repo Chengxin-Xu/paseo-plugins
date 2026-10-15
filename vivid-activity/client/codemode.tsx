@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import React, { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -40,13 +41,12 @@ export function CodeModeToolDetail({
   const [showAll, setShowAll] = useState(false);
   const visibleItems = catalog && !showAll ? catalog.items.slice(0, VISIBLE_CATALOG_ITEMS) : catalog?.items;
   const hiddenCount = catalog ? catalog.items.length - (visibleItems?.length ?? 0) : 0;
-  const totalHint = catalog?.remaining !== undefined ? ` · 目录里还有 ${catalog.remaining} 个` : "";
 
   return (
     <View style={styles.paseoStack}>
-      <PaseoCodeBlock code={code} language="javascript" label="脚本" theme={theme} styles={styles} />
+      <PaseoCodeBlock code={code} language="javascript" label={t("ui.script")} theme={theme} styles={styles} />
       {catalog && visibleItems ? (
-        <Section title={`工具（${catalog.items.length}${totalHint}）`} styles={styles}>
+        <Section title={catalog.remaining !== undefined ? t("ui.toolsRemaining", { count: catalog.items.length, remaining: catalog.remaining }) : t("ui.toolsCount", { count: catalog.items.length })} styles={styles}>
           <View style={styles.paseoList}>
             {visibleItems.map((item) => (
               <View key={item.path} style={styles.paseoListItem}>
@@ -78,8 +78,8 @@ export function CodeModeToolDetail({
             >
               <Text style={styles.showMoreText}>
                 {showAll
-                  ? "收起"
-                  : `展开全部（已列出 ${catalog.items.length} 个${catalog.remaining ? `，还有 ${catalog.remaining} 个` : ""}）`}
+                  ? t("ui.collapse")
+                  : catalog.remaining ? t("ui.expandToolsRemaining", { count: catalog.items.length, remaining: catalog.remaining }) : t("ui.expandToolsCount", { count: catalog.items.length })}
               </Text>
             </Pressable>
           ) : null}
@@ -88,7 +88,7 @@ export function CodeModeToolDetail({
         <PaseoCodeBlock
           code={formatUnknownValue(output)}
           language="json"
-          label="输出"
+          label={t("ui.output")}
           theme={theme}
           styles={styles}
         />

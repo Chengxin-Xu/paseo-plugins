@@ -1,3 +1,4 @@
+import { onTextChange } from "../shared/i18n";
 import type { PluginTimelineTransformResult } from "@getpaseo/plugin";
 import type { PluginTimelineTransformerContribution } from "@getpaseo/plugin/client";
 import type { ToolCallTimelineItem } from "@getpaseo/protocol/agent-types";
@@ -36,6 +37,8 @@ type ToolCallItem = Extract<ToolCallTimelineItem, { type: "tool_call" }>;
  */
 const MEMO_LIMIT = 1500;
 const memo = new Map<string, PluginTimelineTransformResult>();
+// Completed projections contain display text; rebuild them after a catalog change.
+onTextChange(() => memo.clear());
 function remember(key: string, build: () => PluginTimelineTransformResult): PluginTimelineTransformResult {
   const cached = memo.get(key);
   if (cached) return cached;

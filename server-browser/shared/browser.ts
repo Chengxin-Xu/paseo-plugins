@@ -14,7 +14,7 @@ export const tabSchema = z.object({ id:z.string(), title:z.string(), url:z.strin
 export const browserSettingsSchema = z.object({autoRecover:z.boolean(),maxTabs:z.number().int().min(2).max(100),maxArtifactMB:z.number().int().min(16).max(4096),artifactMaxAgeHours:z.number().int().min(1).max(720)});
 export const runtimeSchema = z.object({recoveryCount:z.number(),lastRecoveredAt:z.number().nullable(),lastFailure:z.string().nullable(),artifactBytes:z.number(),artifactCount:z.number(),cleanedArtifacts:z.number(),uptimeSeconds:z.number()});
 export const healthSchema = z.object({state:z.enum(['unknown','login_required','accessible','network_error']),summary:z.string(),checkedAt:z.number(),httpStatus:z.number().nullable(),origin:z.string()});
-export const activitySchema = z.object({id:z.string(),source:z.enum(['agent','manual']),action:z.string(),status:z.enum(['running','completed','failed']),tabId:z.string().nullable(),pageTitle:z.string(),pageUrl:z.string(),startedAt:z.number(),endedAt:z.number().nullable()});
+export const activitySchema = z.object({id:z.string(),source:z.enum(['agent','manual']),action:z.string(),actionId:z.string().optional(),status:z.enum(['running','completed','failed']),tabId:z.string().nullable(),pageTitle:z.string(),pageUrl:z.string(),startedAt:z.number(),endedAt:z.number().nullable()});
 export const sessionSchema = z.object({
   workspaceId:workspaceIdSchema, status:z.enum(['idle','starting','running','recovering','error']),
   title:z.string(), url:z.string(), mode:modeSchema,

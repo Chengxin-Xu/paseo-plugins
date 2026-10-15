@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { deferOffer, isOnItsWay, type DeferredView } from "../shared/deferred-rpc";
 import { contentKey, newMessageId, type Consent } from "./send-plan";
 
@@ -8,6 +9,7 @@ import { contentKey, newMessageId, type Consent } from "./send-plan";
  */
 
 /** Where a message comes from: its key and its row both name it. */
+// i18n-ignore: persisted ledger source prefixes are also message identity keys; translate only their display.
 export const SOURCES = { quickReply: "快捷回复", finding: "分析建议" } as const;
 
 /** What makes two messages the same request: the ledger keeps one per Agent and key on its way. */
@@ -128,23 +130,34 @@ export function confirmOffer(consent: Pick<Consent, "approvals">): { label: stri
  * `kind`: sent, on its way (waiting), the user's to look at (attention, uncertain), or over without sending (ended).
  */
 export function ledgerNotice(view: Pick<DeferredView, "state" | "note">, title: string, item?: string): { tone: "success" | "warning" | "danger" | "info"; kind: "sent" | "waiting" | "attention" | "uncertain" | "ended"; text: string } {
-  const words = item ? `：${item}` : "";
+  const words = item ? t("coreDeferredState.message", { value1: item }) : "";
   switch (view.state) {
-    case "queued": return { tone: "success", kind: "waiting", text: item ? `已排队：${item}，等「${title}」这一轮结束后自动发送` : `已排队：等「${title}」这一轮结束后自动发送` };
-    case "sending": return { tone: "success", kind: "waiting", text: `正在发给「${title}」${words}，见下方。` };
-    case "sent": return { tone: "success", kind: "sent", text: `已发给「${title}」${words}` };
-    case "held": return { tone: "warning", kind: "attention", text: `${item ? `「${item}」` : "这条消息"}在等你确认，见下方。` };
-    case "maybe-sent": return { tone: "warning", kind: "uncertain", text: view.note || "发送结果不确定，可能已经送达，请先打开会话看一下，不要直接重发。" };
-    case "canceled": return { tone: "info", kind: "ended", text: view.note || "已取消，没有发送" };
-    case "expired": return { tone: "danger", kind: "ended", text: view.note || "排队超过一天，已放弃发送" };
-    case "discarded": return { tone: "danger", kind: "ended", text: view.note || "没有发送" };
+    case "queued": return { tone: "success", kind: "waiting", text: item ? t("coreDeferredState.queuedItWillSendAutomaticallyWhenFinishes", { value1: item, value2: title }) : t("coreDeferredState.queuedItWillSendAutomaticallyWhenFinishes2", { value1: title }) };
+    case "sending": return { tone: "success", kind: "waiting", text: t("coreDeferredState.sendingToSeeBelow", { value1: title, value2: words }) };
+    case "sent": return { tone: "success", kind: "sent", text: t("coreDeferredState.sentTo", { value1: title, value2: words }) };
+    case "held": return { tone: "warning", kind: "attention", text: t("coreDeferredState.isWaitingForYourConfirmationSeeBelow", { value1: item ? t("coreDeferredState.quotedItem", { item }) : t("coreDeferredState.thisMessage") }) };
+    case "maybe-sent": return { tone: "warning", kind: "uncertain", text: view.note || t("coreDeferredState.theSendResultIsUncertainItMay") };
+    case "canceled": return { tone: "info", kind: "ended", text: view.note || t("coreDeferredState.canceledNotSent") };
+    case "expired": return { tone: "danger", kind: "ended", text: view.note || t("coreDeferredState.queuedForMoreThanADaySending") };
+    case "discarded": return { tone: "danger", kind: "ended", text: view.note || t("coreDeferredState.notSent") };
   }
 }
 
 /** How a message already on its way (or out moments ago) is named in a notice. */
 export function onItsWayLabel(view: Pick<DeferredView, "state">): string {
-  if (view.state === "held") return "在等你确认";
-  if (view.state === "sending") return "正在发送";
-  if (isOnItsWay(view)) return "已在排队";
-  return view.state === "maybe-sent" ? "刚刚可能已经发出" : "刚刚已经发出";
+  if (view.state === "held") return t("coreDeferredState.isWaitingForYourConfirmation");
+  if (view.state === "sending") return t("coreDeferredState.isSending");
+  if (isOnItsWay(view)) return t("coreDeferredState.isAlreadyQueued");
+  return view.state === "maybe-sent" ? t("coreDeferredState.mayJustHaveBeenSent") : t("coreDeferredState.wasJustSent");
+}
+
+/** Legacy source values remain message identity; only their presentation follows the language. */
+export function deferredSourceLabel(source: string): string {
+  if (source === SOURCES.quickReply) return t("coreDeferredState.quickReplySource");
+  if (source === SOURCES.finding) return t("coreDeferredState.findingSource");
+  const prefix = source.startsWith(SOURCES.finding) ? SOURCES.finding : source.startsWith(SOURCES.quickReply) ? SOURCES.quickReply : null;
+  if (!prefix) return source;
+  // i18n-ignore: strip the persisted quotation marks, including a source truncated at the ledger's length limit.
+  const title = source.slice(prefix.length).replace(/^「|」$/g, "");
+  return t(prefix === SOURCES.finding ? "coreDeferredState.findingSourceWithTitle" : "coreDeferredState.quickReplySourceWithTitle", { title });
 }

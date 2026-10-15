@@ -1,3 +1,4 @@
+import { useI18n } from "./i18n-client";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useMemo, type ReactNode } from "react";
@@ -121,6 +122,7 @@ export function RowFrame({ theme, status, compact, children }: { theme: PluginTh
 
 /** Short state pill shown on wide layouts next to the glyph for states that need words. */
 export function StatusPill({ theme, status, text }: { theme: PluginTheme; status: RowStatus; text?: string }) {
+  useI18n();
   const color = statusColor(theme, status, "text");
   return <View style={{ height: 18, paddingHorizontal: 6, borderRadius: 9, justifyContent: "center", backgroundColor: statusColor(theme, status, "soft") }}>
     <Text numberOfLines={1} style={{ color, fontSize: 11, fontWeight: "700" }}>{text ?? statusLooks[status].label}</Text>
@@ -179,6 +181,7 @@ export interface VividHeaderProps {
 
 /** One compact, coloured activity row: tile · 中文动作 · 摘要 · 改动 · 状态 · 展开. */
 export function VividHeader(props: VividHeaderProps) {
+  useI18n();
   const { theme, compact, look, title, summary, fileDisplay, status, statusText, stats, meta, live, icon, expanded, expandable, chevronColor, onPress, metrics, timing } = props;
   const text = useVividText(theme, metrics?.lineHeight ?? 18);
   // Attention states get words on phones too (「等你批准」「退出码 1」); quieter states only on wide layouts.

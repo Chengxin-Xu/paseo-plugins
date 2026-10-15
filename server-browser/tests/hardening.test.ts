@@ -309,7 +309,7 @@ test('while the user is in control the server refuses page-structure, network an
 test('RPC errors carry no page address: a failed navigation\'s query and fragment never reach the client or the daemon log', { timeout:60_000 }, async t => {
   const { manager, dataRoot } = await managed(t);
   const handlers = new Map<string, (input:unknown, context:unknown) => Promise<unknown>>();
-  const server = { handle:(contract:{ name:string }, handler:(input:unknown, context:unknown) => Promise<unknown>) => { handlers.set(contract.name, handler); }, on:() => () => {}, before:() => () => {} } as unknown as PluginServerContext;
+  const server = { handle:(contract:{ name:string }, handler:(input:unknown, context:unknown) => Promise<unknown>) => { handlers.set(contract.name, handler); }, on:() => () => {}, before:() => () => {}, registerSettings:() => ({ read:async()=>({status:'ready',revision:'r1',values:{language:'zh-CN'}}), subscribe:()=>()=>{} }) } as unknown as PluginServerContext;
   const workspace = { id:'rpc-errors', projectRootPath:dataRoot, workspaceDirectory:dataRoot, projectDisplayName:'Errors', name:'main', scripts:[] } as unknown as PaseoWorkspace;
   contribute(server, { manager, directory:new WorkspaceDirectory(60_000, Date.now, async () => [workspace]) });
   const paseo = {};

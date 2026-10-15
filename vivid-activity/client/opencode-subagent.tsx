@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import React from "react";
 import { Text, View } from "react-native";
@@ -33,15 +34,15 @@ export function OpencodeSubagentToolDetail({ input, output, theme, palette, styl
   return (
     <View style={styles.paseoStack}>
       <FieldsSection
-        title="任务"
+        title={t("ui.task")}
         fields={[
-          ["Agent", notInHeader(parsedInput.agent, summary)],
-          ["说明", notInHeader(parsedInput.description, summary)],
-          ["模型", parsedInput.model],
-          ["状态", status],
-          ["会话", sessionID],
-          ["继续会话", parsedInput.sessionID && parsedInput.sessionID !== sessionID ? parsedInput.sessionID : undefined],
-          ["后台运行", parsedInput.background],
+          [t("ui.agent"), notInHeader(parsedInput.agent, summary)],
+          [t("ui.description"), notInHeader(parsedInput.description, summary)],
+          [t("ui.model"), parsedInput.model],
+          [t("ui.status"), status, "status"],
+          [t("ui.session2"), sessionID],
+          [t("ui.resumeSession"), parsedInput.sessionID && parsedInput.sessionID !== sessionID ? parsedInput.sessionID : undefined],
+          [t("ui.runInBackground"), parsedInput.background],
         ]}
         palette={palette}
         styles={styles}
@@ -50,19 +51,19 @@ export function OpencodeSubagentToolDetail({ input, output, theme, palette, styl
         <PaseoCodeBlock
           code={parsedInput.prompt}
           language="text"
-          label="提示词"
+          label={t("ui.prompt")}
           theme={theme}
           styles={styles}
         />
       ) : null}
       {resultText && !parsedOutput?.isBackgroundNotice ? (
-        <Section title="结果" styles={styles}>
+        <Section title={t("ui.result")} styles={styles}>
           <Text selectable style={styles.detailText}>
             {resultText}
           </Text>
         </Section>
       ) : resultText ? (
-        <Section title="状态" styles={styles}>
+        <Section title={t("ui.status")} styles={styles}>
           <Text selectable style={styles.mutedText}>
             {resultText}
           </Text>

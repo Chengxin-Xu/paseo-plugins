@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { normalizeTimelinePage, object, reconcileTimelinePage, type TimelineCursor, type TimelinePage, type TimelineRow } from "../shared/timeline";
 
 export interface TimelineViewState { scrollOffset: number; filter: "all" | "tools" | "messages" | "errors"; followTail: boolean }
@@ -53,8 +54,8 @@ function boundPage(page: TimelinePage, direction: "tail" | "before" = "tail"): T
     clipped = true;
     let budget = 128_000;
     const bounded = (value: unknown, depth = 0): unknown => {
-      if (depth > 10 || budget <= 0) return "[…缓存内容已截断]";
-      if (typeof value === "string") { const limit = Math.min(30_000, budget); budget -= Math.min(value.length, limit); return value.length > limit ? `${value.slice(0, limit)}\n[…缓存内容已截断]` : value; }
+      if (depth > 10 || budget <= 0) return t("secondaryTimelineStore.cachedContentTruncated");
+      if (typeof value === "string") { const limit = Math.min(30_000, budget); budget -= Math.min(value.length, limit); return value.length > limit ? t("secondaryTimelineStore.cachedContentTruncated2", { value1: value.slice(0, limit) }) : value; }
       if (Array.isArray(value)) return value.slice(0, 300).map(item => bounded(item, depth + 1));
       if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).slice(0, 150).map(([key, item]) => [key, bounded(item, depth + 1)]));
       return value;
@@ -161,7 +162,7 @@ export function createTimelineStore(transport: TimelineTransport, options: { clo
       const page = boundPage(merge(detached ? null : state.page, incoming, direction), direction);
       publish({ page, loading: false, error: null, lastSyncedAt: new Date(clock.now()).toISOString(),
         ...(raw.agent ? { snapshot: object(raw.agent) } : {}), ...(changedEpoch ? { viewState: { ...state.viewState, scrollOffset: 0 } } : {}) });
-    }).catch(error => { publish({ loading: false, error: error instanceof Error ? error.message : "执行记录读取失败" }); })
+    }).catch(error => { publish({ loading: false, error: error instanceof Error ? error.message : t("secondaryTimelineStore.couldNotReadExecutionRecords") }); })
       .finally(() => { fetching = null; publish({ refreshing: false, loadingOlder: false }); schedulePoll(); scheduleDirty(); });
     return fetching;
   }
@@ -170,7 +171,7 @@ export function createTimelineStore(transport: TimelineTransport, options: { clo
     const currentSubscription = ++subscriptionVersion;
     const failed = (error: unknown) => {
       if (!owners || disposed || currentSubscription !== subscriptionVersion) return;
-      publish({ live: false, error: error instanceof Error ? error.message : typeof error === "string" ? error : "实时连接不可用" });
+      publish({ live: false, error: error instanceof Error ? error.message : typeof error === "string" ? error : t("secondaryTimelineStore.liveConnectionUnavailable") });
       scheduleResubscribe();
     };
     try {
@@ -189,7 +190,7 @@ export function createTimelineStore(transport: TimelineTransport, options: { clo
   function handleEvent(update: unknown, failed: (error: unknown) => void) {
     const payload = object(update), event = object(payload.event);
     // The SDK has released this observation; establish a new one and keep polling meanwhile.
-    if (event.type === "error") { failed(typeof event.error === "string" ? event.error : "实时连接中断"); dirty = true; scheduleDirty(); return; }
+    if (event.type === "error") { failed(typeof event.error === "string" ? event.error : t("secondaryTimelineStore.liveConnectionInterrupted")); dirty = true; scheduleDirty(); return; }
     // Live delivery resumed after a reconnect; events in between were not replayed.
     if (event.type === "subscription_restored") { publish({ live: true, error: null }); dirty = authoritative = true; rescheduleDirty(); return; }
     if (event.type === "replacement") { revision++; authoritative = true; publish({ page: null, loading: true, viewState: { ...state.viewState, scrollOffset: 0 } }); }
@@ -208,7 +209,7 @@ export function createTimelineStore(transport: TimelineTransport, options: { clo
     getSnapshot: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     acquire() {
-      if (disposed) throw new Error("Timeline cache has been disposed");
+      if (disposed) throw new Error(t("secondaryTimelineStore.disposed"));
       owners++;
       if (owners === 1) {
         resubscribes = 0;

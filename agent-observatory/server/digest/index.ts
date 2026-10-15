@@ -1,3 +1,5 @@
+import { translator } from "../../shared/i18n";
+import { t } from "../../shared/text";
 import { createHash } from "node:crypto";
 import type { PaseoApi } from "../paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -35,28 +37,28 @@ export class DigestService {
     try { snapshot = await handle.refresh(); }
     catch (error) {
       if (error instanceof Error && /agent (?:not found|does not exist)/i.test(error.message)) {
-        this.cache.delete(agentId); throw new Error("找不到这个 Agent");
+        this.cache.delete(agentId); throw new Error(t("serverDigestIndex.m001"));
       }
-      throw new Error("Agent 状态读取失败，请稍后重试");
+      throw new Error(t("serverDigestIndex.m002"));
     }
-    if (this.closed || signal.aborted) throw new Error("复盘读取已结束");
-    if (!snapshot?.agent) { this.cache.delete(agentId); throw new Error("找不到这个 Agent"); }
+    if (this.closed || signal.aborted) throw new Error(t("serverDigestIndex.m003"));
+    if (!snapshot?.agent) { this.cache.delete(agentId); throw new Error(t("serverDigestIndex.m004")); }
     const agent = snapshot.agent, previous = this.cache.get(agentId), sessionId = agent.persistence?.sessionId;
     const [history, tokenHistory, telemetry] = await Promise.all([
       fetchHistory(options => {
-        if (this.closed || signal.aborted) throw new Error("复盘读取已结束");
+        if (this.closed || signal.aborted) throw new Error(t("serverDigestIndex.m005"));
         return handle.timeline.refetch(options);
       }, agentId, agent.cwd, previous),
       sessionId ? this.deps.tokens.callsForSessions([sessionId]) : Promise.resolve(null),
       this.deps.telemetry.snapshot(agentId),
     ]);
-    if (this.closed || signal.aborted) throw new Error("复盘读取已结束");
+    if (this.closed || signal.aborted) throw new Error(t("serverDigestIndex.m006"));
     const now = this.now(), active = agent.status === "running" || agent.status === "initializing" || !!agent.activeTurn;
     const events = telemetry.events.filter(event => event.agentId === agentId);
     // Counts alone miss updates to an existing token call and telemetry's fixed-size eviction window. A source that versions
     // its calls (the logs' identity, size and read position) is hashed by that version instead of every call (opus-F70).
     const tokens = tokenHistory?.version ? [tokenHistory.source, tokenHistory.version] : tokenHistory;
-    const revision = hash({ epoch: history.state.epoch, seq: history.state.lastSeq, version: history.version, status: agent.status, active,
+    const revision = hash({ language: translator().language, catalog: translator().hash, epoch: history.state.epoch, seq: history.state.lastSeq, version: history.version, status: agent.status, active,
       sessionId, cwd: agent.cwd, rows: history.state.rows, truncated: history.state.truncated,
       tokens, events: events.map(({ id, at, type, durationMs }) => [id, at, type, durationMs]), clock: active ? Math.floor(now / ACTIVE_CLOCK_MS) : null });
     const digest = previous?.revision === revision ? previous.digest : buildDigest(history.state, { now, status: agent.status, activeTurn: !!agent.activeTurn, events }, tokenHistory);
@@ -66,15 +68,15 @@ export class DigestService {
   }
 
   async read(input: { agentId: string; revision?: string }, paseo: PaseoApi): Promise<DigestResponse> {
-    if (this.closed) throw new Error("复盘读取通道已关闭");
+    if (this.closed) throw new Error(t("serverDigestIndex.m007"));
     let task = this.pending.get(input.agentId);
     if (!task) {
-      if (this.pending.size >= 24) throw new Error("同时读取的复盘过多，请稍后重试");
+      if (this.pending.size >= 24) throw new Error(t("serverDigestIndex.m008"));
       const signal = { aborted: false };
       let cancel!: (error: Error) => void;
       const aborted = new Promise<never>((_, reject) => { cancel = error => { signal.aborted = true; reject(error); }; });
       this.cancellations.add(cancel);
-      const timer = setTimeout(() => cancel(new Error("复盘读取超时，请稍后重试")), this.deps.timeoutMs ?? 20_000);
+      const timer = setTimeout(() => cancel(new Error(t("serverDigestIndex.m009"))), this.deps.timeoutMs ?? 20_000);
       task = Promise.race([this.build(paseo, input.agentId, signal), aborted]).finally(() => {
         clearTimeout(timer); this.cancellations.delete(cancel);
         if (this.pending.get(input.agentId) === task) this.pending.delete(input.agentId);
@@ -88,7 +90,7 @@ export class DigestService {
 
   async close(): Promise<void> {
     this.closed = true;
-    for (const cancel of this.cancellations) cancel(new Error("复盘读取通道已关闭"));
+    for (const cancel of this.cancellations) cancel(new Error(t("serverDigestIndex.m010")));
     this.cache.clear(); this.pending.clear();
   }
 }

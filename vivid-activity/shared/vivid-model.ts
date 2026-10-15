@@ -1,3 +1,17 @@
+import { t, type MessageId } from "./text";
+
+/** Getters preserve the public tables while looking up text in the current language.
+ * The closure is created in its own call, never over a loop binding (Hermes eval).
+ */
+function textProperty(id: MessageId): PropertyDescriptor {
+  return { enumerable: true, get: () => t(id) };
+}
+function translatedTable<T extends string>(ids: Record<T, MessageId>): Record<T, string> {
+  const result = {} as Record<T, string>;
+  for (const name of Object.keys(ids) as T[]) Object.defineProperty(result, name, textProperty(ids[name]));
+  return result;
+}
+
 /**
  * 本地补丁（vivid-activity）的纯数据部分：类别外观、状态外观、中文标签、MCP 名称拆分、等待批准的 callId。
  * 不依赖 react-native，供客户端组件和单元测试共用。色相名对应 client/kit.tsx 的 vivid palette。
@@ -14,21 +28,21 @@ export type LookKey = "think" | "read" | "list" | "edit" | "write" | "shell" | "
  * MCP 粉、Paseo 天蓝、技能黄绿（技能浏览器同样用 Sparkles）；提问也是「在等你」，与等审批同为琥珀。
  */
 export const looks: Record<LookKey, { label: string; icon: string; hue: Hue }> = {
-  think: { label: "思考", icon: "Brain", hue: "violet" },
-  read: { label: "读文件", icon: "FileText", hue: "blue" },
-  list: { label: "列目录", icon: "FolderOpen", hue: "blue" },
-  edit: { label: "改文件", icon: "FilePen", hue: "green" },
-  write: { label: "写文件", icon: "FilePlus", hue: "green" },
-  shell: { label: "命令", icon: "SquareTerminal", hue: "orange" },
-  search: { label: "搜索", icon: "Search", hue: "indigo" },
-  web: { label: "联网", icon: "Globe", hue: "cyan" },
-  agent: { label: "子 Agent", icon: "Bot", hue: "fuchsia" },
-  plan: { label: "计划", icon: "ListChecks", hue: "teal" },
-  ask: { label: "提问", icon: "MessageCircleQuestionMark", hue: "amber" },
-  mcp: { label: "MCP", icon: "Plug", hue: "pink" },
-  paseo: { label: "Paseo", icon: "Workflow", hue: "sky" },
-  skill: { label: "技能", icon: "Sparkles", hue: "lime" },
-  other: { label: "其他", icon: "Puzzle", hue: "gray" },
+  think: { get label() { return t("modelLook.think"); }, icon: "Brain", hue: "violet" },
+  read: { get label() { return t("modelLook.read"); }, icon: "FileText", hue: "blue" },
+  list: { get label() { return t("modelLook.list"); }, icon: "FolderOpen", hue: "blue" },
+  edit: { get label() { return t("modelLook.edit"); }, icon: "FilePen", hue: "green" },
+  write: { get label() { return t("modelLook.write"); }, icon: "FilePlus", hue: "green" },
+  shell: { get label() { return t("modelLook.shell"); }, icon: "SquareTerminal", hue: "orange" },
+  search: { get label() { return t("modelLook.search"); }, icon: "Search", hue: "indigo" },
+  web: { get label() { return t("modelLook.web"); }, icon: "Globe", hue: "cyan" },
+  agent: { get label() { return t("modelLook.agent"); }, icon: "Bot", hue: "fuchsia" },
+  plan: { get label() { return t("modelLook.plan"); }, icon: "ListChecks", hue: "teal" },
+  ask: { get label() { return t("modelLook.ask"); }, icon: "MessageCircleQuestionMark", hue: "amber" },
+  mcp: { get label() { return t("modelLook.mcp"); }, icon: "Plug", hue: "pink" },
+  paseo: { get label() { return t("modelLook.paseo"); }, icon: "Workflow", hue: "sky" },
+  skill: { get label() { return t("modelLook.skill"); }, icon: "Sparkles", hue: "lime" },
+  other: { get label() { return t("modelLook.other"); }, icon: "Puzzle", hue: "gray" },
 };
 
 /**
@@ -47,116 +61,116 @@ export const VIVID_CATEGORY_HUES = {
 } as const satisfies Record<string, Hue | null>;
 
 /** 本地补丁：折叠摘要里的类别计数名，与行标题一致（读取、编辑、命令……）。 */
-export const COUNT_LABELS: Record<LookKey, string> = {
-  think: "思考", read: "读取", list: "列目录", edit: "编辑", write: "写入", shell: "命令", search: "搜索", web: "联网",
-  agent: "子 Agent", plan: "计划", ask: "提问", mcp: "MCP", paseo: "Paseo", skill: "技能", other: "其他",
-};
+export const COUNT_LABELS: Record<LookKey, string> = translatedTable({
+  think: "modelCount.think", read: "modelCount.read", list: "modelCount.list", edit: "modelCount.edit", write: "modelCount.write", shell: "modelCount.shell", search: "modelCount.search", web: "modelCount.web",
+  agent: "modelCount.agent", plan: "modelCount.plan", ask: "modelCount.ask", mcp: "modelCount.mcp", paseo: "modelCount.paseo", skill: "modelCount.skill", other: "modelCount.other",
+});
 
 export function isLookKey(value: string): value is LookKey {
   return Object.prototype.hasOwnProperty.call(looks, value);
 }
 
 export const statusLooks: Record<RowStatus, { label: string; hue: Hue | "muted"; icon: string }> = {
-  running: { label: "运行中", hue: "blue", icon: "LoaderCircle" },
-  waiting: { label: "等你批准", hue: "amber", icon: "Hand" },
-  question: { label: "等你回答", hue: "amber", icon: "MessageCircleQuestionMark" },
-  completed: { label: "完成", hue: "green", icon: "Check" },
-  failed: { label: "失败", hue: "red", icon: "X" },
-  canceled: { label: "已取消", hue: "muted", icon: "CircleSlash2" },
+  running: { get label() { return t("modelRowStatus.running"); }, hue: "blue", icon: "LoaderCircle" },
+  waiting: { get label() { return t("modelRowStatus.waiting"); }, hue: "amber", icon: "Hand" },
+  question: { get label() { return t("modelRowStatus.question"); }, hue: "amber", icon: "MessageCircleQuestionMark" },
+  completed: { get label() { return t("modelRowStatus.completed"); }, hue: "green", icon: "Check" },
+  failed: { get label() { return t("modelRowStatus.failed"); }, hue: "red", icon: "X" },
+  canceled: { get label() { return t("modelRowStatus.canceled"); }, hue: "muted", icon: "CircleSlash2" },
 };
 
 /** Paseo 自带工具（mcp__paseo__*）的中文名，键是上游 PASEO_TOOL_LABELS 的英文名。 */
-export const PASEO_TOOL_ZH: Readonly<Record<string, string>> = {
-  Speak: "朗读",
-  "Create Workspace": "新建工作区",
-  "List Workspaces": "列出工作区",
-  "Archive Workspace": "归档工作区",
-  "Rename Workspace": "重命名工作区",
-  "Create Agent": "新建 Agent",
-  "Send Agent Prompt": "给 Agent 发消息",
-  "Get Agent Status": "查看 Agent 状态",
-  "Get Agent Activity": "查看 Agent 动态",
-  "List Agents": "列出 Agent",
-  "Cancel Agent Run": "中断 Agent",
-  "Archive Agent": "归档 Agent",
-  "Kill Agent": "结束 Agent",
-  "Update Agent": "修改 Agent",
-  "Set Agent Session Mode": "切换 Agent 模式",
-  "List Pending Permissions": "列出待审批",
-  "Respond to Permission": "回复审批",
-  "List Workspace Scripts": "列出工作区脚本",
-  "Start Workspace Script": "启动工作区脚本",
-  "Stop Workspace Script": "停止工作区脚本",
-  "List Terminals": "列出终端",
-  "Create Terminal": "新建终端",
-  "Kill Terminal": "关闭终端",
-  "Capture Terminal": "读取终端输出",
-  "Send Terminal Keys": "向终端发送按键",
-  "Create Schedule": "新建定时任务",
-  "Create Heartbeat": "新建心跳任务",
-  "Delete Heartbeat": "删除心跳任务",
-  "List Schedules": "列出定时任务",
-  "Inspect Schedule": "查看定时任务",
-  "Pause Schedule": "暂停定时任务",
-  "Resume Schedule": "恢复定时任务",
-  "Delete Schedule": "删除定时任务",
-  "Update Schedule": "修改定时任务",
-  "Schedule Logs": "定时任务记录",
-  "Run Schedule Once": "立即运行定时任务",
-  "List Providers": "列出 Provider",
-  "List Models": "列出模型",
-  "List Agent Profiles": "列出 Agent 配置",
-  "Inspect Provider": "查看 Provider",
-  "List Browser Tabs": "列出浏览器标签页",
-  "Create Browser Tab": "新建浏览器标签页",
-  "Close Browser Tab": "关闭浏览器标签页",
-  "Snapshot Browser Page": "读取页面结构",
-  "Click Browser Element": "点击页面元素",
-  "Fill Browser Element": "填写页面元素",
-  "Hover Browser Element": "悬停页面元素",
-  "Drag Browser Element": "拖动页面元素",
-  "Select Browser Option": "选择下拉选项",
-  "Wait for Browser Condition": "等待页面条件",
-  "Type into Browser": "在浏览器输入",
-  "Press Browser Key": "浏览器按键",
-  "Navigate Browser": "浏览器打开网址",
-  "Browser Back": "浏览器后退",
-  "Browser Forward": "浏览器前进",
-  "Browser Reload": "浏览器刷新",
-  "Capture Browser Screenshot": "浏览器截图",
-  "Upload Files in Browser": "浏览器上传文件",
-  "Read Browser Logs": "读取浏览器日志",
-  "Evaluate Browser JavaScript": "在浏览器执行脚本",
-  "Scroll Browser": "滚动页面",
-  "Resize Browser Viewport": "调整浏览器窗口",
-};
+export const PASEO_TOOL_ZH: Readonly<Record<string, string>> = translatedTable({
+  "Speak": "modelPaseo.speak",
+  "Create Workspace": "modelPaseo.createWorkspace",
+  "List Workspaces": "modelPaseo.listWorkspaces",
+  "Archive Workspace": "modelPaseo.archiveWorkspace",
+  "Rename Workspace": "modelPaseo.renameWorkspace",
+  "Create Agent": "modelPaseo.createAgent",
+  "Send Agent Prompt": "modelPaseo.sendAgentPrompt",
+  "Get Agent Status": "modelPaseo.getAgentStatus",
+  "Get Agent Activity": "modelPaseo.getAgentActivity",
+  "List Agents": "modelPaseo.listAgents",
+  "Cancel Agent Run": "modelPaseo.cancelAgentRun",
+  "Archive Agent": "modelPaseo.archiveAgent",
+  "Kill Agent": "modelPaseo.killAgent",
+  "Update Agent": "modelPaseo.updateAgent",
+  "Set Agent Session Mode": "modelPaseo.setAgentSessionMode",
+  "List Pending Permissions": "modelPaseo.listPendingPermissions",
+  "Respond to Permission": "modelPaseo.respondToPermission",
+  "List Workspace Scripts": "modelPaseo.listWorkspaceScripts",
+  "Start Workspace Script": "modelPaseo.startWorkspaceScript",
+  "Stop Workspace Script": "modelPaseo.stopWorkspaceScript",
+  "List Terminals": "modelPaseo.listTerminals",
+  "Create Terminal": "modelPaseo.createTerminal",
+  "Kill Terminal": "modelPaseo.killTerminal",
+  "Capture Terminal": "modelPaseo.captureTerminal",
+  "Send Terminal Keys": "modelPaseo.sendTerminalKeys",
+  "Create Schedule": "modelPaseo.createSchedule",
+  "Create Heartbeat": "modelPaseo.createHeartbeat",
+  "Delete Heartbeat": "modelPaseo.deleteHeartbeat",
+  "List Schedules": "modelPaseo.listSchedules",
+  "Inspect Schedule": "modelPaseo.inspectSchedule",
+  "Pause Schedule": "modelPaseo.pauseSchedule",
+  "Resume Schedule": "modelPaseo.resumeSchedule",
+  "Delete Schedule": "modelPaseo.deleteSchedule",
+  "Update Schedule": "modelPaseo.updateSchedule",
+  "Schedule Logs": "modelPaseo.scheduleLogs",
+  "Run Schedule Once": "modelPaseo.runScheduleOnce",
+  "List Providers": "modelPaseo.listProviders",
+  "List Models": "modelPaseo.listModels",
+  "List Agent Profiles": "modelPaseo.listAgentProfiles",
+  "Inspect Provider": "modelPaseo.inspectProvider",
+  "List Browser Tabs": "modelPaseo.listBrowserTabs",
+  "Create Browser Tab": "modelPaseo.createBrowserTab",
+  "Close Browser Tab": "modelPaseo.closeBrowserTab",
+  "Snapshot Browser Page": "modelPaseo.snapshotBrowserPage",
+  "Click Browser Element": "modelPaseo.clickBrowserElement",
+  "Fill Browser Element": "modelPaseo.fillBrowserElement",
+  "Hover Browser Element": "modelPaseo.hoverBrowserElement",
+  "Drag Browser Element": "modelPaseo.dragBrowserElement",
+  "Select Browser Option": "modelPaseo.selectBrowserOption",
+  "Wait for Browser Condition": "modelPaseo.waitForBrowserCondition",
+  "Type into Browser": "modelPaseo.typeIntoBrowser",
+  "Press Browser Key": "modelPaseo.pressBrowserKey",
+  "Navigate Browser": "modelPaseo.navigateBrowser",
+  "Browser Back": "modelPaseo.browserBack",
+  "Browser Forward": "modelPaseo.browserForward",
+  "Browser Reload": "modelPaseo.browserReload",
+  "Capture Browser Screenshot": "modelPaseo.captureBrowserScreenshot",
+  "Upload Files in Browser": "modelPaseo.uploadFilesInBrowser",
+  "Read Browser Logs": "modelPaseo.readBrowserLogs",
+  "Evaluate Browser JavaScript": "modelPaseo.evaluateBrowserJavascript",
+  "Scroll Browser": "modelPaseo.scrollBrowser",
+  "Resize Browser Viewport": "modelPaseo.resizeBrowserViewport",
+});
 
 /** 上游英文标签 → 中文（行标题、详情小节名）。原始工具名（MCP 工具、未知工具）属于数据，保留原文。 */
-const LABELS: Record<string, string> = {
-  Read: "读取", List: "列目录", "List Directory": "列目录", Edit: "编辑", Add: "新建", Delete: "删除", Write: "写入",
-  Shell: "命令", Search: "搜索", Find: "查找", "Fetch URL": "抓取网页", "Agent Task": "子 Agent", Plan: "计划", Thinking: "思考",
-  Skill: "技能", Tasks: "任务", "Ask Question": "提问", "Background Task": "后台任务", Speak: "朗读", "Worktree Setup": "准备工作树", Tool: "工具",
-  "Search Tools": "查找工具", "Code Mode": "代码模式",
-  "Supervisor Reply": "回复子 Agent", "Supervisor Queue": "子 Agent 请求队列", "Supervisor Requests": "子 Agent 请求",
-  "Supervisor Status": "子 Agent 状态", "Subagent Supervisor": "子 Agent 监管",
-  Wait: "等待", "Wait for Background Work": "等待后台任务", "Wait Subscription": "订阅等待", "Wait for All": "等待全部",
-  "Wait for Run": "等待运行", "Bg Wait": "后台等待", "Wait for Agent": "等待 Agent",
+const LABELS: Record<string, string> = translatedTable({
+  "Read": "modelLabel.read", "List": "modelLabel.list", "List Directory": "modelLabel.listDirectory", "Edit": "modelLabel.edit", "Add": "modelLabel.add", "Delete": "modelLabel.delete", "Write": "modelLabel.write",
+  "Shell": "modelLabel.shell", "Search": "modelLabel.search", "Find": "modelLabel.find", "Fetch URL": "modelLabel.fetchUrl", "Agent Task": "modelLabel.agentTask", "Plan": "modelLabel.plan", "Thinking": "modelLabel.thinking",
+  "Skill": "modelLabel.skill", "Tasks": "modelLabel.tasks", "Ask Question": "modelLabel.askQuestion", "Background Task": "modelLabel.backgroundTask", "Speak": "modelLabel.speak", "Worktree Setup": "modelLabel.worktreeSetup", "Tool": "modelLabel.tool",
+  "Search Tools": "modelLabel.searchTools", "Code Mode": "modelLabel.codeMode",
+  "Supervisor Reply": "modelLabel.supervisorReply", "Supervisor Queue": "modelLabel.supervisorQueue", "Supervisor Requests": "modelLabel.supervisorRequests",
+  "Supervisor Status": "modelLabel.supervisorStatus", "Subagent Supervisor": "modelLabel.subagentSupervisor",
+  "Wait": "modelLabel.wait", "Wait for Background Work": "modelLabel.waitForBackgroundWork", "Wait Subscription": "modelLabel.waitSubscription", "Wait for All": "modelLabel.waitForAll",
+  "Wait for Run": "modelLabel.waitForRun", "Bg Wait": "modelLabel.bgWait", "Wait for Agent": "modelLabel.waitForAgent",
   // 0.5.0: Pi's sub-agent tools (shared/pi-subagents.ts piSubagentPresentation).
-  "Dispatch Agent": "派出子 Agent", "Steer Agent": "引导子 Agent", "Check Agent Result": "查看子 Agent 结果", "Agent Result": "子 Agent 结果",
-  "GitHub Actions Details": "GitHub Actions 详情", "GitHub Actions List": "GitHub Actions 列表", "GitHub Actions Run": "GitHub Actions 运行",
-  "GitHub File": "GitHub 文件", "GitHub Job Logs": "GitHub 作业日志", "GitHub Pull Request": "GitHub PR", "GitHub Code Search": "GitHub 代码搜索",
-  "GitHub Repository Search": "GitHub 仓库搜索",
-  "Exa Web Search": "Exa 网页搜索", "Exa Web Fetch": "Exa 抓取网页", "Exa Agent": "Exa 研究 Agent",
-  "Exa Research Guide": "Exa 研究指南", "Exa Schema Templates": "Exa 结构模板",
+  "Dispatch Agent": "modelLabel.dispatchAgent", "Steer Agent": "modelLabel.steerAgent", "Check Agent Result": "modelLabel.checkAgentResult", "Agent Result": "modelLabel.agentResult",
+  "GitHub Actions Details": "modelLabel.gitHubActionsDetails", "GitHub Actions List": "modelLabel.gitHubActionsList", "GitHub Actions Run": "modelLabel.gitHubActionsRun",
+  "GitHub File": "modelLabel.gitHubFile", "GitHub Job Logs": "modelLabel.gitHubJobLogs", "GitHub Pull Request": "modelLabel.gitHubPullRequest", "GitHub Code Search": "modelLabel.gitHubCodeSearch",
+  "GitHub Repository Search": "modelLabel.gitHubRepositorySearch",
+  "Exa Web Search": "modelLabel.exaWebSearch", "Exa Web Fetch": "modelLabel.exaWebFetch", "Exa Agent": "modelLabel.exaAgent",
+  "Exa Research Guide": "modelLabel.exaResearchGuide", "Exa Schema Templates": "modelLabel.exaSchemaTemplates",
   // Claude Code tools Paseo has no detail type for (shown by name, e.g. inside a child agent's live activity).
-  TodoWrite: "更新任务", NotebookEdit: "编辑笔记本", BashOutput: "读取后台输出", KillShell: "结束后台命令", KillBash: "结束后台命令",
-  WebSearch: "联网搜索", ExitPlanMode: "提交计划", EnterPlanMode: "进入计划模式", SlashCommand: "斜杠命令", AskUserQuestion: "提问",
-  ListMcpResourcesTool: "列出 MCP 资源", ReadMcpResourceTool: "读取 MCP 资源",
+  "TodoWrite": "modelLabel.todoWrite", "NotebookEdit": "modelLabel.notebookEdit", "BashOutput": "modelLabel.bashOutput", "KillShell": "modelLabel.killShell", "KillBash": "modelLabel.killBash",
+  "WebSearch": "modelLabel.webSearch", "ExitPlanMode": "modelLabel.exitPlanMode", "EnterPlanMode": "modelLabel.enterPlanMode", "SlashCommand": "modelLabel.slashCommand", "AskUserQuestion": "modelLabel.askUserQuestion",
+  "ListMcpResourcesTool": "modelLabel.listMcpResourcesTool", "ReadMcpResourceTool": "modelLabel.readMcpResourceTool",
   // Detail section labels.
-  Command: "命令", Output: "输出", Contents: "内容", "Written contents": "写入内容", Before: "改前", After: "改后", Diff: "改动",
-  Result: "结果", Error: "错误", Input: "输入", Image: "图片", "Setup log": "准备日志", "Activity log": "活动日志", Query: "查询",
-  Matches: "匹配", Files: "文件", Message: "消息", Prompt: "提示词", Code: "代码", Session: "会话",
-};
+  "Command": "modelLabel.command", "Output": "modelLabel.output", "Contents": "modelLabel.contents", "Written contents": "modelLabel.writtenContents", "Before": "modelLabel.before", "After": "modelLabel.after", "Diff": "modelLabel.diff",
+  "Result": "modelLabel.result", "Error": "modelLabel.error", "Input": "modelLabel.input", "Image": "modelLabel.image", "Setup log": "modelLabel.setupLog", "Activity log": "modelLabel.activityLog", "Query": "modelLabel.query",
+  "Matches": "modelLabel.matches", "Files": "modelLabel.files", "Message": "modelLabel.message", "Prompt": "modelLabel.prompt", "Code": "modelLabel.code", "Session": "modelLabel.session",
+});
 
 const WAIT_FOR_AGENTS = /^Wait for (\d+) Agents$/;
 
@@ -165,10 +179,10 @@ export function zh(label: string): string {
   if (direct) return direct;
   if (label.startsWith("Paseo ")) {
     const paseo = PASEO_TOOL_ZH[label.slice("Paseo ".length)];
-    if (paseo) return `Paseo · ${paseo}`;
+    if (paseo) return t("modelText.paseoLabel", { label: paseo });
   }
   const agents = WAIT_FOR_AGENTS.exec(label);
-  if (agents) return `等待 ${agents[1]} 个 Agent`;
+  if (agents) return t("modelText.waitAgents", { count: agents[1] });
   return label;
 }
 
@@ -270,18 +284,18 @@ export function washAlpha(status: RowStatus, dark: boolean): number {
 }
 
 // 本地补丁：状态值保持英文（决定颜色），显示时换成中文。精确匹配优先（「Active」是浏览器当前标签页）。
-const STATUS_ZH: Readonly<Record<string, string>> = {
-  Active: "当前", Default: "默认", Success: "成功", Failed: "失败",
-  running: "运行中", initializing: "启动中", starting: "启动中", loading: "加载中", completed: "已完成", succeeded: "成功",
-  success: "成功", idle: "空闲", active: "启用中", healthy: "正常", ready: "就绪", available: "可用", enabled: "已启用",
-  failed: "失败", error: "出错", unhealthy: "异常", unavailable: "不可用", disabled: "已停用", canceled: "已取消",
-  cancelled: "已取消", paused: "已暂停", stopped: "已停止", closed: "已关闭", exited: "已退出", archived: "已归档",
-  expired: "已过期", skipped: "已跳过", pending: "等待中", queued: "排队中", timeout: "超时", timed_out: "超时",
-  worktree: "工作树", local: "本地", none: "不隔离", directory: "目录",
-  tool: "工具", plan: "计划", question: "提问", mode: "模式", other: "其他",
-  finished: "已结束", permission: "等待审批", closed_by_user: "已关闭",
-  background: "后台运行",
-};
+const STATUS_ZH: Readonly<Record<string, string>> = translatedTable({
+  "Active": "modelStatus.exactActive", "Default": "modelStatus.exactDefault", "Success": "modelStatus.exactSuccess", "Failed": "modelStatus.exactFailed",
+  "running": "modelStatus.running", "initializing": "modelStatus.initializing", "starting": "modelStatus.starting", "loading": "modelStatus.loading", "completed": "modelStatus.completed", "succeeded": "modelStatus.succeeded",
+  "success": "modelStatus.success", "idle": "modelStatus.idle", "active": "modelStatus.active", "healthy": "modelStatus.healthy", "ready": "modelStatus.ready", "available": "modelStatus.available", "enabled": "modelStatus.enabled",
+  "failed": "modelStatus.failed", "error": "modelStatus.error", "unhealthy": "modelStatus.unhealthy", "unavailable": "modelStatus.unavailable", "disabled": "modelStatus.disabled", "canceled": "modelStatus.canceled",
+  "cancelled": "modelStatus.cancelled", "paused": "modelStatus.paused", "stopped": "modelStatus.stopped", "closed": "modelStatus.closed", "exited": "modelStatus.exited", "archived": "modelStatus.archived",
+  "expired": "modelStatus.expired", "skipped": "modelStatus.skipped", "pending": "modelStatus.pending", "queued": "modelStatus.queued", "timeout": "modelStatus.timeout", "timed_out": "modelStatus.timedOut",
+  "worktree": "modelStatus.worktree", "local": "modelStatus.local", "none": "modelStatus.none", "directory": "modelStatus.directory",
+  "tool": "modelStatus.tool", "plan": "modelStatus.plan", "question": "modelStatus.question", "mode": "modelStatus.mode", "other": "modelStatus.other",
+  "finished": "modelStatus.finished", "permission": "modelStatus.permission", "closed_by_user": "modelStatus.closedByUser",
+  "background": "modelStatus.background",
+});
 export function statusLabel(value: string): string {
   return STATUS_ZH[value] ?? STATUS_ZH[value.toLowerCase()] ?? value;
 }
@@ -294,12 +308,12 @@ export function failureText(detail: { type?: unknown; exitCode?: unknown } | nul
   const fromDetail = detail?.type === "shell" && typeof detail.exitCode === "number" && detail.exitCode !== 0 ? detail.exitCode : null;
   const fromText = /^\s*Exit code (\d+)\b/i.exec(errorText ?? "")?.[1];
   const code = fromDetail ?? (fromText ? Number(fromText) : null);
-  return code !== null && code !== 0 ? `退出码 ${code}` : undefined;
+  return code !== null && code !== 0 ? t("modelText.exitCode", { code }) : undefined;
 }
 
 /** Screen-reader label: action, what it touched (the path as shown), and the state when it needs attention. */
 export function rowLabel({ expanded, title, summary, fileDisplay, status }: { expanded: boolean; title: string; summary?: string; fileDisplay?: { dir?: string; base: string }; status?: RowStatus }): string {
   const target = fileDisplay ? (fileDisplay.dir ? `${fileDisplay.dir}/${fileDisplay.base}` : fileDisplay.base) : summary;
-  const state = status === "waiting" || status === "question" || status === "failed" || status === "running" ? `，${statusLooks[status].label}` : "";
-  return `${expanded ? "收起" : "展开"} ${title}${target ? ` ${target}` : ""}${state}`;
+  const state = status === "waiting" || status === "question" || status === "failed" || status === "running" ? t("modelText.stateSuffix", { state: statusLooks[status].label }) : "";
+  return t(expanded ? "modelText.collapseRow" : "modelText.expandRow", { title, target: target ? t("modelText.rowTarget", { target }) : "", state });
 }

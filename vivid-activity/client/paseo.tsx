@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -67,7 +68,7 @@ function fieldArray(record: JsonRecord | null, key: string): unknown[] {
 
 function scalarText(value: unknown): string {
   if (value === null || value === undefined) return "—";
-  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "boolean") return value ? t("ui.yes") : t("ui.no");
   if (typeof value === "string" || typeof value === "number")
     return String(value);
   return formatUnknownValue(value);
@@ -177,17 +178,17 @@ function InstantText({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${prefix}${instantText(value, now)}，原文 ${value}`}
+      accessibilityLabel={t("ui.original", { prefix: prefix, time: instantText(value, now), value: value })}
       accessibilityState={{ selected: raw }}
       {...aria({ pressed: raw })}
       onPress={() => setRaw((current) => !current)}
       style={[{ flexDirection: "row" }, containerStyle]}
     >
       <Text selectable style={[style, { flexShrink: 1, minWidth: 0 }]}>
-        {raw ? `${prefix}${value}` : `${prefix}${parts.day} ${parts.clock}`}
+        {raw ? `${prefix}${value}` : t("ui.clockLine", { prefix, day: parts.day, clock: parts.clock })}
         {!raw && parts.relative ? (
           <Text style={{ color: parts.future ? palette.statusColors.running : styles.mutedText.color }}>
-            {`（${parts.relative}）`}
+            {t("ui.relativeSuffix", { relative: parts.relative })}
           </Text>
         ) : null}
       </Text>
@@ -295,27 +296,27 @@ function PaseoField({
   );
 }
 
-const STATUS_FIELDS: ReadonlySet<string> = new Set(["状态", "需要关注"]);
+const STATUS_FIELDS: ReadonlySet<string> = new Set(["status", "attentionReason"]);
 
 export function PaseoFields({
   fields,
   palette,
   styles,
 }: {
-  fields: Array<[string, unknown]>;
+  fields: Array<[string, unknown, string?]>;
   palette: ActivityPalette;
   styles: ActivityStyles;
 }) {
   // 本地补丁：状态类字段的值（idle、running、paused…）显示中文；其他字段值是数据，原样显示。
   const visible = fields
     .filter(([, value]) => value !== undefined)
-    .map(([label, value]) => [label, STATUS_FIELDS.has(label) && typeof value === "string" ? statusLabel(value) : value] as [string, unknown]);
+    .map(([label, value, id]) => [label, id && STATUS_FIELDS.has(id) && typeof value === "string" ? statusLabel(value) : value, id] as [string, unknown, string?]);
   if (visible.length === 0) return null;
   return (
     <View style={styles.paseoRows}>
-      {visible.map(([label, value]) => (
+      {visible.map(([label, value, id], index) => (
         <PaseoField
-          key={`${label}-${stableItemKey(value, label)}`}
+          key={`${id ?? index}-${stableItemKey(value, id ?? String(index))}`}
           label={label}
           value={value}
           palette={palette}
@@ -335,7 +336,7 @@ function unlessInHeader(value: unknown, headerSummary: string | undefined): unkn
 
 /** One muted line of secondary facts, joined with middots. */
 function MetaLine({ parts, styles }: { parts: Array<string | undefined>; styles: ActivityStyles }) {
-  const text = parts.filter(Boolean).join(" · ");
+  const text = parts.filter(Boolean).join(t("ui.metaSeparator"));
   if (!text) return null;
   return (
     <Text numberOfLines={2} style={styles.paseoHeroSubtitle}>
@@ -352,7 +353,7 @@ export function FieldsSection({
   styles,
 }: {
   title: string;
-  fields: Array<[string, unknown]>;
+  fields: Array<[string, unknown, string?]>;
   palette: ActivityPalette;
   styles: ActivityStyles;
 }) {
@@ -414,7 +415,7 @@ export function PaseoHero({
 
 function PromptBlock({
   text,
-  label = "提示词",
+  label = t("ui.prompt"),
   styles,
   compact = false,
 }: {
@@ -427,7 +428,7 @@ function PromptBlock({
   if (!text) return null;
   const prompt = compact ? (
     <Pressable
-      accessibilityLabel={`${expanded ? "收起" : "展开"}提示词：${text}`}
+      accessibilityLabel={expanded ? t("ui.collapsePrompt", { text }) : t("ui.expandPrompt", { text })}
       accessibilityRole="button"
       {...aria({ expanded })}
       onPress={() => setExpanded((current) => !current)}
@@ -505,12 +506,12 @@ export function PaseoCodeBlock({
     language,
     theme.colors,
   );
-  const title = label ?? "输出";
+  const title = label ?? t("ui.output");
   return (
     <View style={styles.section}>
       <View style={styles.codeHeader}>
         <Text style={[styles.detailLabel, { flexShrink: 1 }]}>{title}</Text>
-        <OutputCopyButtons clean={clean} raw={code} label={`复制${title}`} theme={theme} styles={styles} />
+        <OutputCopyButtons clean={clean} raw={code} label={t("ui.copy", { label: title })} theme={theme} styles={styles} />
       </View>
       <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
         <View style={styles.codeSurface}>
@@ -532,8 +533,8 @@ export function PaseoCodeBlock({
         >
           <Text style={styles.showMoreText}>
             {showAll
-              ? "收起"
-              : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+              ? t("ui.collapse")
+              : t("ui.expandAllLinesCharacters", { lines: preview.totalLines, characters: preview.totalChars.toLocaleString() })}
           </Text>
         </Pressable>
       ) : null}
@@ -553,11 +554,11 @@ function OutputFields({
   styles: ActivityStyles;
 }) {
   const values = fields.map(
-    ([key, label]) => [label, result?.[key]] as [string, unknown]
+    ([key, label]) => [label, result?.[key], key] as [string, unknown, string?]
   );
   if (values.every(([, value]) => value === undefined)) return null;
   return (
-    <Section title="结果" styles={styles}>
+    <Section title={t("ui.result")} styles={styles}>
       <PaseoFields fields={values} palette={palette} styles={styles} />
     </Section>
   );
@@ -575,12 +576,12 @@ function ActionResult({
   fields?: Array<[string, string]>;
 }) {
   const visibleFields = fields
-    .map(([key, label]) => [label, result?.[key]] as [string, unknown])
+    .map(([key, label]) => [label, result?.[key], key] as [string, unknown, string?])
     .filter(([, value]) => value !== undefined);
   const success = result?.success;
   if (typeof success !== "boolean" && visibleFields.length === 0) return null;
   return (
-    <Section title="结果" styles={styles}>
+    <Section title={t("ui.result")} styles={styles}>
       <View style={styles.paseoRows}>
         {typeof success === "boolean" ? (
           <StatusPill
@@ -614,26 +615,26 @@ function AgentSnapshot({
     <View style={styles.paseoStack}>
       <PaseoFields
         fields={[
-          ["Agent", unlessInHeader(snapshot.id, headerSummary)],
-          ["标题", snapshot.title],
-          ["Provider", snapshot.provider],
-          ["模型", snapshot.model],
-          ["状态", snapshot.status],
-          ["工作目录", snapshot.cwd],
-          ["工作区", snapshot.workspaceId],
-          ["模式", snapshot.currentModeId],
+          [t("ui.agent"), unlessInHeader(snapshot.id, headerSummary)],
+          [t("ui.title"), snapshot.title],
+          [t("ui.provider"), snapshot.provider],
+          [t("ui.model"), snapshot.model],
+          [t("ui.status"), snapshot.status, "status"],
+          [t("ui.workingDirectory"), snapshot.cwd],
+          [t("ui.workspace"), snapshot.workspaceId],
+          [t("ui.mode"), snapshot.currentModeId],
           [
-            "思考强度",
+            t("ui.thinkingLevel"),
             snapshot.effectiveThinkingOptionId ?? snapshot.thinkingOptionId,
           ],
-          ["需要关注", snapshot.attentionReason],
-          ["最近错误", snapshot.lastError],
+          [t("ui.needsAttention"), snapshot.attentionReason, "attentionReason"],
+          [t("ui.latestError"), snapshot.lastError],
         ]}
         palette={palette}
         styles={styles}
       />
       {capabilities ? (
-        <Section title="能力" styles={styles}>
+        <Section title={t("ui.capabilities")} styles={styles}>
           <View style={styles.paseoChips}>
             {Object.entries(capabilities)
               .filter(([, value]) => value === true)
@@ -650,7 +651,7 @@ function AgentSnapshot({
       ) : null}
       {permissions.length > 0 ? (
         <Section
-          title={`待审批（${permissions.length}）`}
+          title={t("ui.pendingApprovals", { count: permissions.length })}
           styles={styles}
         >
           <PermissionList
@@ -675,7 +676,7 @@ function ModeList({
 }) {
   if (modes.length === 0) return null;
   return (
-    <Section title="可用模式" styles={styles}>
+    <Section title={t("ui.availableModes")} styles={styles}>
       <View style={styles.paseoList}>
         {modes.map((mode) => {
           const record = asRecord(mode);
@@ -688,7 +689,7 @@ function ModeList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "label") ??
                     fieldString(record, "id") ??
-                    "模式"}
+                    t("ui.mode")}
                 </Text>
                 {fieldString(record, "id") ? (
                   <Text
@@ -724,7 +725,7 @@ function PermissionList({
   palette: ActivityPalette;
   styles: ActivityStyles;
 }) {
-  if (permissions.length === 0) return <Text style={styles.empty}>没有待审批。</Text>;
+  if (permissions.length === 0) return <Text style={styles.empty}>{t("ui.noPendingApprovals")}</Text>;
   return (
     <View style={styles.paseoList}>
       {permissions.map((permission) => {
@@ -739,7 +740,7 @@ function PermissionList({
               <Text style={styles.paseoListItemTitle}>
                 {fieldString(record, "title") ??
                   fieldString(record, "name") ??
-                  "权限请求"}
+                  t("ui.permissionRequest")}
               </Text>
               {fieldString(record, "kind") ? (
                 <StatusPill
@@ -756,13 +757,12 @@ function PermissionList({
             ) : null}
             {actions.length > 0 ? (
               <Text style={styles.paseoListItemMeta}>
-                可选操作：
-                {actions
+                {t("ui.availableActionsValue", { actions: actions
                   .map(
                     (action) =>
-                      fieldString(asRecord(action), "label") ?? "操作"
+                      fieldString(asRecord(action), "label") ?? t("ui.action")
                   )
-                  .join(" · ")}
+                  .join(t("ui.metaSeparator")) })}
               </Text>
             ) : null}
           </View>
@@ -799,9 +799,9 @@ function AgentTool({
             parts={[
               notInHeader(fieldString(inputRecord, "title"), headerSummary),
               notInHeader(provider, headerSummary),
-              thinkingOptionId ? `思考强度 ${thinkingOptionId}` : undefined,
-              inputRecord?.background === true ? "后台运行" : undefined,
-              inputRecord?.notifyOnFinish === true ? "完成时通知" : undefined,
+              thinkingOptionId ? t("ui.thinkingLevel2", { level: thinkingOptionId }) : undefined,
+              inputRecord?.background === true ? t("ui.runInBackground") : undefined,
+              inputRecord?.notifyOnFinish === true ? t("ui.notifyOnCompletion") : undefined,
               fieldString(outputRecord, "status") ? statusLabel(fieldString(outputRecord, "status")!) : undefined,
             ]}
             styles={styles}
@@ -831,12 +831,12 @@ function AgentTool({
             styles={styles}
           />
           <FieldsSection
-            title="发送方式"
+            title={t("ui.sendMode")}
             fields={[
-              ["Agent", unlessInHeader(inputRecord?.agentId, headerSummary)],
-              ["会话模式", inputRecord?.sessionMode],
-              ["后台运行", inputRecord?.background],
-              ["完成时通知", inputRecord?.notifyOnFinish],
+              [t("ui.agent"), unlessInHeader(inputRecord?.agentId, headerSummary)],
+              [t("ui.sessionMode"), inputRecord?.sessionMode],
+              [t("ui.runInBackground"), inputRecord?.background],
+              [t("ui.notifyOnCompletion"), inputRecord?.notifyOnFinish],
             ]}
             palette={palette}
             styles={styles}
@@ -844,15 +844,15 @@ function AgentTool({
           <OutputFields
             result={outputRecord}
             fields={[
-              ["status", "状态"],
-              ["lastMessage", "最后一条消息"],
-              ["guidance", "提示"],
+              ["status", t("ui.status")],
+              ["lastMessage", t("ui.lastMessage")],
+              ["guidance", t("ui.hint")],
             ]}
             palette={palette}
             styles={styles}
           />
           {outputRecord?.permission ? (
-            <Section title="权限" styles={styles}>
+            <Section title={t("ui.permission")} styles={styles}>
               <PermissionList
                 permissions={[outputRecord.permission]}
                 palette={palette}
@@ -878,11 +878,11 @@ function AgentTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["工作目录", inputRecord?.cwd],
-              ["状态筛选", inputRecord?.statuses],
-              ["最近（小时）", inputRecord?.sinceHours],
-              ["数量上限", inputRecord?.limit],
-              ["包含已归档", inputRecord?.includeArchived],
+              [t("ui.workingDirectory"), inputRecord?.cwd],
+              [t("ui.statusFilter"), inputRecord?.statuses],
+              [t("ui.recentHours"), inputRecord?.sinceHours],
+              [t("ui.limit"), inputRecord?.limit],
+              [t("ui.includeArchived"), inputRecord?.includeArchived],
             ]}
             palette={palette}
             styles={styles}
@@ -899,10 +899,10 @@ function AgentTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["Agent", unlessInHeader(inputRecord?.agentId, headerSummary)],
-              ["数量上限", inputRecord?.limit],
-              ["模式", outputRecord?.currentModeId],
-              ["更新数", outputRecord?.updateCount],
+              [t("ui.agent"), unlessInHeader(inputRecord?.agentId, headerSummary)],
+              [t("ui.limit"), inputRecord?.limit],
+              [t("ui.mode"), outputRecord?.currentModeId],
+              [t("ui.updates"), outputRecord?.updateCount],
             ]}
             palette={palette}
             styles={styles}
@@ -911,7 +911,7 @@ function AgentTool({
             <PaseoCodeBlock
               code={fieldString(outputRecord, "content")!}
               language="markdown"
-              label="动态"
+              label={t("ui.activity")}
               theme={theme}
               styles={styles}
             />
@@ -923,8 +923,8 @@ function AgentTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["Agent", unlessInHeader(inputRecord?.agentId, headerSummary)],
-              ["模式", inputRecord?.modeId],
+              [t("ui.agent"), unlessInHeader(inputRecord?.agentId, headerSummary)],
+              [t("ui.mode"), inputRecord?.modeId],
             ]}
             palette={palette}
             styles={styles}
@@ -933,7 +933,7 @@ function AgentTool({
             result={outputRecord}
             fields={
               outputRecord?.newMode !== undefined && outputRecord.newMode !== inputRecord?.modeId
-                ? [["newMode", "新模式"]]
+                ? [["newMode", t("ui.newMode")]]
                 : []
             }
             palette={palette}
@@ -946,10 +946,10 @@ function AgentTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["Agent", unlessInHeader(inputRecord?.agentId, headerSummary)],
-              ["名称", inputRecord?.name],
-              ["标签", inputRecord?.labels],
-              ["设置", inputRecord?.settings],
+              [t("ui.agent"), unlessInHeader(inputRecord?.agentId, headerSummary)],
+              [t("ui.name"), inputRecord?.name],
+              [t("ui.labels"), inputRecord?.labels],
+              [t("ui.settings"), inputRecord?.settings],
             ]}
             palette={palette}
             styles={styles}
@@ -968,7 +968,7 @@ function AgentTool({
         <View style={styles.paseoStack}>
           {notInHeader(fieldString(inputRecord, "agentId"), headerSummary) ? (
             <PaseoFields
-              fields={[["Agent", inputRecord?.agentId]]}
+              fields={[[t("ui.agent"), inputRecord?.agentId]]}
               palette={palette}
               styles={styles}
             />
@@ -995,9 +995,9 @@ function AgentTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["Agent", inputRecord?.agentId],
-              ["请求", inputRecord?.requestId],
-              ["回复", inputRecord?.response],
+              [t("ui.agent"), inputRecord?.agentId],
+              [t("ui.request"), inputRecord?.requestId],
+              [t("ui.reply"), inputRecord?.response],
             ]}
             palette={palette}
             styles={styles}
@@ -1031,9 +1031,9 @@ function AgentList({
   styles: ActivityStyles;
 }) {
   return (
-    <Section title={`Agent（${agents.length}）`} styles={styles}>
+    <Section title={t("ui.agentsCount", { count: agents.length })} styles={styles}>
       {agents.length === 0 ? (
-        <Text style={styles.empty}>没有返回 Agent。</Text>
+        <Text style={styles.empty}>{t("ui.noAgentsReturned")}</Text>
       ) : (
         <View style={styles.paseoList}>
           {agents.map((agent) => {
@@ -1048,7 +1048,7 @@ function AgentList({
                     {fieldString(record, "title") ??
                       fieldString(record, "shortId") ??
                       fieldString(record, "id") ??
-                      "Agent"}
+                      t("ui.agent")}
                   </Text>
                   {fieldString(record, "status") ? (
                     <StatusPill
@@ -1064,7 +1064,7 @@ function AgentList({
                     fieldString(record, "model"),
                   ]
                     .filter(Boolean)
-                    .join(" · ")}
+                    .join(t("ui.metaSeparator"))}
                 </Text>
                 <Text numberOfLines={2} style={styles.paseoListItemMeta}>
                   {fieldString(record, "cwd") ?? fieldString(record, "id")}
@@ -1091,12 +1091,12 @@ function WorkspaceSummary({
     <OutputFields
       result={result}
       fields={[
-        ["workspaceId", "工作区"],
-        ["projectId", "项目"],
-        ["cwd", "工作目录"],
-        ["isolation", "隔离方式"],
-        ["kind", "类型"],
-        ["title", "标题"],
+        ["workspaceId", t("ui.workspace")],
+        ["projectId", t("ui.project")],
+        ["cwd", t("ui.workingDirectory")],
+        ["isolation", t("ui.isolation")],
+        ["kind", t("ui.type")],
+        ["title", t("ui.title")],
       ]}
       palette={palette}
       styles={styles}
@@ -1122,19 +1122,19 @@ function WorkspaceTool({
     case "create_workspace":
       return (
         <View style={styles.paseoStack}>
-          <Section title="配置" styles={styles}>
+          <Section title={t("ui.configuration")} styles={styles}>
             <PaseoFields
               fields={[
-                ["标题", unlessInHeader(inputRecord?.title, headerSummary)],
-                ["隔离方式", inputRecord?.isolation],
-                ["路径", inputRecord?.path],
-                ["项目", inputRecord?.projectId],
-                ["模式", inputRecord?.mode],
-                ["工作树", inputRecord?.worktreeSlug],
-                ["分支", inputRecord?.branchName ?? inputRecord?.branch],
-                ["基准分支", inputRecord?.baseBranch],
-                ["合并请求", inputRecord?.prNumber],
-                ["代码托管", inputRecord?.forge],
+                [t("ui.title"), unlessInHeader(inputRecord?.title, headerSummary)],
+                [t("ui.isolation"), inputRecord?.isolation],
+                [t("ui.path2"), inputRecord?.path],
+                [t("ui.project"), inputRecord?.projectId],
+                [t("ui.mode"), inputRecord?.mode],
+                [t("ui.worktree"), inputRecord?.worktreeSlug],
+                [t("ui.branch2"), inputRecord?.branchName ?? inputRecord?.branch],
+                [t("ui.baseBranch"), inputRecord?.baseBranch],
+                [t("ui.mergeRequest"), inputRecord?.prNumber],
+                [t("ui.forge"), inputRecord?.forge],
               ]}
               palette={palette}
               styles={styles}
@@ -1162,10 +1162,10 @@ function WorkspaceTool({
             result={outputRecord}
             fields={[
               ...(notInHeader(fieldString(outputRecord, "workspaceId"), headerSummary)
-                ? ([["workspaceId", "工作区"]] as Array<[string, string]>)
+                ? ([["workspaceId", t("ui.workspace")]] as Array<[string, string]>)
                 : []),
-              ["archivedAgentIds", "已归档的 Agent"],
-              ["removedDirectory", "已删除的目录"],
+              ["archivedAgentIds", t("ui.archivedAgents")],
+              ["removedDirectory", t("ui.removedDirectory")],
             ]}
             palette={palette}
             styles={styles}
@@ -1177,8 +1177,8 @@ function WorkspaceTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["工作区", unlessInHeader(inputRecord?.workspaceId, headerSummary)],
-              ["新标题", inputRecord?.title],
+              [t("ui.workspace"), unlessInHeader(inputRecord?.workspaceId, headerSummary)],
+              [t("ui.newTitle"), inputRecord?.title],
             ]}
             palette={palette}
             styles={styles}
@@ -1186,8 +1186,8 @@ function WorkspaceTool({
           <ActionResult
             result={outputRecord}
             fields={[
-              ["workspaceId", "工作区"],
-              ["title", "标题"],
+              ["workspaceId", t("ui.workspace")],
+              ["title", t("ui.title")],
             ]}
             palette={palette}
             styles={styles}
@@ -1216,10 +1216,10 @@ function WorkspaceList({
   styles: ActivityStyles;
 }) {
   if (workspaces.length === 0) {
-    return <Text style={styles.empty}>没有返回工作区。</Text>;
+    return <Text style={styles.empty}>{t("ui.noWorkspacesReturned")}</Text>;
   }
   return (
-    <Section title={`工作区（${workspaces.length}）`} styles={styles}>
+    <Section title={t("ui.workspaces", { count: workspaces.length })} styles={styles}>
       <View style={styles.paseoList}>
         {workspaces.map((workspace) => {
           const record = asRecord(workspace);
@@ -1232,7 +1232,7 @@ function WorkspaceList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "title") ??
                     fieldString(record, "workspaceId") ??
-                    "工作区"}
+                    t("ui.workspace")}
                 </Text>
                 {fieldString(record, "isolation") ? (
                   <StatusPill
@@ -1266,10 +1266,10 @@ function ScriptList({
   styles: ActivityStyles;
 }) {
   if (scripts.length === 0) {
-    return <Text style={styles.empty}>没有返回工作区脚本。</Text>;
+    return <Text style={styles.empty}>{t("ui.noWorkspaceScriptsReturned")}</Text>;
   }
   return (
-    <Section title={`脚本（${scripts.length}）`} styles={styles}>
+    <Section title={t("ui.scripts", { count: scripts.length })} styles={styles}>
       <View style={styles.paseoList}>
         {scripts.map((script) => {
           const record = asRecord(script);
@@ -1280,7 +1280,7 @@ function ScriptList({
             >
               <View style={styles.paseoListItemHeader}>
                 <Text style={styles.paseoListItemTitle}>
-                  {fieldString(record, "scriptName") ?? "脚本"}
+                  {fieldString(record, "scriptName") ?? t("ui.script")}
                 </Text>
                 {fieldString(record, "lifecycle") ? (
                   <StatusPill
@@ -1297,7 +1297,7 @@ function ScriptList({
                   fieldString(record, "port"),
                 ]
                   .filter(Boolean)
-                  .join(" · ")}
+                  .join(t("ui.metaSeparator"))}
               </Text>
               <Text numberOfLines={1} style={styles.paseoListItemMeta}>
                 {fieldString(record, "proxyUrl") ??
@@ -1321,10 +1321,10 @@ function TerminalList({
   styles: ActivityStyles;
 }) {
   if (terminals.length === 0) {
-    return <Text style={styles.empty}>没有返回终端。</Text>;
+    return <Text style={styles.empty}>{t("ui.noTerminalsReturned")}</Text>;
   }
   return (
-    <Section title={`终端（${terminals.length}）`} styles={styles}>
+    <Section title={t("ui.terminals", { count: terminals.length })} styles={styles}>
       <View style={styles.paseoList}>
         {terminals.map((terminal) => {
           const record = asRecord(terminal);
@@ -1337,7 +1337,7 @@ function TerminalList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "name") ??
                     fieldString(record, "id") ??
-                    "终端"}
+                    t("ui.terminal")}
                 </Text>
                 <Icon
                   name="SquareTerminal"
@@ -1381,8 +1381,8 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["工作区", inputRecord?.workspaceId],
-              ["脚本", inputRecord?.scriptName],
+              [t("ui.workspace"), inputRecord?.workspaceId],
+              [t("ui.script"), inputRecord?.scriptName],
             ]}
             palette={palette}
             styles={styles}
@@ -1394,7 +1394,7 @@ function TerminalTool({
               styles={styles}
             />
           ) : (
-            <Section title="脚本" styles={styles}>
+            <Section title={t("ui.script")} styles={styles}>
               <ScriptList
                 scripts={[scriptResult]}
                 palette={palette}
@@ -1410,8 +1410,8 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["工作目录", inputRecord?.cwd],
-              ["所有目录", inputRecord?.all],
+              [t("ui.workingDirectory"), inputRecord?.cwd],
+              [t("ui.allDirectories"), inputRecord?.all],
             ]}
             palette={palette}
             styles={styles}
@@ -1428,14 +1428,14 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["工作目录", inputRecord?.cwd],
-              ["工作区", inputRecord?.workspaceId],
-              ["名称", inputRecord?.name],
+              [t("ui.workingDirectory"), inputRecord?.cwd],
+              [t("ui.workspace"), inputRecord?.workspaceId],
+              [t("ui.name"), inputRecord?.name],
             ]}
             palette={palette}
             styles={styles}
           />
-          <Section title="终端" styles={styles}>
+          <Section title={t("ui.terminal")} styles={styles}>
             <TerminalList
               terminals={[result]}
               palette={palette}
@@ -1452,12 +1452,12 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["终端", inputRecord?.terminalId],
-              ["起始行", inputRecord?.start],
-              ["结束行", inputRecord?.end],
-              ["回滚行数", inputRecord?.scrollback],
-              ["去掉颜色代码", inputRecord?.stripAnsi],
-              ["总行数", outputRecord?.totalLines],
+              [t("ui.terminal"), inputRecord?.terminalId],
+              [t("ui.startLine"), inputRecord?.start],
+              [t("ui.endLine"), inputRecord?.end],
+              [t("ui.scrollbackLines"), inputRecord?.scrollback],
+              [t("ui.stripColorCodes"), inputRecord?.stripAnsi],
+              [t("ui.totalLines"), outputRecord?.totalLines],
             ]}
             palette={palette}
             styles={styles}
@@ -1466,7 +1466,7 @@ function TerminalTool({
             <PaseoCodeBlock
               code={lines}
               language="ansi"
-              label="终端输出"
+              label={t("ui.terminalOutput")}
               theme={theme}
               styles={styles}
             />
@@ -1479,9 +1479,9 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["终端", inputRecord?.terminalId],
-              ["按键", inputRecord?.keys],
-              ["按原文发送", inputRecord?.literal],
+              [t("ui.terminal"), inputRecord?.terminalId],
+              [t("ui.keys"), inputRecord?.keys],
+              [t("ui.sendLiterally"), inputRecord?.literal],
             ]}
             palette={palette}
             styles={styles}
@@ -1498,7 +1498,7 @@ function TerminalTool({
         <View style={styles.paseoStack}>
           <PaseoHero
             icon="CircleX"
-            title={fieldString(inputRecord, "terminalId") ?? "终端"}
+            title={fieldString(inputRecord, "terminalId") ?? t("ui.terminal")}
             color={palette.categoryColors.shell}
             styles={styles}
           />
@@ -1553,7 +1553,7 @@ function ScheduleTool({
               ? "Pause"
               : "Play"
           }
-          title={fieldString(inputRecord, "id") ?? "定时任务"}
+          title={fieldString(inputRecord, "id") ?? t("ui.schedule")}
           color={palette.categoryColors.plan}
           styles={styles}
         />
@@ -1599,17 +1599,17 @@ function ScheduleTool({
           text={notInHeader(fieldString(inputRecord, "prompt"), headerSummary)}
           styles={styles}
         />
-        <Section title="配置" styles={styles}>
+        <Section title={t("ui.configuration")} styles={styles}>
           <PaseoFields
             fields={[
-              ["名称", inputRecord?.name],
-              ["Cron 表达式", inputRecord?.cron],
-              ["时区", inputRecord?.timezone],
-              ["Provider", inputRecord?.provider],
-              ["工作目录", inputRecord?.cwd],
-              ["隔离方式", inputRecord?.isolation],
-              ["最多运行次数", inputRecord?.maxRuns],
-              ["有效期", inputRecord?.expiresIn],
+              [t("ui.name"), inputRecord?.name],
+              [t("ui.cronExpression"), inputRecord?.cron],
+              [t("ui.timeZone"), inputRecord?.timezone],
+              [t("ui.provider"), inputRecord?.provider],
+              [t("ui.workingDirectory"), inputRecord?.cwd],
+              [t("ui.isolation"), inputRecord?.isolation],
+              [t("ui.maximumRuns"), inputRecord?.maxRuns],
+              [t("ui.expiresIn"), inputRecord?.expiresIn],
             ]}
             palette={palette}
             styles={styles}
@@ -1629,18 +1629,18 @@ function ScheduleTool({
       <View style={styles.paseoStack}>
         <PaseoFields
           fields={[
-            ["定时任务", inputRecord?.id],
-            ["名称", inputRecord?.name],
-            ["提示词", inputRecord?.prompt],
-            ["Cron 表达式", inputRecord?.cron],
-            ["时区", inputRecord?.timezone],
-            ["Provider", inputRecord?.provider],
-            ["模型", inputRecord?.model],
-            ["模式", inputRecord?.mode],
-            ["工作目录", inputRecord?.cwd],
-            ["最多运行次数", inputRecord?.maxRuns],
-            ["有效期", inputRecord?.expiresIn],
-            ["清除有效期", inputRecord?.clearExpires],
+            [t("ui.schedule"), inputRecord?.id],
+            [t("ui.name"), inputRecord?.name],
+            [t("ui.prompt"), inputRecord?.prompt],
+            [t("ui.cronExpression"), inputRecord?.cron],
+            [t("ui.timeZone"), inputRecord?.timezone],
+            [t("ui.provider"), inputRecord?.provider],
+            [t("ui.model"), inputRecord?.model],
+            [t("ui.mode"), inputRecord?.mode],
+            [t("ui.workingDirectory"), inputRecord?.cwd],
+            [t("ui.maximumRuns"), inputRecord?.maxRuns],
+            [t("ui.expiresIn"), inputRecord?.expiresIn],
+            [t("ui.clearExpiration"), inputRecord?.clearExpires],
           ]}
           palette={palette}
           styles={styles}
@@ -1686,13 +1686,13 @@ function ScheduleSummary({
       <OutputFields
         result={schedule}
         fields={[
-          ["id", "ID"],
-          ["name", "名称"],
-          ["status", "状态"],
-          ["nextRunAt", "下次运行"],
-          ["lastRunAt", "上次运行"],
-          ["expiresAt", "到期时间"],
-          ["maxRuns", "最多运行次数"],
+          ["id", t("ui.id")],
+          ["name", t("ui.name")],
+          ["status", t("ui.status")],
+          ["nextRunAt", t("ui.nextRun2")],
+          ["lastRunAt", t("ui.lastRun")],
+          ["expiresAt", t("ui.expiresAt")],
+          ["maxRuns", t("ui.maximumRuns")],
         ].filter(([key]) => !echoed(key)) as Array<[string, string]>}
         palette={palette}
         styles={styles}
@@ -1701,17 +1701,17 @@ function ScheduleSummary({
         text={echoed("prompt") ? undefined : fieldString(schedule, "prompt")}
         styles={styles}
       />
-      <Section title="周期与目标" styles={styles}>
+      <Section title={t("ui.cadenceAndTarget")} styles={styles}>
         <PaseoFields
           fields={[
-            ["周期", cadence],
-            ["目标", target?.type],
-            ["Agent", target?.agentId],
-            ["Provider", targetConfig?.provider],
-            ["模型", targetConfig?.model],
-            ["模式", targetConfig?.modeId],
-            ["工作目录", targetConfig?.cwd],
-            ["隔离方式", targetConfig?.isolation],
+            [t("ui.cadence"), cadence],
+            [t("ui.target"), target?.type],
+            [t("ui.agent"), target?.agentId],
+            [t("ui.provider"), targetConfig?.provider],
+            [t("ui.model"), targetConfig?.model],
+            [t("ui.mode"), targetConfig?.modeId],
+            [t("ui.workingDirectory"), targetConfig?.cwd],
+            [t("ui.isolation"), targetConfig?.isolation],
           ]}
           palette={palette}
           styles={styles}
@@ -1731,10 +1731,10 @@ function ScheduleList({
   styles: ActivityStyles;
 }) {
   if (schedules.length === 0) {
-    return <Text style={styles.empty}>没有返回定时任务。</Text>;
+    return <Text style={styles.empty}>{t("ui.noSchedulesReturned")}</Text>;
   }
   return (
-    <Section title={`定时任务（${schedules.length}）`} styles={styles}>
+    <Section title={t("ui.schedules", { count: schedules.length })} styles={styles}>
       <View style={styles.paseoList}>
         {schedules.map((schedule) => {
           const record = asRecord(schedule);
@@ -1749,7 +1749,7 @@ function ScheduleList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "name") ??
                     fieldString(record, "id") ??
-                    "定时任务"}
+                    t("ui.schedule")}
                 </Text>
                 {fieldString(record, "status") ? (
                   <StatusPill
@@ -1763,7 +1763,7 @@ function ScheduleList({
               {nextRunAt ? (
                 <InstantText
                   value={nextRunAt}
-                  prefix={`${expression ? `${expression} · ` : ""}下次运行 `}
+                  prefix={t("ui.nextRun", { prefix: expression ? `${expression} · ` : "" })}
                   style={styles.paseoListItemMeta}
                   palette={palette}
                   styles={styles}
@@ -1792,10 +1792,10 @@ function ScheduleRuns({
   styles: ActivityStyles;
 }) {
   if (runs.length === 0) {
-    return <Text style={styles.empty}>没有运行记录。</Text>;
+    return <Text style={styles.empty}>{t("ui.noRunHistory")}</Text>;
   }
   return (
-    <Section title={`运行记录（${runs.length}）`} styles={styles}>
+    <Section title={t("ui.runHistory", { count: runs.length })} styles={styles}>
       <View style={styles.paseoList}>
         {runs.map((run) => {
           const record = asRecord(run);
@@ -1814,7 +1814,7 @@ function ScheduleRuns({
                   />
                 ) : (
                   <Text style={styles.paseoListItemTitle}>
-                    {fieldString(record, "id") ?? "运行"}
+                    {fieldString(record, "id") ?? t("ui.run")}
                   </Text>
                 )}
                 {fieldString(record, "status") ? (
@@ -1831,7 +1831,7 @@ function ScheduleRuns({
                   fieldString(record, "workspaceId"),
                 ]
                   .filter(Boolean)
-                  .join(" · ")}
+                  .join(t("ui.metaSeparator"))}
               </Text>
               {fieldString(record, "output") ? (
                 <Text selectable style={styles.paseoListItemMeta}>
@@ -1884,7 +1884,7 @@ function ProviderTool({
       <View style={styles.paseoStack}>
         {notInHeader(fieldString(outputRecord, "provider"), headerSummary) ? (
           <PaseoFields
-            fields={[["Provider", outputRecord?.provider]]}
+            fields={[[t("ui.provider"), outputRecord?.provider]]}
             palette={palette}
             styles={styles}
           />
@@ -1910,11 +1910,11 @@ function ProviderTool({
         <MetaLine parts={[fieldString(outputRecord, "description")]} styles={styles} />
         <PaseoFields
           fields={[
-            ["Provider", outputRecord?.provider ?? inputRecord?.provider],
-            ["名称", outputRecord?.label],
-            ["状态", outputRecord?.status],
-            ["已启用", outputRecord?.enabled],
-            ["选用模型", outputRecord?.selectedModel],
+            [t("ui.provider"), outputRecord?.provider ?? inputRecord?.provider],
+            [t("ui.name"), outputRecord?.label],
+            [t("ui.status"), outputRecord?.status, "status"],
+            [t("ui.enabled"), outputRecord?.enabled],
+            [t("ui.selectedModel"), outputRecord?.selectedModel],
           ]}
           palette={palette}
           styles={styles}
@@ -1951,10 +1951,10 @@ function ProviderList({
   styles: ActivityStyles;
 }) {
   if (providers.length === 0) {
-    return <Text style={styles.empty}>没有返回 Provider。</Text>;
+    return <Text style={styles.empty}>{t("ui.noProvidersReturned")}</Text>;
   }
   return (
-    <Section title={`Provider（${providers.length}）`} styles={styles}>
+    <Section title={t("ui.providersCount", { count: providers.length })} styles={styles}>
       <View style={styles.paseoList}>
         {providers.map((provider) => {
           const record = asRecord(provider);
@@ -1967,7 +1967,7 @@ function ProviderList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "label") ??
                     fieldString(record, "id") ??
-                    "Provider"}
+                    t("ui.provider")}
                 </Text>
                 {fieldString(record, "status") ? (
                   <StatusPill
@@ -2001,10 +2001,10 @@ function ModelList({
   styles: ActivityStyles;
 }) {
   if (models.length === 0) {
-    return <Text style={styles.empty}>没有返回模型。</Text>;
+    return <Text style={styles.empty}>{t("ui.noModelsReturned")}</Text>;
   }
   return (
-    <Section title={`模型（${models.length}）`} styles={styles}>
+    <Section title={t("ui.models", { count: models.length })} styles={styles}>
       <View style={styles.paseoList}>
         {models.map((model) => {
           const record = asRecord(model);
@@ -2017,7 +2017,7 @@ function ModelList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "label") ??
                     fieldString(record, "id") ??
-                    "模型"}
+                    t("ui.model")}
                 </Text>
                 {fieldBoolean(record, "isDefault") ? (
                   <StatusPill
@@ -2053,10 +2053,10 @@ function ProfileList({
   styles: ActivityStyles;
 }) {
   if (profiles.length === 0) {
-    return <Text style={styles.empty}>没有返回配置。</Text>;
+    return <Text style={styles.empty}>{t("ui.noConfigurationsReturned")}</Text>;
   }
   return (
-    <Section title={`配置（${profiles.length}）`} styles={styles}>
+    <Section title={t("ui.configurations", { count: profiles.length })} styles={styles}>
       <View style={styles.paseoList}>
         {profiles.map((profile) => {
           const record = asRecord(profile);
@@ -2069,15 +2069,15 @@ function ProfileList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "name") ??
                     fieldString(record, "id") ??
-                    "配置"}
+                    t("ui.configuration")}
                 </Text>
               </View>
               <PaseoFields
                 fields={[
-                  ["Provider", record?.provider],
-                  ["模型", record?.model],
-                  ["模式", record?.modeId],
-                  ["思考强度", record?.thinkingOptionId],
+                  [t("ui.provider"), record?.provider],
+                  [t("ui.model"), record?.model],
+                  [t("ui.mode"), record?.modeId],
+                  [t("ui.thinkingLevel"), record?.thinkingOptionId],
                 ]}
                 palette={palette}
                 styles={styles}
@@ -2106,7 +2106,7 @@ function FeatureList({
 }) {
   if (features.length === 0) return null;
   return (
-    <Section title={`功能（${features.length}）`} styles={styles}>
+    <Section title={t("ui.features", { count: features.length })} styles={styles}>
       <View style={styles.paseoList}>
         {features.map((feature) => {
           const record = asRecord(feature);
@@ -2119,7 +2119,7 @@ function FeatureList({
                 <Text style={styles.paseoListItemTitle}>
                   {fieldString(record, "label") ??
                     fieldString(record, "id") ??
-                    "功能"}
+                    t("ui.feature")}
                 </Text>
                 {record?.value !== undefined ? (
                   <StatusPill
@@ -2168,9 +2168,9 @@ function BrowserTool({
       <View style={styles.paseoStack}>
         <PaseoFields
           fields={[
-            ["浏览器标签页", unlessInHeader(inputRecord?.browserId, headerSummary)],
-            ["错误", error?.message],
-            ["可重试", error?.retryable],
+            [t("ui.browserTab"), unlessInHeader(inputRecord?.browserId, headerSummary)],
+            [t("ui.error"), error?.message],
+            [t("ui.retryable"), error?.retryable],
           ]}
           palette={palette}
           styles={styles}
@@ -2193,9 +2193,9 @@ function BrowserTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["浏览器标签页", unlessInHeader(asRecord(browserResult)?.browserId, headerSummary)],
-              ["工作区", asRecord(browserResult)?.workspaceId],
-              ["网址", unlessInHeader(asRecord(browserResult)?.url, headerSummary)],
+              [t("ui.browserTab"), unlessInHeader(asRecord(browserResult)?.browserId, headerSummary)],
+              [t("ui.workspace"), asRecord(browserResult)?.workspaceId],
+              [t("ui.uRL"), unlessInHeader(asRecord(browserResult)?.url, headerSummary)],
             ]}
             palette={palette}
             styles={styles}
@@ -2207,12 +2207,12 @@ function BrowserTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["浏览器标签页", unlessInHeader(browserResult?.browserId, headerSummary)],
-              ["网址", unlessInHeader(browserResult?.url, headerSummary)],
-              ["标题", browserResult?.title],
-              ["格式", browserResult?.format],
-              ["已截断", browserResult?.truncated],
-              ["统计", browserResult?.stats],
+              [t("ui.browserTab"), unlessInHeader(browserResult?.browserId, headerSummary)],
+              [t("ui.uRL"), unlessInHeader(browserResult?.url, headerSummary)],
+              [t("ui.title"), browserResult?.title],
+              [t("ui.format"), browserResult?.format],
+              [t("ui.truncated"), browserResult?.truncated],
+              [t("ui.statistics"), browserResult?.stats],
             ]}
             palette={palette}
             styles={styles}
@@ -2221,7 +2221,7 @@ function BrowserTool({
             <PaseoCodeBlock
               code={fieldString(browserResult, "snapshot")!}
               language="yaml"
-              label="页面结构"
+              label={t("ui.pageStructure")}
               theme={theme}
               styles={styles}
             />
@@ -2233,18 +2233,17 @@ function BrowserTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["浏览器标签页", unlessInHeader(browserResult?.browserId, headerSummary)],
-              ["MIME 类型", browserResult?.mimeType],
-              ["宽度", browserResult?.width],
-              ["高度", browserResult?.height],
-              ["整页", inputRecord?.fullPage],
+              [t("ui.browserTab"), unlessInHeader(browserResult?.browserId, headerSummary)],
+              [t("ui.mIMEType"), browserResult?.mimeType],
+              [t("ui.width"), browserResult?.width],
+              [t("ui.height"), browserResult?.height],
+              [t("ui.fullPage"), inputRecord?.fullPage],
             ]}
             palette={palette}
             styles={styles}
           />
           <Text style={styles.mutedText}>
-            截图已作为图片附件返回给 Agent。
-          </Text>
+            {t("ui.theScreenshotWasReturnedTo")}</Text>
         </View>
       );
     case "browser_logs":
@@ -2252,8 +2251,8 @@ function BrowserTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["浏览器标签页", unlessInHeader(browserResult?.browserId, headerSummary)],
-              ["最多条数", inputRecord?.maxEntries],
+              [t("ui.browserTab"), unlessInHeader(browserResult?.browserId, headerSummary)],
+              [t("ui.maximumEntries"), inputRecord?.maxEntries],
             ]}
             palette={palette}
             styles={styles}
@@ -2271,8 +2270,8 @@ function BrowserTool({
         <View style={styles.paseoStack}>
           <PaseoFields
             fields={[
-              ["浏览器标签页", unlessInHeader(browserResult?.browserId, headerSummary)],
-              ["元素", inputRecord?.ref],
+              [t("ui.browserTab"), unlessInHeader(browserResult?.browserId, headerSummary)],
+              [t("ui.element"), inputRecord?.ref],
             ]}
             palette={palette}
             styles={styles}
@@ -2281,7 +2280,7 @@ function BrowserTool({
             <PaseoCodeBlock
               code={fieldString(inputRecord, "function")!}
               language="javascript"
-              label="函数"
+              label={t("ui.function")}
               theme={theme}
               styles={styles}
             />
@@ -2290,7 +2289,7 @@ function BrowserTool({
             <PaseoCodeBlock
               code={fieldString(browserResult, "resultJson")!}
               language="json"
-              label="结果"
+              label={t("ui.result")}
               theme={theme}
               styles={styles}
             />
@@ -2298,7 +2297,7 @@ function BrowserTool({
         </View>
       );
     default: {
-      const visible = (fields: Array<[string, unknown]>) =>
+      const visible = (fields: Array<[string, unknown, string?]>) =>
         fields
           .map(([label, value]) => [label, unlessInHeader(value, headerSummary)] as [string, unknown])
           .filter(([, value]) => value !== undefined);
@@ -2317,29 +2316,29 @@ function BrowserTool({
 function browserInputFields(
   leaf: string,
   input: JsonRecord | null
-): Array<[string, unknown]> {
+): Array<[string, unknown, string?]> {
   if (!input) return [];
   const labels: Record<string, string> = {
-    browserId: "浏览器标签页",
-    ref: "元素",
-    sourceRef: "起点元素",
-    targetRef: "目标元素",
-    url: "网址",
-    value: "值",
-    text: "文本",
-    key: "按键",
-    button: "鼠标按键",
-    doubleClick: "双击",
-    modifiers: "修饰键",
-    filePaths: "文件",
-    fullPage: "整页",
-    maxEntries: "最多条数",
-    timeoutMs: "超时（毫秒）",
-    deltaX: "水平滚动",
-    deltaY: "垂直滚动",
-    width: "宽度",
-    height: "高度",
-    function: "函数",
+    browserId: t("ui.browserTab"),
+    ref: t("ui.element"),
+    sourceRef: t("ui.sourceElement"),
+    targetRef: t("ui.targetElement"),
+    url: t("ui.uRL"),
+    value: t("ui.value"),
+    text: t("ui.text2"),
+    key: t("ui.keys"),
+    button: t("ui.mouseButton"),
+    doubleClick: t("ui.doubleClick"),
+    modifiers: t("ui.modifiers"),
+    filePaths: t("ui.file"),
+    fullPage: t("ui.fullPage"),
+    maxEntries: t("ui.maximumEntries"),
+    timeoutMs: t("ui.timeoutMilliseconds"),
+    deltaX: t("ui.horizontalScroll"),
+    deltaY: t("ui.verticalScroll"),
+    width: t("ui.width"),
+    height: t("ui.height"),
+    function: t("ui.function"),
   };
   const excluded = new Set(["browserId"]);
   return Object.entries(input)
@@ -2348,13 +2347,13 @@ function browserInputFields(
         value !== undefined &&
         (!excluded.has(key) || leaf === "browser_list_tabs")
     )
-    .map(([key, value]) => [labels[key] ?? humanizeKey(key), value]);
+    .map(([key, value]) => [labels[key] ?? humanizeKey(key), value, key]);
 }
 
 function browserOutputFields(
   leaf: string,
   result: JsonRecord | null
-): Array<[string, unknown]> {
+): Array<[string, unknown, string?]> {
   if (!result) return [];
   const excluded = new Set([
     "command",
@@ -2366,7 +2365,7 @@ function browserOutputFields(
   ]);
   return Object.entries(result)
     .filter(([key, value]) => value !== undefined && !excluded.has(key))
-    .map(([key, value]) => [humanizeKey(key), value]);
+    .map(([key, value]) => [humanizeKey(key), value, key]);
 }
 
 function BrowserTabList({
@@ -2379,10 +2378,10 @@ function BrowserTabList({
   styles: ActivityStyles;
 }) {
   if (tabs.length === 0) {
-    return <Text style={styles.empty}>没有返回浏览器标签页。</Text>;
+    return <Text style={styles.empty}>{t("ui.noBrowserTabsReturned")}</Text>;
   }
   return (
-    <Section title={`浏览器标签页（${tabs.length}）`} styles={styles}>
+    <Section title={t("ui.browserTabs", { count: tabs.length })} styles={styles}>
       <View style={styles.paseoList}>
         {tabs.map((tab) => {
           const record = asRecord(tab);
@@ -2390,7 +2389,7 @@ function BrowserTabList({
             <View key={stableItemKey(tab, "tab")} style={styles.paseoListItem}>
               <View style={styles.paseoListItemHeader}>
                 <Text numberOfLines={1} style={styles.paseoListItemTitle}>
-                  {fieldString(record, "title") ?? "无标题页面"}
+                  {fieldString(record, "title") ?? t("ui.untitledPage")}
                 </Text>
                 {fieldBoolean(record, "isActive") ? (
                   <StatusPill
@@ -2427,7 +2426,7 @@ function BrowserLogs({
 }) {
   return (
     <View style={styles.paseoStack}>
-      <Section title={`控制台（${consoleEntries.length}）`} styles={styles}>
+      <Section title={t("ui.console", { count: consoleEntries.length })} styles={styles}>
         <View style={styles.paseoList}>
           {consoleEntries.map((entry) => {
             const record = asRecord(entry);
@@ -2451,7 +2450,7 @@ function BrowserLogs({
           })}
         </View>
       </Section>
-      <Section title={`网络请求（${networkEntries.length}）`} styles={styles}>
+      <Section title={t("ui.networkRequests", { count: networkEntries.length })} styles={styles}>
         <View style={styles.paseoList}>
           {networkEntries.map((entry) => {
             const record = asRecord(entry);
@@ -2462,11 +2461,11 @@ function BrowserLogs({
               >
                 <View style={styles.paseoListItemHeader}>
                   <Text numberOfLines={1} style={styles.paseoListItemTitle}>
-                    {fieldString(record, "method") ?? "请求"}{" "}
+                    {fieldString(record, "method") ?? t("ui.request")}{" "}
                     {fieldNumber(record, "status") ?? ""}
                   </Text>
                   <Text style={styles.paseoListItemMeta}>
-                    {fieldNumber(record, "duration")} ms
+                    {t("ui.milliseconds", { count: fieldNumber(record, "duration") })}
                   </Text>
                 </View>
                 <Text numberOfLines={2} style={styles.paseoListItemMeta}>
@@ -2489,7 +2488,7 @@ function ExaResultList({
   styles: ActivityStyles;
 }) {
   return (
-    <Section title={`结果（${results.length}）`} styles={styles}>
+    <Section title={t("ui.results", { count: results.length })} styles={styles}>
       <View style={styles.paseoList}>
         {results.map((result) => (
           <View key={result.url ?? result.title} style={styles.paseoListItem}>
@@ -2506,7 +2505,7 @@ function ExaResultList({
             ) : null}
             {result.published || result.author ? (
               <Text style={styles.paseoListItemMeta}>
-                {[result.published, result.author].filter(Boolean).join(" · ")}
+                {[result.published, result.author].filter(Boolean).join(t("ui.metaSeparator"))}
               </Text>
             ) : null}
             {result.highlights ? (
@@ -2548,16 +2547,16 @@ export function ExaToolDetail({
   const shownPrompt = notInHeader(prompt, headerSummary);
   return (
     <View style={styles.paseoStack}>
-      {shownQuery ? <PromptBlock text={shownQuery} label="查询" styles={styles} /> : null}
-      {shownUrl ? <PromptBlock text={shownUrl} label="网址" styles={styles} /> : null}
-      {shownPrompt ? <PromptBlock text={shownPrompt} label="提示词" styles={styles} /> : null}
+      {shownQuery ? <PromptBlock text={shownQuery} label={t("ui.query2")} styles={styles} /> : null}
+      {shownUrl ? <PromptBlock text={shownUrl} label={t("ui.uRL")} styles={styles} /> : null}
+      {shownPrompt ? <PromptBlock text={shownPrompt} label={t("ui.prompt")} styles={styles} /> : null}
       {results.length > 0 ? (
         <ExaResultList results={results} styles={styles} />
       ) : outputText ? (
         <PaseoCodeBlock
           code={outputText}
           language="markdown"
-          label="输出"
+          label={t("ui.output")}
           theme={theme}
           styles={styles}
         />
@@ -2565,7 +2564,7 @@ export function ExaToolDetail({
         <PaseoCodeBlock
           code={formatUnknownValue(output)}
           language="json"
-          label="输出"
+          label={t("ui.output")}
           theme={theme}
           styles={styles}
         />
@@ -2587,10 +2586,10 @@ function FallbackPaseo({
 }) {
   return (
     <View style={styles.paseoStack}>
-      <Section title="输入" styles={styles}>
+      <Section title={t("ui.input")} styles={styles}>
         <PaseoFieldValue value={input} palette={palette} styles={styles} />
       </Section>
-      <Section title="结果" styles={styles}>
+      <Section title={t("ui.result")} styles={styles}>
         <PaseoFieldValue value={result} palette={palette} styles={styles} />
       </Section>
     </View>
@@ -2613,9 +2612,9 @@ function PaseoFailure({
       <StatusPill value="Failed" palette={palette} styles={styles} />
       <PaseoFields
         fields={[
-          ["错误码", error?.code],
-          ["错误", error?.message ?? failure?.error],
-          ["可重试", error?.retryable],
+          [t("ui.errorCode"), error?.code],
+          [t("ui.error"), error?.message ?? failure?.error],
+          [t("ui.retryable"), error?.retryable],
         ]}
         palette={palette}
         styles={styles}
@@ -2626,15 +2625,15 @@ function PaseoFailure({
 
 // 本地补丁：常见字段名（Agent 能力、通用结果字段）的中文名；没列出的字段名属于数据，按原样人性化。
 const FIELD_ZH: Readonly<Record<string, string>> = {
-  supportsStreaming: "流式输出", supportsSessionPersistence: "会话持久化", supportsSessionListing: "列出会话",
-  supportsDynamicModes: "动态切换模式", supportsMcpServers: "MCP 服务器", supportsReasoningStream: "思考过程流",
-  supportsToolInvocations: "工具调用", supportsRewindConversation: "回退对话", supportsRewindFiles: "回退文件",
-  supportsRewindBoth: "同时回退对话和文件",
-  id: "ID", agentId: "Agent ID", workspaceId: "工作区 ID", projectId: "项目 ID", terminalId: "终端 ID", browserId: "浏览器标签页",
-  title: "标题", name: "名称", status: "状态", cwd: "工作目录", provider: "Provider", model: "模型", mode: "模式",
-  modeId: "模式", prompt: "提示词", message: "消息", error: "错误", output: "输出", result: "结果", url: "网址",
-  path: "路径", branch: "分支", createdAt: "创建时间", updatedAt: "更新时间", startedAt: "开始时间", finishedAt: "结束时间",
-  ok: "成功", success: "成功", count: "数量", total: "总数", description: "说明", labels: "标签", text: "文本",
+  get supportsStreaming() { return t("ui.streamingOutput"); }, get supportsSessionPersistence() { return t("ui.sessionPersistence"); }, get supportsSessionListing() { return t("ui.listSessions"); },
+  get supportsDynamicModes() { return t("ui.dynamicModes"); }, get supportsMcpServers() { return t("ui.mCPServers"); }, get supportsReasoningStream() { return t("ui.thinkingStream"); },
+  get supportsToolInvocations() { return t("ui.toolCalls2"); }, get supportsRewindConversation() { return t("ui.rewindConversation"); }, get supportsRewindFiles() { return t("ui.rewindFiles"); },
+  get supportsRewindBoth() { return t("ui.rewindConversationAndFiles"); },
+  get id() { return t("ui.id"); }, get agentId() { return t("ui.agentId"); }, get workspaceId() { return t("ui.workspaceID"); }, get projectId() { return t("ui.projectID"); }, get terminalId() { return t("ui.terminalID"); }, get browserId() { return t("ui.browserTab"); },
+  get title() { return t("ui.title"); }, get name() { return t("ui.name"); }, get status() { return t("ui.status"); }, get cwd() { return t("ui.workingDirectory"); }, get provider() { return t("ui.provider"); }, get model() { return t("ui.model"); }, get mode() { return t("ui.mode"); },
+  get modeId() { return t("ui.mode"); }, get prompt() { return t("ui.prompt"); }, get message() { return t("ui.message"); }, get error() { return t("ui.error"); }, get output() { return t("ui.output"); }, get result() { return t("ui.result"); }, get url() { return t("ui.uRL"); },
+  get path() { return t("ui.path2"); }, get branch() { return t("ui.branch2"); }, get createdAt() { return t("ui.createdAt"); }, get updatedAt() { return t("ui.updatedAt"); }, get startedAt() { return t("ui.startedAt"); }, get finishedAt() { return t("ui.finishedAt"); },
+  get ok() { return t("ui.success"); }, get success() { return t("ui.success"); }, get count() { return t("ui.count"); }, get total() { return t("ui.total"); }, get description() { return t("ui.description"); }, get labels() { return t("ui.labels"); }, get text() { return t("ui.text2"); },
 };
 
 function humanizeKey(key: string): string {
@@ -2745,7 +2744,7 @@ export function PaseoToolDetail({
       <View style={styles.paseoStack}>
         <PromptBlock
           text={notInHeader(fieldString(inputRecord, "text"), headerSummary)}
-          label="消息"
+          label={t("ui.message")}
           styles={styles}
         />
         <ActionResult

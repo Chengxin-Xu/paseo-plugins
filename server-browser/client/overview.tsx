@@ -1,3 +1,5 @@
+import { translator } from '../shared/i18n';
+import { t } from '../shared/text';
 import { useRpc, type PluginSurfaceProps } from '@getpaseo/plugin/client';
 import { Icon, ScrollView } from '@getpaseo/plugin/client/react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -29,7 +31,8 @@ export function useBrowserOverview(hostId: string, visible = true) {
   const read = useRpc(overviewRpc);
   const queryClient = useQueryClient();
   const active = useAppForeground() && visible;
-  const queryKey = useMemo(() => ['server-browser', hostId, 'overview'], [hostId]);
+  const locale = translator();
+  const queryKey = useMemo(() => ['server-browser', hostId, 'overview', locale.language, locale.hash], [hostId, locale.language, locale.hash]);
   const query = useQuery({
     queryKey, enabled: active,
     queryFn: async () => { const previous = queryClient.getQueryData<OverviewData>(queryKey); return mergeOverview(previous, await read(overviewRequest(previous))); },
@@ -69,11 +72,11 @@ function Thumbnail({ theme, hostId, item, enabled }: { theme: Theme; hostId: str
     {frame ? <Image accessibilityIgnoresInvertColors source={{ uri: frame.dataUrl }} resizeMode="cover" style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} />
       : <View style={{ alignItems: 'center', gap: space.xs }}>
         <Icon name={running ? 'Globe' : item.session.status === 'error' ? 'CircleAlert' : 'MonitorOff'} size={20} color={colors.foregroundMuted} />
-        <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, maxWidth: 200 }}>{running ? pageHost(item.session.url) : idleThumbnail[item.session.status] ?? '浏览器未启动'}</Text>
+        <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, maxWidth: 200 }}>{running ? pageHost(item.session.url) : idleThumbnail(item.session.status) ?? t("browserOverview.browserHasNotStarted")}</Text>
       </View>}
   </View>;
 }
-const idleThumbnail: Partial<Record<BrowserSession['status'], string>> = { starting: '浏览器正在启动', recovering: '浏览器正在恢复', error: '浏览器异常' };
+const idleThumbnail = (status: BrowserSession['status']): string | undefined => ({ starting: t("browserOverview.browserIsStarting"), recovering: t("browserOverview.browserIsRecovering"), error: t("browserOverview.browserError") } as Partial<Record<BrowserSession['status'], string>>)[status];
 
 /** Project, workspace (and page) behind the mark of who controls the running browser. */
 function ControlMeta({ theme, item, parts }: { theme: Theme; item: BrowserOverviewItem; parts: readonly (string | null | undefined)[] }) {
@@ -90,7 +93,7 @@ const OverviewCard = memo(function OverviewCard({ theme, hostId, entry, width, s
   theme: Theme; hostId: string; entry: Entry; width: number; selected: boolean; thumbnails: boolean; onSelect: (id: string) => void;
 }) {
   const { colors } = theme, { item, tab } = entry, badge = browserBadge(item);
-  return <Pressable testID={`server-browser-overview-card-${item.workspace.id}`} accessibilityRole="button" accessibilityLabel={`查看 ${item.workspace.projectTitle || '未命名项目'} 的 ${item.workspace.title}，${tab.title}${badge ? `，${badge.label}` : ''}`} accessibilityState={{ selected }}
+  return <Pressable testID={`server-browser-overview-card-${item.workspace.id}`} accessibilityRole="button" accessibilityLabel={badge ? t("browserOverview.viewBrowserWithStatus", { project: item.workspace.projectTitle || t("browserOverview.untitledProject"), workspace: item.workspace.title, title: tab.title, status: badge.label }) : t("browserOverview.viewBrowser", { project: item.workspace.projectTitle || t("browserOverview.untitledProject"), workspace: item.workspace.title, title: tab.title })} accessibilityState={{ selected }}
     onPress={() => onSelect(item.workspace.id)}
     style={(state) => ({ width, borderRadius: radius.lg, overflow: 'hidden', borderWidth: selected ? 2 : hairline, borderColor: selected ? colors.foregroundMuted : badge && !quietLook(badge) ? toneColor(theme, badge.tone, 'line') : colors.border, backgroundColor: (state as Interaction).hovered || state.pressed ? colors.surface1 : colors.surface0 })}>
     <View>
@@ -102,14 +105,14 @@ const OverviewCard = memo(function OverviewCard({ theme, hostId, entry, width, s
         <ProjectMark theme={theme} name={tab.identity} size={20} />
         <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.body, fontWeight: '500' }}>{tab.title}</Text>
       </View>
-      <ControlMeta theme={theme} item={item} parts={[item.workspace.projectTitle || '未命名项目', item.workspace.title]} />
+      <ControlMeta theme={theme} item={item} parts={[item.workspace.projectTitle || t("browserOverview.untitledProject"), item.workspace.title]} />
       <MetaLine theme={theme} parts={[item.session.status === 'running' ? pageHost(item.session.url) : null]} />
     </View>
   </Pressable>;
 });
 const quietLook = (look: Look) => look.tone === 'neutral' || look.tone === 'gray';
 
-const filters: readonly { value: OverviewFilter; label: string; tone?: Tone; motion?: 'spin' | 'ping' }[] = [{ value: 'all', label: '全部' }, { value: 'agent', label: 'Agent 进行中', tone: 'info', motion: 'spin' }, { value: 'takeover', label: '待接管', tone: 'warning', motion: 'ping' }];
+const filters: readonly { value: OverviewFilter; label: string; tone?: Tone; motion?: 'spin' | 'ping' }[] = [{ value: 'all', get label() { return t("browserOverview.all"); } }, { value: 'agent', get label() { return t("browserOverview.agentWorking"); }, tone: 'info', motion: 'spin' }, { value: 'takeover', get label() { return t("browserOverview.needsTakeover"); }, tone: 'warning', motion: 'ping' }];
 
 /** All browsers: a thumbnail grid on wide layouts, a list on phones. Selecting only switches what this viewer watches. */
 export function BrowserOverview({ theme, compact, hostId, items, loading, error, selectedId, onSelect, onBack, onAddWorkspace, stale, active, pending, checkedAt, onRefresh, onOpenOrphans }: {
@@ -129,29 +132,29 @@ export function BrowserOverview({ theme, compact, hostId, items, loading, error,
   }).filter((section) => section.entries.length), [items, filter, search]);
   const columns = Math.max(1, Math.floor((width - 2 * space.lg + space.md) / (248 + space.md)));
   const cardWidth = columns > 0 && width > 0 ? Math.floor((width - 2 * space.lg - space.md * (columns - 1)) / columns) : 248;
-  const sync = !active ? { state: 'stale' as const, label: '已暂停' } : error ? { state: 'error' as const, label: '连接中断' } : stale ? { state: 'stale' as const, label: '待更新' } : pending && !checkedAt ? { state: 'syncing' as const, label: '读取中' } : { state: 'live' as const, label: checkedAt ? `更新于 ${relativeTime(checkedAt)}` : '实时' };
+  const sync = !active ? { state: 'stale' as const, get label() { return t("browserOverview.paused"); } } : error ? { state: 'error' as const, get label() { return t("browserOverview.disconnected"); } } : stale ? { state: 'stale' as const, get label() { return t("browserOverview.needsUpdate"); } } : pending && !checkedAt ? { state: 'syncing' as const, get label() { return t("browserOverview.loading"); } } : { state: 'live' as const, label: checkedAt ? t("browserOverview.updated", { value1: relativeTime(checkedAt) }) : t("browserOverview.live") };
   const filterChips = filters.map((option) => <StateChip key={option.value} theme={theme} label={option.label} count={counts[option.value]} tone={option.tone} motion={option.motion} selected={filter === option.value} testID={`server-browser-overview-filter-${option.value}`} onPress={() => setFilter(option.value)} />);
   return <View testID="server-browser-overview" style={{ flex: 1, minHeight: 0 }}>
     <Toolbar theme={theme}>
-      {onBack ? <IconButton theme={theme} icon="ChevronLeft" label="返回浏览器" testID="server-browser-overview-back" onPress={onBack} /> : null}
-      {compact ? <SearchField theme={theme} value={search} onChangeText={setSearch} placeholder="搜索项目、Agent 或页面" accessibilityLabel="搜索项目、工作区、Agent 或页面" /> : <>
+      {onBack ? <IconButton theme={theme} icon="ChevronLeft" label={t("browserOverview.backToBrowser")} testID="server-browser-overview-back" onPress={onBack} /> : null}
+      {compact ? <SearchField theme={theme} value={search} onChangeText={setSearch} placeholder={t("browserOverview.searchProjectsAgentsOrPages")} accessibilityLabel={t("browserOverview.searchProjectsWorkspacesAgentsOrPages")} /> : <>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>{filterChips}</View>
         <Spacer />
-        <View style={{ width: 260 }}><SearchField theme={theme} value={search} onChangeText={setSearch} placeholder="搜索项目、Agent 或页面" accessibilityLabel="搜索项目、工作区、Agent 或页面" /></View>
+        <View style={{ width: 260 }}><SearchField theme={theme} value={search} onChangeText={setSearch} placeholder={t("browserOverview.searchProjectsAgentsOrPages")} accessibilityLabel={t("browserOverview.searchProjectsWorkspacesAgentsOrPages")} /></View>
       </>}
-      <IconButton theme={theme} icon="MonitorOff" label="孤儿浏览器" testID="server-browser-overview-orphans" onPress={onOpenOrphans} />
+      <IconButton theme={theme} icon="MonitorOff" label={t("browserOverview.orphanedBrowsers")} testID="server-browser-overview-orphans" onPress={onOpenOrphans} />
       <View testID="server-browser-overview-freshness"><SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} /></View>
-      <IconButton theme={theme} icon="RefreshCw" label="刷新浏览器总览" disabled={!active} testID="server-browser-overview-refresh" onPress={onRefresh} />
-      {compact ? <IconButton theme={theme} icon="Plus" label="打开其他工作区的浏览器" testID="server-browser-workspace-add" onPress={onAddWorkspace} />
-        : <Button theme={theme} label="打开工作区" icon="Plus" size="sm" testID="server-browser-workspace-add" onPress={onAddWorkspace} />}
+      <IconButton theme={theme} icon="RefreshCw" label={t("browserOverview.refreshBrowserOverview")} disabled={!active} testID="server-browser-overview-refresh" onPress={onRefresh} />
+      {compact ? <IconButton theme={theme} icon="Plus" label={t("browserOverview.openAnotherWorkspaceSBrowser")} testID="server-browser-workspace-add" onPress={onAddWorkspace} />
+        : <Button theme={theme} label={t("browserOverview.openWorkspace")} icon="Plus" size="sm" testID="server-browser-workspace-add" onPress={onAddWorkspace} />}
     </Toolbar>
     {compact ? <ChipBar theme={theme} border>{filterChips}</ChipBar> : null}
     <ScrollView testID="server-browser-overview-list" style={{ flex: 1 }} keyboardShouldPersistTaps="handled" onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
       contentContainerStyle={{ paddingHorizontal: compact ? space.xs : space.lg - space.md, paddingBottom: space.xl, paddingTop: space.xs }}>
-      {error && !items.length ? <View style={{ padding: space.md }}><Banner theme={theme} tone="danger" message={error} action={{ label: '重试', onPress: onRefresh }} /></View> : null}
+      {error && !items.length ? <View style={{ padding: space.md }}><Banner theme={theme} tone="danger" message={error} action={{ get label() { return t("browserOverview.retry"); }, onPress: onRefresh }} /></View> : null}
       {loading && !items.length && !error ? <Skeleton theme={theme} rows={4} /> : null}
-      {!loading && !items.length && !error ? <EmptyState theme={theme} icon="MonitorSmartphone" title="还没有服务器浏览器" message="选择一个工作区即可启动。" action={{ label: '打开工作区', icon: 'Plus', onPress: onAddWorkspace }} /> : null}
-      {!!items.length && !sections.length ? <View testID="server-browser-overview-empty"><EmptyState theme={theme} icon="SearchX" tone="gray" title="没有符合条件的浏览器" action={{ label: '清除筛选', onPress: () => { setFilter('all'); setSearch(''); } }} /></View> : null}
+      {!loading && !items.length && !error ? <EmptyState theme={theme} icon="MonitorSmartphone" title={t("browserOverview.noServerBrowsersYet")} message={t("browserOverview.chooseAWorkspaceToGetStarted")} action={{ get label() { return t("browserOverview.openWorkspace"); }, icon: 'Plus', onPress: onAddWorkspace }} /> : null}
+      {!!items.length && !sections.length ? <View testID="server-browser-overview-empty"><EmptyState theme={theme} icon="SearchX" tone="gray" title={t("browserOverview.noMatchingBrowsers")} action={{ get label() { return t("browserOverview.clearFilters"); }, onPress: () => { setFilter('all'); setSearch(''); } }} /></View> : null}
       {compact ? sections.map((section) => <View key={section.key}>
         <SectionHeader theme={theme} title={section.title} count={section.entries.length} icon="Folder" tone={hueFor(section.identity)} />
         {section.entries.map((entry) => <OverviewRow key={entry.item.workspace.id} theme={theme} entry={entry} selected={entry.item.workspace.id === selectedId} onSelect={onSelect} />)}
@@ -164,32 +167,32 @@ export function BrowserOverview({ theme, compact, hostId, items, loading, error,
 
 const OverviewRow = memo(function OverviewRow({ theme, entry, selected, onSelect }: { theme: Theme; entry: Entry; selected: boolean; onSelect: (id: string) => void }) {
   const { item, tab } = entry, badge = browserBadge(item);
-  return <Row theme={theme} title={tab.title} titleLines={1} selected={selected} testID={`server-browser-overview-card-${item.workspace.id}`} accessibilityLabel={`查看 ${item.workspace.projectTitle || '未命名项目'} 的 ${item.workspace.title}，${tab.title}${badge ? `，${badge.label}` : ''}`}
+  return <Row theme={theme} title={tab.title} titleLines={1} selected={selected} testID={`server-browser-overview-card-${item.workspace.id}`} accessibilityLabel={badge ? t("browserOverview.viewBrowserWithStatus", { project: item.workspace.projectTitle || t("browserOverview.untitledProject"), workspace: item.workspace.title, title: tab.title, status: badge.label }) : t("browserOverview.viewBrowser", { project: item.workspace.projectTitle || t("browserOverview.untitledProject"), workspace: item.workspace.title, title: tab.title })}
     leading={<ProjectMark theme={theme} name={tab.identity} size={20} />} trailing={badge ? <StatePill theme={theme} look={badge} /> : undefined}
     subtitle={<ControlMeta theme={theme} item={item} parts={[item.workspace.title, pageHost(item.session.url)]} />} onPress={() => onSelect(item.workspace.id)} />;
 });
 
 const activityLooks: Record<BrowserActivity['status'], Look> = {
-  running: { label: '进行中', tone: 'info', icon: 'LoaderCircle', motion: 'spin' }, completed: { label: '完成', tone: 'success', icon: 'CircleCheck' }, failed: { label: '失败', tone: 'danger', icon: 'CircleX' },
+  running: { get label() { return t("browserOverview.inProgress"); }, tone: 'info', icon: 'LoaderCircle', motion: 'spin' }, completed: { get label() { return t("browserOverview.complete"); }, tone: 'success', icon: 'CircleCheck' }, failed: { get label() { return t("browserOverview.failed"); }, tone: 'danger', icon: 'CircleX' },
 };
 /** Recent page operations of this plugin run: result (blue running, green done, red failed), who did it (Agent violet, 人工 amber) and the target page — never typed text. */
 export function BrowserActivityList({ theme, session }: { theme: Theme; session: BrowserSession | null }) {
   const activities = recentActivity(session);
-  if (!activities.length) return <View testID="server-browser-activity"><EmptyState theme={theme} icon="History" tone="pink" title="暂无操作记录" message="只记录本次插件运行中的页面操作，不含输入内容。" /></View>;
+  if (!activities.length) return <View testID="server-browser-activity"><EmptyState theme={theme} icon="History" tone="pink" title={t("browserOverview.noActivityYet")} message={t("browserOverview.onlyPageActionsFromThisPluginRun")} /></View>;
   return <View testID="server-browser-activity" style={{ gap: space.xxs }}>
     <View testID="server-browser-activity-list">
       {activities.map((activity) => {
         const look = activityLooks[activity.status], source = controlLooks[activity.source === 'agent' ? 'agent' : 'manual'];
         return <Row key={activity.id} theme={theme} testID={`server-browser-activity-row-${activity.id}`} titleLines={1}
-          title={actionTitle(activity.action)} leading={<StateGlyph theme={theme} look={look} size={16} />}
-          trailing={<Text style={{ color: activity.status === 'running' ? toneColor(theme, 'info') : activity.status === 'failed' ? toneColor(theme, 'danger') : theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: activity.status === 'completed' ? '400' : '500' }}>{activity.status === 'running' ? '进行中' : activity.status === 'failed' ? `失败 · ${relativeTime(activity.endedAt || activity.startedAt)}` : relativeTime(activity.endedAt || activity.startedAt)}</Text>}
+          title={actionTitle(activity.actionId ?? activity.action)} leading={<StateGlyph theme={theme} look={look} size={16} />}
+          trailing={<Text style={{ color: activity.status === 'running' ? toneColor(theme, 'info') : activity.status === 'failed' ? toneColor(theme, 'danger') : theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: activity.status === 'completed' ? '400' : '500' }}>{activity.status === 'running' ? t("browserOverview.inProgress") : activity.status === 'failed' ? t("browserOverview.failed2", { value1: relativeTime(activity.endedAt || activity.startedAt) }) : relativeTime(activity.endedAt || activity.startedAt)}</Text>}
           subtitle={<View style={{ flexDirection: 'row', alignItems: 'center', gap: space.xs + 1 }}>
             <ControlMark theme={theme} mode={activity.source === 'agent' ? 'agent' : 'manual'} />
-            <Text style={{ color: hue(theme, source.hue, 'text'), fontSize: fontSize.meta, fontWeight: '500' }}>{activity.source === 'agent' ? 'Agent' : '人工'}</Text>
-            <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} parts={[activity.pageTitle || '当前页面', pageHost(activity.pageUrl)]} /></View>
+            <Text style={{ color: hue(theme, source.hue, 'text'), fontSize: fontSize.meta, fontWeight: '500' }}>{activity.source === 'agent' ? t("browserOverview.agent") : t("browserOverview.human")}</Text>
+            <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} parts={[activity.pageTitle || t("browserOverview.currentPage"), pageHost(activity.pageUrl)]} /></View>
           </View>} />;
       })}
     </View>
-    <View style={{ paddingHorizontal: space.md }}><MetaLine theme={theme} parts={['最近 12 条', '不含输入内容']} /></View>
+    <View style={{ paddingHorizontal: space.md }}><MetaLine theme={theme} parts={[t("browserOverview.last12Actions"), t("browserOverview.inputContentsExcluded")]} /></View>
   </View>;
 }

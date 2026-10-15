@@ -1,3 +1,5 @@
+import { currentLanguage, onTextChange } from "./i18n";
+import { t } from "./text";
 /** Pure derivations for the dashboards (no React), unit-tested in tests/stats-view.test.ts. */
 import type { StatsDay, StatsMetrics, StatsSnapshot } from "./stats";
 
@@ -25,19 +27,19 @@ export function observedParallelism(daily: readonly StatsDay[], peak: number): n
 /** 1.2k / 3.4万 style for Chinese UI: below 10k plain with separators, then 万 / 亿. */
 export function bigNumber(value: number): string {
   if (!Number.isFinite(value)) return "—";
-  const abs = Math.abs(value);
-  if (abs < 10_000) return Math.round(value).toLocaleString("en-US");
-  if (abs < 100_000_000) return `${(value / 10_000).toFixed(abs < 100_000 ? 1 : 0).replace(/\.0$/, "")}万`;
-  return `${(value / 100_000_000).toFixed(1).replace(/\.0$/, "")}亿`;
+  const abs = Math.abs(value), chinese = currentLanguage() === "zh-CN";
+  if (abs < (chinese ? 10_000 : 1_000)) return Math.round(value).toLocaleString("en-US");
+  if (abs < (chinese ? 100_000_000 : 1_000_000)) return t("sharedStatsView.m001", { value1: (value / (chinese ? 10_000 : 1_000)).toFixed(abs < 100_000 ? 1 : 0).replace(/\.0$/, "") });
+  return t("sharedStatsView.m002", { value1: (value / (chinese ? 100_000_000 : 1_000_000)).toFixed(1).replace(/\.0$/, "") });
 }
 /** 45 秒 / 12 分 / 3.4 小时 / 12 小时 — compact, for tiles and axes. */
 export function shortHours(milliseconds: number): string {
   if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "0";
   const minutes = milliseconds / 60_000;
-  if (minutes < 1) return `${Math.round(milliseconds / 1000)} 秒`;
-  if (minutes < 60) return `${Math.round(minutes)} 分`;
+  if (minutes < 1) return t("sharedStatsView.m003", { value1: Math.round(milliseconds / 1000) });
+  if (minutes < 60) return t("sharedStatsView.m004", { value1: Math.round(minutes) });
   const hours = minutes / 60;
-  return `${hours < 10 ? hours.toFixed(1).replace(/\.0$/, "") : Math.round(hours).toLocaleString("en-US")} 小时`;
+  return t("sharedStatsView.m005", { value1: hours < 10 ? hours.toFixed(1).replace(/\.0$/, "") : Math.round(hours).toLocaleString("en-US") });
 }
 export const percent = (value: number | null, digits = 0) => value === null || !Number.isFinite(value) ? "—" : `${(value * 100).toFixed(digits)}%`;
 
@@ -61,10 +63,10 @@ export function peakOf(values: readonly number[]): { index: number; value: numbe
   values.forEach((value, index) => { if (value > 0 && (best < 0 || value > values[best]!)) best = index; });
   return best < 0 ? null : { index: best, value: values[best]! };
 }
-export const weekdayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+export let weekdayNames = [t("sharedStatsView.m006"), t("sharedStatsView.m007"), t("sharedStatsView.m008"), t("sharedStatsView.m009"), t("sharedStatsView.m010"), t("sharedStatsView.m011"), t("sharedStatsView.m012")];
 /** 深夜 / 清晨 / 上午 / 中午 / 下午 / 晚上 */
 export function dayPart(hour: number): string {
-  return hour < 5 ? "深夜" : hour < 8 ? "清晨" : hour < 11 ? "上午" : hour < 13 ? "中午" : hour < 18 ? "下午" : hour < 23 ? "晚上" : "深夜";
+  return hour < 5 ? t("sharedStatsView.m013") : hour < 8 ? t("sharedStatsView.m014") : hour < 11 ? t("sharedStatsView.m015") : hour < 13 ? t("sharedStatsView.m016") : hour < 18 ? t("sharedStatsView.m017") : hour < 23 ? t("sharedStatsView.m018") : t("sharedStatsView.m019");
 }
 
 export interface Achievement {
@@ -83,24 +85,24 @@ export function achievements(stats: StatsSnapshot): Achievement[] {
   const make = (id: string, title: string, description: string, icon: string, colors: readonly [string, string], current: number, target: number): Achievement =>
     ({ id, title, description, icon, colors, current: Math.min(current, target), target, unlocked: current >= target });
   return [
-    make("first-light", "第一次点灯", "派出第一个 Agent", "Lightbulb", ["amber", "orange"], all.sessions, 1),
-    make("today", "今日开工", "今天已经派出 Agent 或跑过一轮", "Sun", ["orange", "pink"], (today?.sessions ?? 0) + (today?.turns ?? 0), 1),
-    make("streak-3", "三日连线", "连续 3 天使用", "Flame", ["orange", "red"], Math.max(stats.streak.current, stats.streak.longest), 3),
-    make("streak-7", "七日连线", "连续 7 天使用", "Flame", ["pink", "red"], Math.max(stats.streak.current, stats.streak.longest), 7),
-    make("streak-30", "月度常驻", "连续 30 天使用", "Crown", ["amber", "pink"], Math.max(stats.streak.current, stats.streak.longest), 30),
-    make("sessions-100", "百次出征", "累计 100 个会话", "Rocket", ["blue", "violet"], all.sessions, 100),
-    make("sessions-1000", "千军万马", "累计 1000 个会话", "Rocket", ["violet", "fuchsia"], all.sessions, 1000),
-    make("turns-1000", "千轮对话", "累计完成 1000 轮", "MessagesSquare", ["cyan", "blue"], all.turns, 1000),
-    make("parallel-5", "多线程", "同时有 5 个 Agent 在跑", "Network", ["violet", "blue"], stats.records.peakParallel?.count ?? all.peakParallel, 5),
-    make("parallel-10", "并发狂魔", "同时有 10 个 Agent 在跑", "Zap", ["fuchsia", "violet"], stats.records.peakParallel?.count ?? all.peakParallel, 10),
-    make("models-5", "模型收藏家", "用过 5 个以上模型", "Gem", ["fuchsia", "pink"], stats.models.filter(row => row.key !== "__other__" && row.key !== "unknown").length, 5),
-    make("night-owl", "夜猫子", "深夜（0–5 点）跑过 50 轮", "Moon", ["indigo", "violet"], night, 50),
-    make("early-bird", "早起鸟", "清晨（5–8 点）跑过 20 轮", "Sunrise", ["amber", "lime"], dawn, 20),
-    make("code-10k", "代码工厂", "Agent 累计写下 1 万行代码", "FileCode2", ["green", "lime"], all.linesAdded, 10_000),
-    make("tools-10k", "工具达人", "累计 1 万次工具调用", "Wrench", ["teal", "cyan"], all.toolCalls, 10_000),
-    make("steady", "稳如老狗", "近期成功率 ≥ 98%（至少 200 轮）", "ShieldCheck", ["green", "teal"], finished >= 200 ? Math.round((successRate(stats.totals) ?? 0) * 100) : 0, 98),
-    make("commander", "子 Agent 指挥官", "累计派出 50 个子 Agent", "Workflow", ["sky", "blue"], all.childSessions, 50),
-    make("marathon", "马拉松", "单轮连续跑满 1 小时", "Timer", ["red", "orange"], Math.floor((stats.records.longestTurn?.ms ?? 0) / 60_000), 60),
+    make("first-light", t("sharedStatsView.m020"), t("sharedStatsView.m021"), "Lightbulb", ["amber", "orange"], all.sessions, 1),
+    make("today", t("sharedStatsView.m022"), t("sharedStatsView.m023"), "Sun", ["orange", "pink"], (today?.sessions ?? 0) + (today?.turns ?? 0), 1),
+    make("streak-3", t("sharedStatsView.m024"), t("sharedStatsView.m025"), "Flame", ["orange", "red"], Math.max(stats.streak.current, stats.streak.longest), 3),
+    make("streak-7", t("sharedStatsView.m026"), t("sharedStatsView.m027"), "Flame", ["pink", "red"], Math.max(stats.streak.current, stats.streak.longest), 7),
+    make("streak-30", t("sharedStatsView.m028"), t("sharedStatsView.m029"), "Crown", ["amber", "pink"], Math.max(stats.streak.current, stats.streak.longest), 30),
+    make("sessions-100", t("sharedStatsView.m030"), t("sharedStatsView.m031"), "Rocket", ["blue", "violet"], all.sessions, 100),
+    make("sessions-1000", t("sharedStatsView.m032"), t("sharedStatsView.m033"), "Rocket", ["violet", "fuchsia"], all.sessions, 1000),
+    make("turns-1000", t("sharedStatsView.m034"), t("sharedStatsView.m035"), "MessagesSquare", ["cyan", "blue"], all.turns, 1000),
+    make("parallel-5", t("sharedStatsView.m036"), t("sharedStatsView.m037"), "Network", ["violet", "blue"], stats.records.peakParallel?.count ?? all.peakParallel, 5),
+    make("parallel-10", t("sharedStatsView.m038"), t("sharedStatsView.m039"), "Zap", ["fuchsia", "violet"], stats.records.peakParallel?.count ?? all.peakParallel, 10),
+    make("models-5", t("sharedStatsView.m040"), t("sharedStatsView.m041"), "Gem", ["fuchsia", "pink"], stats.models.filter(row => row.key !== "__other__" && row.key !== "unknown").length, 5),
+    make("night-owl", t("sharedStatsView.m042"), t("sharedStatsView.m043"), "Moon", ["indigo", "violet"], night, 50),
+    make("early-bird", t("sharedStatsView.m044"), t("sharedStatsView.m045"), "Sunrise", ["amber", "lime"], dawn, 20),
+    make("code-10k", t("sharedStatsView.m046"), t("sharedStatsView.m047"), "FileCode2", ["green", "lime"], all.linesAdded, 10_000),
+    make("tools-10k", t("sharedStatsView.m048"), t("sharedStatsView.m049"), "Wrench", ["teal", "cyan"], all.toolCalls, 10_000),
+    make("steady", t("sharedStatsView.m050"), t("sharedStatsView.m051"), "ShieldCheck", ["green", "teal"], finished >= 200 ? Math.round((successRate(stats.totals) ?? 0) * 100) : 0, 98),
+    make("commander", t("sharedStatsView.m052"), t("sharedStatsView.m053"), "Workflow", ["sky", "blue"], all.childSessions, 50),
+    make("marathon", t("sharedStatsView.m054"), t("sharedStatsView.m055"), "Timer", ["red", "orange"], Math.floor((stats.records.longestTurn?.ms ?? 0) / 60_000), 60),
   ].map(badge => total === 0 && badge.id === "night-owl" ? { ...badge, current: 0, unlocked: false } : badge);
 }
 /** Level from unlocked badges: every 3 badges is one level. */
@@ -108,3 +110,8 @@ export function level(badges: readonly Achievement[]): { level: number; unlocked
   const unlocked = badges.filter(badge => badge.unlocked).length;
   return { level: Math.floor(unlocked / 3) + 1, unlocked, total: badges.length, progress: (unlocked % 3) / 3 };
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  weekdayNames = [t("sharedStatsView.m006"), t("sharedStatsView.m007"), t("sharedStatsView.m008"), t("sharedStatsView.m009"), t("sharedStatsView.m010"), t("sharedStatsView.m011"), t("sharedStatsView.m012")];
+});

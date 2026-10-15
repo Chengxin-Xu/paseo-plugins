@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// These behavioral suites bind Chinese in setup; locale I/O and settings are covered by i18n.test.ts.
+vi.mock("../server/i18n-server", () => ({ createLocaleService: () => ({ dispose() {}, ready: Promise.resolve() }) }));
+
 import { act, createElement } from "react";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

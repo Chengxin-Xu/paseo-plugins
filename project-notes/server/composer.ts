@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { BoardStore } from "./store";
 import { boardProjects, type ProjectDirectory } from "./dashboard";
@@ -16,7 +17,7 @@ export class ComposerLibrary {
     const needle = query.trim().toLocaleLowerCase();
     const found: ComposerNote[] = [];
     for (const entry of entries) {
-      const id = entry.snapshot.projectId, name = names.get(id) ?? "历史项目";
+      const id = entry.snapshot.projectId, name = names.get(id) ?? t("serverComposer.historicalProject");
       let index = this.indexes.get(id);
       if (!index || index.token !== entry.token || index.name !== name) {
         index = { token: entry.token, name, items: entry.snapshot.items.filter(item => !item.deletedAt).map(item => ({ item: { ...item, projectName: name }, search: `${item.title}\n${item.body}\n${name}`.toLocaleLowerCase() })) };
@@ -30,10 +31,10 @@ export class ComposerLibrary {
   async attachments(paseo: PluginHandlerContext["paseo"], query: string) {
     const result = await this.search(paseo, query, false);
     return { items: result.items.map(item => ({
-      id: `${item.projectId}:${item.id}`, identifier: `手记 #${item.id.slice(0, 8)}`, title: item.title,
-      subtitle: `${item.projectName} · ${{ task: "任务", prompt: "提示词", idea: "想法" }[item.kind]}${templateVariables(item.body).length ? " · 含模板变量，请先在提示词胶囊填参" : ""}`,
+      id: `${item.projectId}:${item.id}`, identifier: t("serverComposer.identifier", { id: item.id.slice(0, 8) }), title: item.title,
+      subtitle: t(templateVariables(item.body).length ? "serverComposer.subtitleTemplate" : "serverComposer.subtitle", { project: item.projectName, kind: { task: t("serverComposer.task"), prompt: t("serverComposer.prompt"), idea: t("serverComposer.idea") }[item.kind] }),
       url: `paseo-notes://note/${encodeURIComponent(item.projectId)}/${item.id}`,
-      text: noteContext(item), resourceType: "项目手记",
+      text: noteContext(item), resourceType: t("serverComposer.resourceType"),
     })) };
   }
 }

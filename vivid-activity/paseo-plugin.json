@@ -1,7 +1,7 @@
 {
   "id": "vivid-activity",
   "name": "Vivid Activity",
-  "description": "Redraws agent thinking and tool-call rows as color-coded activity rows with live states, folds finished runs into one summary row and times every step. Simplified Chinese interface.",
+  "description": "Redraws agent thinking and tool-call rows as color-coded activity rows with live states, folds finished runs into one summary row and times every step. English and Simplified Chinese, plus user-defined languages.",
   "icon": "assets/icon.png",
   "media": [
     "assets/screenshot-desktop-dark.png",

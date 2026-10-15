@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { randomUUID } from "node:crypto";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { ProviderSubagentSchema, providerSubagentsRpc, providerTimelineRpc } from "../shared/provider-subagents";
@@ -31,7 +32,7 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
     const envelope = record(raw);
     if (envelope.type === "paseo_close") {
       hostOpen = false;
-      for (const [id, item] of pending) if (item.sent) { pending.delete(id); clearTimeout(item.timer); item.reject(new Error("宿主未响应：插件会话已重新连接，请重试。")); }
+      for (const [id, item] of pending) if (item.sent) { pending.delete(id); clearTimeout(item.timer); item.reject(new Error(t("serverProviderSubagents.m001"))); }
       return;
     }
     if (envelope.type !== "paseo_frame" || envelope.isBinary !== false || typeof envelope.data !== "string") return;
@@ -46,16 +47,16 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
     const request = pending.get(id);
     if (!request || (message.type !== request.type && message.type !== "rpc_error")) return;
     pending.delete(id); clearTimeout(request.timer);
-    if (payload.error || message.type === "rpc_error") request.reject(new Error(errorText(payload.error || "宿主拒绝了子任务读取请求")));
+    if (payload.error || message.type === "rpc_error") request.reject(new Error(errorText(payload.error || t("serverProviderSubagents.m002"))));
     else request.resolve(payload);
   });
   /** `timeout` overrides the bridge's default for slow requests (a session restore). */
   const request = (message: Record<string, unknown>, responseType: string, timeout = timeoutMs): Promise<Record<string, unknown>> => {
-    if (disposed) return Promise.reject(new Error("子任务观察通道已关闭"));
-    if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(new Error("子任务读取繁忙，请稍后重试"));
+    if (disposed) return Promise.reject(new Error(t("serverProviderSubagents.m003")));
+    if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(new Error(t("serverProviderSubagents.m004")));
     return new Promise((resolve, reject) => {
       const requestId = `${REQUEST_PREFIX}${randomUUID()}`;
-      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error("宿主未响应子任务请求。可重试，或确认 Paseo 宿主支持子任务观察。")); }, timeout);
+      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error(t("serverProviderSubagents.m005"))); }, timeout);
       const entry = { type: responseType, resolve, reject, timer, sent: false };
       pending.set(requestId, entry);
       const send = () => {
@@ -68,17 +69,17 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
   };
   return { request, /** Requests held for a closed session (tests). */ get queued() { return waiting.size; },
     dispose() { if (disposed) return; disposed = true; unsubscribe(); waiting.clear();
-    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error("插件重新加载，子任务请求已取消")); }
+    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(t("serverProviderSubagents.m006"))); }
     pending.clear(); } };
 }
 interface ContentBudget { characters: number; nodes: number; truncated: boolean }
 /** A shared payload budget also bounds wide/nested tool outputs on mobile. */
 function boundedData(value: unknown, budget: ContentBudget, depth = 0): unknown {
-  if (depth > 8 || budget.characters <= 0 || --budget.nodes <= 0) { budget.truncated = true; return "[内容已截断]"; }
+  if (depth > 8 || budget.characters <= 0 || --budget.nodes <= 0) { budget.truncated = true; return t("serverProviderSubagents.m007"); }
   if (typeof value === "string") {
     const limit = Math.min(24000, budget.characters); const result = value.slice(0, limit);
     budget.characters -= result.length;
-    if (result.length < value.length) { budget.truncated = true; return `${result}\n… 内容已截断`; }
+    if (result.length < value.length) { budget.truncated = true; return t("serverProviderSubagents.m008", { result: result }); }
     return result;
   }
   if (Array.isArray(value)) { if (value.length > 200) budget.truncated = true; return value.slice(0, 200).map(item => boundedData(item, budget, depth + 1)); }
@@ -111,10 +112,10 @@ export function boundProviderTimeline(payload: Record<string, unknown>): Record<
       if (!limited.detail || typeof limited.detail !== "object") {
         limited.detail = { type: string(detail.type) || "unknown", command: string(detail.command).slice(0, 320),
           filePath: string(detail.filePath).slice(0, 512), description: string(detail.description).slice(0, 320),
-          output: "工具详情超出当前页容量；可在原生会话中查看。" };
+          output: t("serverProviderSubagents.m009") };
       }
     } else if (typeof item.text === "string" && typeof limited.text !== "string") {
-      limited.text = "内容超出当前页容量；可在原生会话中查看。";
+      limited.text = t("serverProviderSubagents.m010");
     }
     rows[index] = { seq: row.seqEnd, seqStart: row.seqStart, seqEnd: row.seqEnd,
       sourceSeqRanges: row.sourceRanges ?? [{ startSeq: row.seqStart, endSeq: row.seqEnd }],
@@ -135,7 +136,7 @@ export function boundProviderTimeline(payload: Record<string, unknown>): Record<
  */
 export function createProcessBridge(): ProviderBridge {
   return createProviderSubagentBridge({
-    send(message) { if (!process.send) throw new Error("当前环境没有 Paseo 宿主通道"); process.send(message); },
+    send(message) { if (!process.send) throw new Error(t("serverProviderSubagents.m011")); process.send(message); },
     listen(listener) { process.on("message", listener); return () => process.off("message", listener); },
   });
 }
@@ -143,7 +144,7 @@ export function registerProviderSubagents(server: PluginServerContext, bridge: P
   server.handle(providerSubagentsRpc, async ({ parentAgentId }) => {
     try {
       const payload = await bridge.request({ type: "agent.provider_subagents.list.request", parentAgentId }, "agent.provider_subagents.list.response");
-      if (!Array.isArray(payload.subagents)) throw new Error("宿主返回了无法识别的子任务数据");
+      if (!Array.isArray(payload.subagents)) throw new Error(t("serverProviderSubagents.m012"));
       const summaries = payload.subagents.slice(0, 500).map(value => {
         const row = record(value);
         return { ...row, title: typeof row.title === "string" ? row.title.slice(0, 240) : row.title,
@@ -152,14 +153,14 @@ export function registerProviderSubagents(server: PluginServerContext, bridge: P
           cwd: typeof row.cwd === "string" ? row.cwd.slice(0, 1024) : row.cwd };
       });
       const parsed = ProviderSubagentSchema.array().safeParse(summaries);
-      if (!parsed.success) throw new Error("子任务格式与当前宿主不兼容");
+      if (!parsed.success) throw new Error(t("serverProviderSubagents.m013"));
       return { subagents: parsed.data, error: null, truncated: payload.subagents.length > 500 };
     } catch (error) { return { subagents: [], error: errorText(error), truncated: false }; }
   });
   server.handle(providerTimelineRpc, async (input) => {
     try {
       const payload = await bridge.request({ type: "agent.provider_subagents.timeline.get.request", ...input }, "agent.provider_subagents.timeline.get.response");
-      if (!Array.isArray(payload.rows) && !Array.isArray(payload.entries)) throw new Error("宿主尚未提供此子任务的执行记录");
+      if (!Array.isArray(payload.rows) && !Array.isArray(payload.entries)) throw new Error(t("serverProviderSubagents.m014"));
       return { page: boundProviderTimeline(payload), error: null };
     } catch (error) { return { page: null, error: errorText(error) }; }
   });

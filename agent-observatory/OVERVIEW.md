@@ -1,10 +1,14 @@
 Agent Observatory is a dashboard for every Paseo agent and subagent on a host. Each session opens on its result, timeline, subtasks, diagnostics and an execution review. It adds a sidebar count of what needs you with a reason per agent, approvals and quick replies in place, an unread queue, usage statistics, token counts from local Claude Code, Codex, Grok CLI and Pi logs, every scheduled run, and optional AI reviews.
 
-The interface is in Simplified Chinese. It adds the sidebar pages Agent 观测台, 已归档会话 (archived sessions) and 定时运行 (scheduled runs), workspace and agent panels, Command Center items and `/observe`. On connect the app receives only a small stub and the badge; the rest loads when first opened.
+It adds the sidebar pages Agent Observatory, Archived sessions and Scheduled runs, workspace and agent panels, Command Center items and `/observe`. On connect the app receives only a small stub and the badge; the rest loads when first opened.
 
 ## Setup
 
-Requires Paseo 0.11.1 or later. AI reviews need the Grok CLI (signed in on the daemon host) or an enabled Paseo provider, chosen in 分析设置 (analysis settings).
+Requires Paseo 0.11.1 or later. AI reviews need the Grok CLI (signed in on the daemon host) or an enabled Paseo provider, chosen in Analysis settings.
+
+## Languages
+
+English and Simplified Chinese are built in. The device language is used unless Settings → Plugins → Agent Observatory → Language picks one; English stands in for a missing translation. A translated copy of the bundled template in `~/.paseo/plugin-data/agent-observatory/locales/` adds a language. New AI reviews answer in the chosen language.
 
 ## What it reads
 
@@ -19,7 +23,7 @@ The plugin makes no network requests of its own.
 
 ## What it writes
 
-Everything goes to `$PASEO_HOME/plugin-data/agent-observatory` (folder 0700; files 0600, bounded, replaced atomically): telemetry, statistics, token counts, usage-limit history, read receipts, preferences, review settings, reports and suggestions, the schedule and resume ledgers, the device's time zone name, and the send ledger (messages on their way, then a week of short previews).
+Everything goes to `$PASEO_HOME/plugin-data/agent-observatory` (folder 0700; files 0600, bounded, replaced atomically): telemetry, statistics, token counts, usage-limit history, read receipts, preferences, review settings, reports and suggestions, the schedule and resume ledgers, the device's time zone name, the send ledger (messages on their way, then a week of short previews), the language state and translation templates.
 
 The schedule ledger keeps run times, status, ids, the host's error messages (300 characters), links without credentials, schedule names and cadences, never replies or prompts. Usage-limit history keys accounts by a hashed name. Telemetry keeps why a turn stopped and a merge or pull request link, never the reply. Reports can quote sessions.
 
@@ -37,11 +41,11 @@ Some use daemon messages the plugin API lacks, over its own daemon connection. I
 
 ## AI reviews
 
-Nothing is reviewed until you start a review; automatic reviews are off by default. A review sends a bounded session excerpt (prompts, replies, tool calls and output; at most 180 entries, about 120,000 characters) with project and agent metadata to the chosen model. Common credential formats are masked first, and again in stored reports, but not exhaustively. Suggestions (建议) send recent report summaries the same way.
+Nothing is reviewed until you start a review; automatic reviews are off by default. A review sends a bounded session excerpt (prompts, replies, tool calls and output; at most 180 entries, about 120,000 characters) with project and agent metadata to the chosen model. Common credential formats are masked first, and again in stored reports, but not exhaustively. Suggestions send recent report summaries the same way.
 
 - Grok CLI: `grok` runs in a fresh temporary directory with every built-in tool removed, tool calls denied, web search, memory and session search off, and no other providers' keys in its environment; the excerpt passes through a temporary file. Afterwards the plugin deletes the directory, the saved session and its record in Grok's session-search index. It is the only subprocess the plugin starts.
 - A Paseo profile or provider: a temporary sub-agent of the reviewed agent in its workspace, in a read-only mode or Claude Code's Always Ask, where approvals are denied but actions needing none, such as reading files, still run (unmasked). It is archived afterwards; its conversation stays in the host's and the provider's logs, and its usage counts against that provider.
-- 自动选择 (automatic, the default) uses the Grok CLI when found, otherwise an enabled Claude Code or Codex provider.
+- Choose automatically (the default) uses the Grok CLI when found, otherwise an enabled Claude Code or Codex provider.
 
 ## Limits
 

@@ -1,3 +1,5 @@
+import { onTextChange } from "../shared/i18n";
+import { t } from "../shared/text";
 import { memo, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type LayoutChangeEvent, type TextStyle, type ViewStyle } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -17,7 +19,7 @@ export function DeltaChip({ theme, current, previous, invert = false, size = "sm
   if (!Number.isFinite(current) || !Number.isFinite(previous) || (current === 0 && previous === 0)) return null;
   const up = current >= previous, good = invert ? !up : up;
   const change = previous === 0 ? null : Math.abs(current - previous) / previous;
-  const label = change === null ? "新增" : change < 0.001 ? "持平" : `${(change * 100).toFixed(change >= 0.1 ? 0 : 1)}%`;
+  const label = change === null ? t("coreCharts.new") : change < 0.001 ? t("coreCharts.unchanged") : `${(change * 100).toFixed(change >= 0.1 ? 0 : 1)}%`;
   const color = change !== null && change < 0.001 ? theme.colors.foregroundMuted : hue(theme, good ? "green" : "red", "text");
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 2, alignSelf: "flex-start", paddingHorizontal: 5, height: size === "sm" ? 18 : 22, borderRadius: radius.full, backgroundColor: withAlpha(color, 0.14) }}>
     {change === null || change >= 0.001 ? <Icon name={up ? "TrendingUp" : "TrendingDown"} size={size === "sm" ? 11 : 13} color={color} /> : null}
@@ -111,7 +113,7 @@ export function TrendChart({ theme, points, color, lineColor, forecast = [], hei
       {[0, 0.5, 1].filter(step => step === 0 || format(peak * step) !== format(peak * (step - 0.5))).map(step => <Text key={step} style={[axisText(theme), { position: "absolute", left: 0, width: axisWidth - 6, textAlign: "right", top: y(peak * step) - 7 }]}>{format(peak * step)}</Text>)}
       {width > 0 ? all.map((point, index) => {
         const future = index >= points.length, barHeight = point.value > 0 ? Math.max(3, point.value / peak * plot) : 0;
-        return <Pressable key={index} accessibilityRole="button" accessibilityLabel={`${point.label} ${format(point.value)}${future ? "（预测）" : ""}`} onPress={() => setSelected(index)}
+        return <Pressable key={index} accessibilityRole="button" accessibilityLabel={t("coreCharts.pointDescription", { label: point.label, value: format(point.value), projection: future ? t("coreCharts.projected") : "" })} onPress={() => setSelected(index)}
           style={{ position: "absolute", left: axisWidth + column * index, width: column, top, height: plot, alignItems: "center", justifyContent: "flex-end", backgroundColor: index === shown ? withAlpha(hue(theme, color), 0.08) : "transparent", borderRadius: radius.sm }}>
           {barHeight ? <Grow delay={Math.min(index, 40) * 12} style={[{ width: barWidth, height: barHeight, borderTopLeftRadius: 4, borderTopRightRadius: 4 },
             future ? { borderWidth: 1, borderStyle: "dashed", borderColor: hue(theme, color), backgroundColor: withAlpha(hue(theme, color), 0.12) } : gradient(theme, [hue(theme, color), withAlpha(hue(theme, color), 0.35)], { angle: 180 })]} /> : null}
@@ -124,10 +126,10 @@ export function TrendChart({ theme, points, color, lineColor, forecast = [], hei
     </View>
     {active ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
       <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: hue(theme, color) }} />
-      <Text style={{ color: theme.colors.foreground, fontSize: fontSize.small, fontWeight: "600" }}>{active.label}{shown >= points.length ? "（预测）" : ""}</Text>
+      <Text style={{ color: theme.colors.foreground, fontSize: fontSize.small, fontWeight: "600" }}>{active.label}{shown >= points.length ? t("coreCharts.projected") : ""}</Text>
       <Text style={{ color: hue(theme, color, "text"), fontSize: fontSize.small, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{format(active.value)}</Text>
       {active.detail ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{active.detail}</Text> : null}
-      {average && shown < points.length ? <><View style={{ width: 10, height: 2.5, borderRadius: 2, backgroundColor: line }} /><Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>7 日均 {format(averages[shown] ?? 0)}</Text></> : null}
+      {average && shown < points.length ? <><View style={{ width: 10, height: 2.5, borderRadius: 2, backgroundColor: line }} /><Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("coreCharts.value7DayAverage", { value1: format(averages[shown] ?? 0) })}</Text></> : null}
     </View> : null}
   </View>;
 }
@@ -152,7 +154,7 @@ export function StackedColumns({ theme, columns, colors, names, height = 150, fo
       {[0.5, 1].map(step => <Text key={step} style={[axisText(theme), { position: "absolute", left: 0, width: axisWidth - 6, textAlign: "right", bottom: 18 + step * height - 7 }]}>{format(peak * step)}</Text>)}
       {width > 0 ? columns.map((column, index) => {
         let base = 0;
-        return <Pressable key={index} accessibilityRole="button" accessibilityLabel={`${column.label} ${format(totals[index]!)}`} onPress={() => setSelected(index)}
+        return <Pressable key={index} accessibilityRole="button" accessibilityLabel={t("coreCharts.columnDescription", { label: column.label, value: format(totals[index]!) })} onPress={() => setSelected(index)}
           style={{ position: "absolute", left: axisWidth + index * slot, width: slot, bottom: 18, height, alignItems: "center", backgroundColor: index === shown ? withAlpha(theme.colors.foreground, 0.05) : "transparent", borderRadius: radius.sm }}>
           <Grow delay={Math.min(index, 40) * 10} style={{ position: "absolute", bottom: 0, width: barWidth, height: totals[index]! > 0 ? Math.max(2, totals[index]! / peak * height) : 0, borderTopLeftRadius: 3, borderTopRightRadius: 3, overflow: "hidden",
             ...(index === highlight ? { borderWidth: 1.5, borderColor: theme.colors.foreground } : {}) }}>
@@ -172,7 +174,7 @@ export function StackedColumns({ theme, columns, colors, names, height = 150, fo
   </View>;
 }
 
-const weekdayNames = ["一", "二", "三", "四", "五", "六", "日"];
+let weekdayNames = [t("coreCharts.mon"), t("coreCharts.tue"), t("coreCharts.wed"), t("coreCharts.thu"), t("coreCharts.fri"), t("coreCharts.sat"), t("coreCharts.sun")];
 const dayMs = 86_400_000;
 const addDays = (day: string, days: number) => new Date(Date.parse(`${day}T00:00:00.000Z`) + days * dayMs).toISOString().slice(0, 10);
 /** Four intensity tiers from the non-zero values (quartiles), so a single busy day does not wash out the rest. */
@@ -206,7 +208,7 @@ export function CalendarHeatmap({ theme, start, values, secondary, color, maxWee
     if (week !== firstWeek && Number(addDays(start, (week - 1) * 7).slice(5, 7)) === month) continue;
     // A month that starts right after the first column would overlap the partial first month's label.
     if (months.length && week - firstWeek - months.at(-1)!.week < 3) months.pop();
-    months.push({ week: week - firstWeek, label: `${month}月` });
+    months.push({ week: week - firstWeek, label: t("coreCharts.month", { value1: month }) });
   }
   return <View onLayout={onLayout} style={{ gap: 4 }}>
     <View style={{ height: 14, marginLeft: labelWidth }}>
@@ -226,7 +228,7 @@ export function CalendarHeatmap({ theme, start, values, secondary, color, maxWee
     </View>
   </View>;
 }
-export function HeatLegend({ theme, color, low = "少", high = "多" }: { theme: PluginTheme; color: Hue; low?: string; high?: string }) {
+export function HeatLegend({ theme, color, low = t("coreCharts.less"), high = t("coreCharts.more") }: { theme: PluginTheme; color: Hue; low?: string; high?: string }) {
   const base = hue(theme, color);
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
     <Text style={[axisText(theme), { marginRight: 2 }]}>{low}</Text>
@@ -308,3 +310,6 @@ export function Card({ theme, title, icon, color, trailing, children, padded = t
     </View>
   </View>;
 }
+
+// Refresh the shared label array when a catalog is first bound or its language changes.
+onTextChange(() => { weekdayNames = [t("coreCharts.mon"), t("coreCharts.tue"), t("coreCharts.wed"), t("coreCharts.thu"), t("coreCharts.fri"), t("coreCharts.sat"), t("coreCharts.sun")]; });

@@ -1,3 +1,4 @@
+import { t, type MessageId } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { weekdayNames } from "./stats-view";
@@ -117,7 +118,7 @@ export const getQuota = defineRpc({
 export type QuotaState = QuotaSnapshot & { revision?: string };
 export function mergeQuota(previous: QuotaState | undefined, response: QuotaResponse): QuotaState {
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return { ...snapshot, revision: response.revision }; }
-  if (!previous) throw new Error("本地额度缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedQuota.m001"));
   return previous;
 }
 
@@ -131,17 +132,17 @@ export function quotaWindowDuration(id: string): number | null {
   return seconds && Number(seconds[1]) > 0 ? Number(seconds[1]) * 1000 : null;
 }
 function lengthName(seconds: number): string {
-  for (const [size, unit] of [[86_400, "天"], [3600, "小时"], [60, "分钟"]] as const) if (seconds % size === 0) return `${seconds / size} ${unit}`;
-  return `${seconds} 秒`;
+  for (const [size, unit] of [[86_400, "sharedQuota.m002"], [3600, "sharedQuota.m003"], [60, "sharedQuota.m004"]] as const) if (seconds % size === 0) return t(unit as MessageId, { count: seconds / size });
+  return t("sharedQuota.m005", { seconds: seconds, count: seconds });
 }
 /** Chinese window name from the id, keeping a scope or model name from the provider's label ("Weekly · Opus" → 每周 · Opus). */
 export function quotaWindowLabel(id: string, label: string): string {
   const scoped = id.includes(":"), period = periodOf(id), parts = label.split(" · ").map(part => part.trim()).filter(Boolean);
   const scope = scoped && parts.length > 1 ? parts[0]! : null, detail = parts.length > 1 ? parts.slice(1).join(" · ") : null;
   const seconds = /^(\d{1,9})s$/.exec(period);
-  const name = period === "five_hour" ? "5 小时" : period === "weekly" ? "每周"
-    : period.startsWith("weekly_") ? `每周 · ${detail ?? period.slice(7).replace(/^(?:model|surface)_/, "")}`
-    : period === "monthly" ? "每月" : period === "unknown_primary" ? "主要额度" : period === "unknown_secondary" ? "次要额度"
+  const name = period === "five_hour" ? t("sharedQuota.m006") : period === "weekly" ? t("sharedQuota.m007")
+    : period.startsWith("weekly_") ? t("sharedQuota.m008", { value1: detail ?? period.slice(7).replace(/^(?:model|surface)_/, "") })
+    : period === "monthly" ? t("sharedQuota.m009") : period === "unknown_primary" ? t("sharedQuota.m010") : period === "unknown_secondary" ? t("sharedQuota.m011")
     : seconds && Number(seconds[1]) > 0 ? lengthName(Number(seconds[1])) : (scoped ? detail : label.trim()) || period;
   return (scope ? `${scope} · ${name}` : name).slice(0, 80);
 }
@@ -195,10 +196,10 @@ const dayStart = (at: number) => { const date = new Date(at); return new Date(da
 export function quotaWhen(at: number, now: number): string {
   const days = Math.round((dayStart(at) - dayStart(now)) / DAY_MS), date = new Date(at), clock = clockText(at);
   if (days === 0) return clock;
-  if (days === 1) return `明天 ${clock}`;
-  if (days === -1) return `昨天 ${clock}`;
+  if (days === 1) return t("sharedQuota.m012", { clock: clock });
+  if (days === -1) return t("sharedQuota.m013", { clock: clock });
   if (days > 1 && days < 7) return `${weekdayNames[(date.getDay() + 6) % 7]} ${clock}`;
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
+  return t("sharedQuota.m014", { value1: date.getMonth() + 1, value2: date.getDate(), clock: clock });
 }
 
 export interface QuotaForecastLine { text: string; kind: "alarm" | "warning" | "calm" | "muted"; icon: string }
@@ -209,18 +210,18 @@ export interface QuotaReading { at: number | null; current: boolean }
  * from an older reading says which one and is never an alarm (codex-F8): 据 08:30 的读数推算，可能已经用完.
  */
 export function quotaForecastText(window: QuotaWindow, now: number, reading: QuotaReading = { at: null, current: true }): QuotaForecastLine | null {
-  if (quotaWindowReset(window, now)) return { text: "已重置，等新读数", kind: "muted", icon: "RotateCcw" };
-  const forecast = window.forecast, period = window.durationMs === 7 * DAY_MS ? "本周" : "目前的";
+  if (quotaWindowReset(window, now)) return { text: t("sharedQuota.m015"), kind: "muted", icon: "RotateCcw" };
+  const forecast = window.forecast, period = window.durationMs === 7 * DAY_MS ? t("sharedQuota.m016") : t("sharedQuota.m017");
   if (!forecast) return null;
-  const old = !reading.current, source = reading.at === null ? "据过期的读数" : `据 ${quotaWhen(reading.at, now)} 的读数`;
+  const old = !reading.current, source = reading.at === null ? t("sharedQuota.m018") : t("sharedQuota.m019", { value1: quotaWhen(reading.at, now) });
   // An older reading still bounds the use from below (it only rises until the reset), so 已用完 stays true; a rate is a guess.
-  const loud = (text: string, icon: string): QuotaForecastLine => old ? { text: `${source}，${text}`, kind: "warning", icon: "History" } : { text, kind: "alarm", icon };
-  if (forecast.kind === "exhausted") return loud(window.resetsAt ? `已用完，${quotaWhen(Date.parse(window.resetsAt), now)} 重置` : "已用完", "BatteryWarning");
-  if (forecast.kind === "idle") return { text: old ? `${source}，最近 30 分钟没有消耗` : "最近 30 分钟没有消耗", kind: "muted", icon: "Pause" };
-  const how = forecast.method === "pace" ? `按${period}节奏` : "按当前速度";
-  if (forecast.kind === "exhaust") { const at = Date.parse(forecast.at); return at > now ? loud(`${how} ${quotaWhen(at, now)} 用完`, "AlarmClock") : loud(old ? `${how}推算可能已经用完` : `${how}，可能已经用完`, "AlarmClock"); }
-  const text = `${how}，重置时约 ${Math.round(forecast.pct)}%`;
-  return old ? { text: `${source}，${text}`, kind: "muted", icon: "History" } : { text, kind: forecast.pct >= 90 ? "warning" : "calm", icon: "TrendingUp" };
+  const loud = (text: string, icon: string): QuotaForecastLine => old ? { text: t("sharedQuota.m020", { source: source, text: text }), kind: "warning", icon: "History" } : { text, kind: "alarm", icon };
+  if (forecast.kind === "exhausted") return loud(window.resetsAt ? t("sharedQuota.m021", { value1: quotaWhen(Date.parse(window.resetsAt), now) }) : t("sharedQuota.m022"), "BatteryWarning");
+  if (forecast.kind === "idle") return { text: old ? t("sharedQuota.m023", { source: source }) : t("sharedQuota.m024"), kind: "muted", icon: "Pause" };
+  const how = forecast.method === "pace" ? t("sharedQuota.m025", { period: period }) : t("sharedQuota.m026");
+  if (forecast.kind === "exhaust") { const at = Date.parse(forecast.at); return at > now ? loud(t("sharedQuota.m027", { how: how, value2: quotaWhen(at, now) }), "AlarmClock") : loud(old ? t("sharedQuota.m028", { how: how }) : t("sharedQuota.m029", { how: how }), "AlarmClock"); }
+  const text = t("sharedQuota.m030", { how: how, value2: Math.round(forecast.pct) });
+  return old ? { text: t("sharedQuota.m031", { source: source, text: text }), kind: "muted", icon: "History" } : { text, kind: forecast.pct >= 90 ? "warning" : "calm", icon: "TrendingUp" };
 }
 
 /** The 看板 chip's content: what it says and how loud it is (client/quota-card.tsx draws it). */
@@ -236,14 +237,14 @@ export interface QuotaChipSummary {
 }
 export function quotaChipSummary(pick: QuotaPick, accounts: number, now: number): QuotaChipSummary {
   const { account, window, stale } = pick, readingAt = account.readingAt === null ? null : Date.parse(account.readingAt);
-  const label = accounts > 1 ? `${account.name} · ${window.label}` : `额度 · ${window.label}`, value = `${Math.round(window.usedPct ?? 0)}%`;
+  const label = accounts > 1 ? `${account.name} · ${window.label}` : t("sharedQuota.m032", { value1: window.label }), value = `${Math.round(window.usedPct ?? 0)}%`;
   if (stale) {
-    const tail = readingAt !== null && Number.isFinite(readingAt) ? `读数 ${quotaWhen(readingAt, now)}` : "读数已过期";
+    const tail = readingAt !== null && Number.isFinite(readingAt) ? t("sharedQuota.m033", { value1: quotaWhen(readingAt, now) }) : t("sharedQuota.m034");
     return { label, value, tail: { text: tail, kind: "stale" }, alarm: false, tone: window.tone === "danger" || window.tone === "warning" ? "warning" : "neutral", stale,
-      accessibilityLabel: `${label}已用 ${value}，${tail}，不是当前读数` };
+      accessibilityLabel: t("sharedQuota.m035", { label: label, value: value, tail: tail }) };
   }
   const forecast = window.forecast, line = quotaForecastText(window, now, { at: readingAt, current: true });
-  const tail = forecast?.kind === "exhaust" ? Date.parse(forecast.at) > now ? `${quotaWhen(Date.parse(forecast.at), now)} 用完` : "可能已用完" : forecast?.kind === "exhausted" ? "已用完" : null;
+  const tail = forecast?.kind === "exhaust" ? Date.parse(forecast.at) > now ? t("sharedQuota.m036", { value1: quotaWhen(Date.parse(forecast.at), now) }) : t("sharedQuota.m037") : forecast?.kind === "exhausted" ? t("sharedQuota.m038") : null;
   return { label, value, tail: tail ? { text: tail, kind: "alarm" } : null, alarm: window.alarm, tone: window.tone, stale,
-    accessibilityLabel: `${label}已用 ${value}${line && line.kind !== "muted" ? `，${line.text}` : ""}` };
+    accessibilityLabel: t("sharedQuota.m039", { label: label, value: value, value3: line && line.kind !== "muted" ? t("sharedQuota.m040", { value1: line.text }) : "" }) };
 }

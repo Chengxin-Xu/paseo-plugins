@@ -1,3 +1,5 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 /**
  * 就地审批 (opus-B12): a permission request as the host gives it (`agent.pendingPermissions[]`, Paseo 0.11.1), reduced to what
  * the approval panel shows, and the exact `respondToPermission` answer for each choice. Pure apart from `answerPermission`,
@@ -72,7 +74,7 @@ export interface PermissionView {
 }
 
 /** Sent with a denial so the Agent (and the conversation) can tell who said no. */
-export const DENY_MESSAGE = "用户在 Agent 观测台拒绝了这次请求。";
+export let DENY_MESSAGE = t("sharedPermissions.m001");
 /** Providers whose answer ignores `interrupt` (OpenCode, omp): 拒绝并中断 is not offered for them. */
 const NO_INTERRUPT: ReadonlySet<string> = new Set(["opencode", "omp"]);
 /**
@@ -93,7 +95,7 @@ const cutAt = (value: string, max: number) => value.length <= max ? value : valu
 
 /** Ids and labels that make a choice outlast this request. ACP's own option kind decides first when the request carries it. */
 const LASTING_ID = /always|forever|permanent|session|remember|(allow|accept|approve|reject|deny)[_-]?all/i;
-const LASTING_LABEL = /\b(always|forever|permanently|remember|for (this|the) (session|project|workspace|repo|repository|directory|folder|conversation|chat)|this session|all sessions|don'?t ask( again)?|do not ask|never ask|from now on|every time|auto[- ]?approve)\b|总是|始终|永远|一直|以后|每次|不再(询问|提示|问)|记住|本会话|会话内|此会话|这个会话|整个会话|自动(批准|允许)/i;
+const LASTING_LABEL = /\b(always|forever|permanently|remember|for (this|the) (session|project|workspace|repo|repository|directory|folder|conversation|chat)|this session|all sessions|don'?t ask( again)?|do not ask|never ask|from now on|every time|auto[- ]?approve)\b|总是|始终|永远|一直|以后|每次|不再(询问|提示|问)|记住|本会话|会话内|此会话|这个会话|整个会话|自动(批准|允许)/i; // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 export function isLastingAction(action: { id: string; label?: string | null }, acpKind?: string | null): boolean {
   return /_always$/i.test(acpKind ?? "") || LASTING_ID.test(action.id) || LASTING_LABEL.test(action.label ?? "");
 }
@@ -119,12 +121,12 @@ export function permissionChoices(value: unknown): PermissionChoice[] {
   const choices: PermissionChoice[] = actions.length
     ? actions.map(action => ({ key: `action:${action.id}`, label: action.label, behavior: action.behavior, lasting: isLastingAction(action, action.acpKind), interrupt: false, fromProvider: true,
       response: action.behavior === "allow" ? { behavior: "allow" as const, selectedActionId: action.id } : { behavior: "deny" as const, selectedActionId: action.id } }))
-    : [{ key: "allow", label: "批准", behavior: "allow", lasting: false, interrupt: false, fromProvider: false, response: { behavior: "allow" } },
-      { key: "deny", label: "拒绝", behavior: "deny", lasting: false, interrupt: false, fromProvider: false, response: { behavior: "deny", message: DENY_MESSAGE } }];
+    : [{ key: "allow", label: t("sharedPermissions.m002"), behavior: "allow", lasting: false, interrupt: false, fromProvider: false, response: { behavior: "allow" } },
+      { key: "deny", label: t("sharedPermissions.m003"), behavior: "deny", lasting: false, interrupt: false, fromProvider: false, response: { behavior: "deny", message: DENY_MESSAGE } }];
   // With actions, the denial is named by id: unnamed, an ACP daemon could pick a lasting reject_always.
   const onceDeny = actions.find(action => action.behavior === "deny" && !isLastingAction(action, action.acpKind));
   if (interruptible && (onceDeny || !actions.some(action => action.behavior === "deny"))) {
-    choices.push({ key: "deny-interrupt", label: "拒绝并中断", behavior: "deny", lasting: false, interrupt: true, fromProvider: false,
+    choices.push({ key: "deny-interrupt", label: t("sharedPermissions.m004"), behavior: "deny", lasting: false, interrupt: true, fromProvider: false,
       response: { behavior: "deny", interrupt: true, message: DENY_MESSAGE, ...(onceDeny ? { selectedActionId: onceDeny.id } : {}) } });
   }
   const rank = (choice: PermissionChoice) => choice.interrupt ? 3 : choice.lasting ? 2 : choice.behavior === "allow" ? 0 : 1;
@@ -173,7 +175,7 @@ export function permissionView(value: unknown, agentCwd?: string | null): Permis
   const kind: PermissionKind = ["tool", "plan", "question", "mode", "other"].includes(String(request.kind)) ? request.kind as PermissionKind : "other";
   const input = object(request.input), detail = object(request.detail), type = String(detail.type ?? "");
   const actions = providerActions(request);
-  const name = line(request.name, 80), title = line(request.title, 200) ?? name ?? (kind === "mode" ? "切换模式" : "工具调用");
+  const name = line(request.name, 80), title = line(request.title, 200) ?? name ?? (kind === "mode" ? t("sharedPermissions.m005") : t("sharedPermissions.m006"));
   // What the panel shows on lines of its own; a search, glob or grep without a mapped detail is known by its query or pattern.
   const own = {
     command: type === "shell" ? whole(detail.command) : whole(input.command) ?? whole(input.cmd),
@@ -259,3 +261,8 @@ export async function answerPermission(handle: PermissionHandle, requestId: stri
   }
   return answered ? { kind: "answered", stillRunning: true } : { kind: "unconfirmed" };
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  DENY_MESSAGE = t("sharedPermissions.m001");
+});

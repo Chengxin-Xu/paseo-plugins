@@ -1,3 +1,5 @@
+import { currentLanguage } from "../shared/i18n";
+import { t } from "../shared/text";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -31,17 +33,17 @@ export function useSteerableProviders(enabled: boolean) {
 }
 
 type Finding = InsightReport["findings"][number];
-const severityNames: Record<Finding["severity"], string> = { high: "高优先级", medium: "中优先级", low: "低优先级" };
+const severityNames: Record<Finding["severity"], string> = { get high() { return t("coreInsightActions.highPriority"); }, get medium() { return t("coreInsightActions.mediumPriority"); }, get low() { return t("coreInsightActions.lowPriority"); } };
 
 /** The follow-up an analysed Agent receives for one finding; the user edits it before sending. */
 export function findingMessage(finding: Finding): string {
-  return [`观测台分析在你的执行记录里发现一个问题，请先评估再处理：`, "", `【${finding.title}】（${severityNames[finding.severity]}）`, finding.detail, "",
-    `建议：${finding.recommendation}`, "", "如果你判断这不是问题，请说明理由；如果需要改动，完成后说明验证方式。"].join("\n");
+  return [t("coreInsightActions.observatoryAnalysisFoundAnIssueInYour"), "", t("coreInsightActions.message", { value1: finding.title, value2: severityNames[finding.severity] }), finding.detail, "",
+    t("coreInsightActions.recommendation", { value1: finding.recommendation }), "", t("coreInsightActions.ifYouDecideThisIsNotAn")].join("\n");
 }
 /** A task prompt for a suggestion without one. */
 export function actionPrompt(action: SuggestionAction): string {
-  return action.task ?? [action.title, "", action.why, ...(action.steps.length ? ["", "步骤：", ...action.steps.map((step, index) => `${index + 1}. ${step}`)] : []),
-    ...(action.instruction ? ["", "需要写进说明的规则：", action.instruction] : [])].join("\n");
+  return action.task ?? [action.title, "", action.why, ...(action.steps.length ? ["", t("coreInsightActions.steps"), ...action.steps.map((step, index) => `${index + 1}. ${step}`)] : []),
+    ...(action.instruction ? ["", t("coreInsightActions.rulesToAddToTheInstructions"), action.instruction] : [])].join("\n");
 }
 
 /** A message that certainly never went out: the text is free to be sent again, under a new id. */
@@ -49,6 +51,7 @@ const NEVER_SENT: ReadonlySet<DeferredView["state"]> = new Set(["canceled", "dis
 /** The ledger's rows for findings sent to an Agent, here and beside the analysis. */
 export const isFindingMessage = (view: DeferredView) => view.source.startsWith(SOURCES.finding);
 /** How a finding's message is named in the ledger's list: its row shows beside that finding's 发给这个 Agent. */
+// i18n-ignore: persisted ledger source format matches existing messages across language changes.
 export const findingSource = (finding: Pick<Finding, "title">) => `${SOURCES.finding}「${finding.title}」`.slice(0, 200);
 type Problem = { tone: "danger" | "warning"; message: string; retry: boolean };
 
@@ -79,7 +82,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   useEffect(() => {
     if (!open || !capabilities) return;
     let live = true;
-    void checkSend(paseo, { agentId, text: text.trim(), what: "消息" }, capabilities).then(next => { if (live) setCheck(next); }).catch(() => { if (live) setCheck(null); });
+    void checkSend(paseo, { agentId, text: text.trim(), what: t("coreInsightActions.message2") }, capabilities).then(next => { if (live) setCheck(next); }).catch(() => { if (live) setCheck(null); });
     return () => { live = false; };
     // A slash command plans differently; any other edit does not change the plan.
   }, [open, agentId, capabilities, slash]);
@@ -98,7 +101,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   const current = (): OutgoingMessage => {
     const kept = message.current, record = kept && listed.current.find(view => view.messageId === kept.messageId);
     if (!kept || kept.text !== body || record && NEVER_SENT.has(record.state))
-      message.current = outgoingMessage(agentId, body, { what: "消息", key, source: findingSource({ title: finding?.title ?? body.split("\n")[0]! }), messageId: requestId(agentId, key, listed.current) });
+      message.current = outgoingMessage(agentId, body, { what: t("coreInsightActions.message2"), key, source: findingSource({ title: finding?.title ?? body.split("\n")[0]! }), messageId: requestId(agentId, key, listed.current) });
     return message.current!;
   };
   /** Whether the list drawn last shows this text on its way, or this sheet's message settled: then nothing is sent again. */
@@ -109,7 +112,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   const lost = (next: OutgoingMessage, reason: unknown) => {
     if (next.tried) rememberUnanswered(agentId, next.key, next.messageId);
     const words = (reason instanceof Error ? reason.message : String(reason)).replace(/[。.]$/, "");
-    setProblem({ tone: "danger", retry: true, message: next.tried ? `没有收到发送结果：${words}。下方列出这条消息就是已经交给 Agent 了；没有列出可以再点一次，按原来的编号重试，不会发两份。` : words });
+    setProblem({ tone: "danger", retry: true, message: next.tried ? t("coreInsightActions.noSendResultReceivedIfTheMessage", { value1: words }) : words });
   };
   /**
    * The ledger's answer for this message, sent now or queued, by its state (codex-obs-send-ui-R2): sent, or queued to go out
@@ -120,7 +123,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   const answeredWith = (next: OutgoingMessage, view: DeferredView, sentWords: string) => {
     if (view.messageId !== next.messageId) {
       // Sent a moment ago or on its way: its row below says so.
-      toast.show(view.state === "sent" ? "这条消息刚刚已经发出。" : `这条消息${onItsWayLabel(view)}，见下方。`, { variant: view.state === "maybe-sent" ? "warning" : "success" });
+      toast.show(view.state === "sent" ? t("coreInsightActions.thisMessageWasJustSent") : t("coreInsightActions.thisMessageSeeBelow", { value1: onItsWayLabel(view) }), { variant: view.state === "maybe-sent" ? "warning" : "success" });
       if (view.state === "sent") onClose();
       return;
     }
@@ -135,7 +138,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   };
   const answered = (next: OutgoingMessage, answer: LedgerAnswer, plan: SendPlan) => {
     if ("message" in answer) { setProblem({ tone: answer.status === "busy" ? "warning" : "danger", message: answer.message, retry: answer.status === "busy" }); return; }
-    answeredWith(next, answer.view, plan.kind === "steer" ? `已插进「${agentTitle}」当前这一轮` : `已发给「${agentTitle}」`);
+    answeredWith(next, answer.view, plan.kind === "steer" ? t("coreInsightActions.joinedSCurrentTurn", { value1: agentTitle }) : t("coreInsightActions.sentTo", { value1: agentTitle }));
   };
   const send = async (consent: Consent | null = null) => {
     if (!capabilities || !body || busy) return;
@@ -164,7 +167,7 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
       const view = await deferred.enqueue(ledgerInput(next));
       settleRequest(agentId, next.key);
       setConfirming(null);
-      answeredWith(next, view, `已发给「${agentTitle}」`);
+      answeredWith(next, view, t("coreInsightActions.sentTo", { value1: agentTitle }));
     } catch (reason) {
       setConfirming(null);
       lost(next, reason);
@@ -172,22 +175,22 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   };
   const plan = confirming?.check.plan ?? check?.plan, offer = confirming?.offer;
   const locked = !!onWay || !!delivered;
-  return <Sheet title="发给这个 Agent" open={open} onClose={onClose}>
-    <MetaLine theme={theme} numberOfLines={2} parts={[`「${agentTitle}」会在原会话里收到这条消息并继续执行`, plan?.note]} />
-    <TextField theme={theme} label="消息" value={text} onChangeText={setText} multiline minHeight={200} />
+  return <Sheet title={t("coreInsightActions.sendToThisAgent")} open={open} onClose={onClose}>
+    <MetaLine theme={theme} numberOfLines={2} parts={[t("coreInsightActions.willReceiveThisMessageInItsOriginal", { value1: agentTitle }), plan?.note]} />
+    <TextField theme={theme} label={t("coreInsightActions.message2")} value={text} onChangeText={setText} multiline minHeight={200} />
     {confirming?.check.plan.confirm ? <Banner theme={theme} tone="warning" message={confirming.check.plan.confirm} /> : null}
-    {offer ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{`「${offer.label}」：${offer.note}。`}</Text> : null}
+    {offer ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("coreInsightActions.message3", { value1: offer.label, value2: offer.note })}</Text> : null}
     {problem ? <Banner theme={theme} tone={problem.tone} message={problem.message} /> : null}
-    {delivered ? <Banner theme={theme} tone={delivered.state === "sent" ? "success" : "warning"} message={delivered.state === "sent" ? "这条消息已经送达。改一下内容就是一条新消息。" : "这条消息可能已经送达，请先打开会话看一下，不要直接重发。"} /> : null}
+    {delivered ? <Banner theme={theme} tone={delivered.state === "sent" ? "success" : "warning"} message={delivered.state === "sent" ? t("coreInsightActions.thisMessageHasBeenDeliveredEditingIts") : t("coreInsightActions.thisMessageMayAlreadyHaveArrivedOpen")} /> : null}
     <DeferredList theme={theme} queue={deferred} only={isFindingMessage} />
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, justifyContent: "flex-end" }}>
       {confirming ? <>
-        <Button theme={theme} label="取消" onPress={() => setConfirming(null)} />
+        <Button theme={theme} label={t("coreInsightActions.cancel")} onPress={() => setConfirming(null)} />
         {offer ? <Button theme={theme} tone="info" icon="Clock3" label={offer.label} busy={busy} disabled={busy || locked} onPress={() => void defer()} /> : null}
         <Button theme={theme} variant="danger" icon="Send" label={confirming.check.plan.label} busy={busy} disabled={busy || !body || !capabilities || locked} onPress={() => void send(confirming.consent)} />
       </> : <>
-        <Button theme={theme} label="取消" onPress={onClose} />
-        <Button theme={theme} variant="primary" icon="Send" label={onWay ? onItsWayLabel(onWay) : problem?.retry ? "重试" : plan?.kind === "steer" ? "插入这一轮" : "发送"} busy={busy}
+        <Button theme={theme} label={t("coreInsightActions.cancel")} onPress={onClose} />
+        <Button theme={theme} variant="primary" icon="Send" label={onWay ? onItsWayLabel(onWay) : problem?.retry ? t("coreInsightActions.retry") : plan?.kind === "steer" ? t("coreInsightActions.joinThisTurn") : t("coreInsightActions.send")} busy={busy}
           disabled={busy || !body || !capabilities || plan?.kind === "unavailable" || locked} onPress={() => void send()} />
       </>}
     </View>
@@ -204,7 +207,7 @@ export function projectWorkspaces(agents: readonly AgentRecord[]) {
     const current = byProject.get(agent.projectName);
     if (!current || rank(agent) > rank(current) || rank(agent) === rank(current) && (agent.lastActivityAt ?? "") > (current.lastActivityAt ?? "")) byProject.set(agent.projectName, agent);
   }
-  return [...byProject.values()].sort((a, b) => a.projectName.localeCompare(b.projectName, "zh-CN"));
+  return [...byProject.values()].sort((a, b) => a.projectName.localeCompare(b.projectName, currentLanguage()));
 }
 
 /**
@@ -242,41 +245,41 @@ export function HandoffSheet({ theme, open, onClose, action, agents, onCreated }
         config: { provider: providerModelId(profile.provider, model), ...(profile.modeId ? { modeId: profile.modeId } : {}),
           ...(profile.thinkingOptionId ? { thinkingOptionId: profile.thinkingOptionId } : {}), ...(profile.featureValues ? { featureValues: profile.featureValues } : {}) },
         prompt: text.trim(), title: action.title.slice(0, 60), labels: { "observatory.from-suggestion": action.id.slice(0, 80) } });
-      toast.show(`已交给新 Agent：${action.title}`, { variant: "success" }); onCreated(handle.id); onClose();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "创建失败"); }
+      toast.show(t("coreInsightActions.assignedToANewAgent", { value1: action.title }), { variant: "success" }); onCreated(handle.id); onClose();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t("coreInsightActions.couldNotCreate")); }
     finally { setBusy(false); }
   };
   const pill = (selected: boolean) => ({ flexDirection: "row" as const, alignItems: "center" as const, gap: space.sm, padding: space.sm, borderRadius: radius.md, borderWidth: selected ? 1.5 : 1,
     borderColor: selected ? hue(theme, "violet") : colors.border, backgroundColor: selected ? withAlpha(hue(theme, "violet"), 0.1) : "transparent" });
-  return <Sheet title="交给 Agent" open={open} onClose={onClose}>
+  return <Sheet title={t("coreInsightActions.assignToAgent")} open={open} onClose={onClose}>
     <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme}>在哪个项目</PaneLabel>
-      {workspaces.length ? workspaces.slice(0, 12).map(item => <Pressable key={item.workspaceId} accessibilityRole="radio" accessibilityLabel={`项目 ${item.projectName}`} aria-checked={item.workspaceId === workspaceId}
+      <PaneLabel theme={theme}>{t("coreInsightActions.whichProject")}</PaneLabel>
+      {workspaces.length ? workspaces.slice(0, 12).map(item => <Pressable key={item.workspaceId} accessibilityRole="radio" accessibilityLabel={t("coreInsightActions.project", { value1: item.projectName })} aria-checked={item.workspaceId === workspaceId}
         onPress={() => setWorkspaceId(item.workspaceId)} style={state => [pill(item.workspaceId === workspaceId), { opacity: state.pressed ? 0.8 : 1 }]}>
         <Icon name="FolderGit2" size={14} color={hue(theme, "violet")} />
         <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "700" }}>{item.projectName}</Text>
         <Text numberOfLines={1} style={{ maxWidth: 160, color: colors.foregroundMuted, fontSize: 11 }}>{item.branch ?? item.workspaceName ?? ""}</Text>
-      </Pressable>) : <Banner theme={theme} tone="warning" message="还没有可用的工作区：先在某个项目里运行过 Agent" />}
+      </Pressable>) : <Banner theme={theme} tone="warning" message={t("coreInsightActions.noWorkspaceAvailableYetRunAnAgent")} />}
     </View>
     <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme}>用哪个 Profile</PaneLabel>
+      <PaneLabel theme={theme}>{t("coreInsightActions.whichProfile")}</PaneLabel>
       {profiles.isPending ? <Skeleton theme={theme} rows={2} /> : null}
-      {profiles.error ? <Banner theme={theme} tone="danger" message={`Profile 读取失败：${profiles.error.message}`} /> : null}
-      {profiles.data && !profiles.data.length ? <Banner theme={theme} tone="warning" message="主机上还没有 Profile；在 Paseo 设置里添加后再交给 Agent" /> : null}
+      {profiles.error ? <Banner theme={theme} tone="danger" message={t("coreInsightActions.couldNotLoadProfiles", { value1: profiles.error.message })} /> : null}
+      {profiles.data && !profiles.data.length ? <Banner theme={theme} tone="warning" message={t("coreInsightActions.noProfilesOnThisHostYetAdd")} /> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-        {(profiles.data ?? []).map(item => <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={`Profile ${item.name}`} aria-checked={item.id === profileId} onPress={() => setProfileId(item.id)}
+        {(profiles.data ?? []).map(item => <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={t("coreInsightActions.profileName", { name: item.name })} aria-checked={item.id === profileId} onPress={() => setProfileId(item.id)}
           style={state => [pill(item.id === profileId), { opacity: state.pressed ? 0.8 : 1 }]}>
           <Text style={{ color: colors.foreground, fontSize: fontSize.small, fontWeight: item.id === profileId ? "700" : "500" }}>{item.name}</Text>
         </Pressable>)}
       </View>
-      {profile ? <MetaLine theme={theme} parts={[profile.provider, profile.model, profile.thinkingOptionId, profile.modeId ? `模式 ${profile.modeId}` : null]} /> : null}
+      {profile ? <MetaLine theme={theme} parts={[profile.provider, profile.model, profile.thinkingOptionId, profile.modeId ? t("coreInsightActions.mode", { value1: profile.modeId }) : null]} /> : null}
     </View>
-    <TextField theme={theme} label="任务" value={text} onChangeText={setText} multiline minHeight={180} />
+    <TextField theme={theme} label={t("coreInsightActions.task")} value={text} onChangeText={setText} multiline minHeight={180} />
     {action?.projects.length ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>{action.projects.map(name => <Badge key={name} theme={theme} label={name} tone="violet" />)}</View> : null}
     {error ? <Banner theme={theme} tone="danger" message={error} /> : null}
     <View style={{ flexDirection: "row", gap: space.sm, justifyContent: "flex-end" }}>
-      <Button theme={theme} label="取消" onPress={onClose} />
-      <Button theme={theme} variant="primary" icon="Rocket" label="开始" busy={busy} disabled={busy || !profile || !workspace || !text.trim()} onPress={() => void start()} />
+      <Button theme={theme} label={t("coreInsightActions.cancel")} onPress={onClose} />
+      <Button theme={theme} variant="primary" icon="Rocket" label={t("coreInsightActions.start")} busy={busy} disabled={busy || !profile || !workspace || !text.trim()} onPress={() => void start()} />
     </View>
   </Sheet>;
 }

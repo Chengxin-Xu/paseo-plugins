@@ -1,3 +1,5 @@
+import { currentLanguage } from "../shared/i18n";
+import { t, tParts } from "../shared/text";
 import { memo, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -12,10 +14,10 @@ import { shortDuration } from "./ui";
 const windows = { "1h": 3_600_000, "6h": 6 * 3_600_000, "24h": 24 * 3_600_000 } as const;
 type Window = keyof typeof windows;
 const looks: Record<SwimKind, { hue: Hue; label: string }> = {
-  running: { hue: "blue", label: "执行中" }, completed: { hue: "green", label: "完成" }, failed: { hue: "red", label: "失败" },
-  canceled: { hue: "gray", label: "取消" }, approval: { hue: "amber", label: "等审批" },
+  running: { hue: "blue", get label() { return t("secondarySwimlane.running"); } }, completed: { hue: "green", get label() { return t("secondarySwimlane.completed"); } }, failed: { hue: "red", get label() { return t("secondarySwimlane.failed"); } },
+  canceled: { hue: "gray", get label() { return t("secondarySwimlane.canceled"); } }, approval: { hue: "amber", get label() { return t("secondarySwimlane.waitingForApproval"); } },
 };
-const clock = (at: number) => new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+const clock = (at: number) => new Date(at).toLocaleTimeString(currentLanguage(), { hour: "2-digit", minute: "2-digit", hour12: false });
 
 /**
  * 并行泳道: one lane per recently active Agent with its turns as bars (green done, red failed, blue still running)
@@ -38,11 +40,11 @@ export const Swimlane = memo(function Swimlane({ theme, events, agents, now, com
   return <View style={{ marginHorizontal: inset, marginTop: space.md, padding: space.md, gap: space.sm, borderRadius: 16, borderWidth: hairline, borderColor: withAlpha(hue(theme, "blue"), 0.3), backgroundColor: isDarkTheme(theme) ? theme.colors.surface1 : theme.colors.surface0 }}>
     <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.sm }}>
       <View style={[{ width: 24, height: 24, borderRadius: 8, alignItems: "center", justifyContent: "center" }, gradient(theme, ["blue", "violet"])]}><Icon name="ChartGantt" size={14} color="#ffffff" /></View>
-      <Text style={{ flexGrow: 1, color: theme.colors.foreground, fontSize: fontSize.title, fontWeight: "700" }}>并行泳道</Text>
-      <Segmented theme={theme} size="sm" value={range} onChange={setRange} accessibilityLabel="泳道时间窗" options={[{ value: "1h", label: "1 小时" }, { value: "6h", label: "6 小时" }, { value: "24h", label: "24 小时" }]} />
+      <Text style={{ flexGrow: 1, color: theme.colors.foreground, fontSize: fontSize.title, fontWeight: "700" }}>{t("secondarySwimlane.parallelLanes")}</Text>
+      <Segmented theme={theme} size="sm" value={range} onChange={setRange} accessibilityLabel={t("secondarySwimlane.laneTimeWindow")} options={[{ value: "1h", label: t("secondarySwimlane.hour") }, { value: "6h", label: t("secondarySwimlane.hours") }, { value: "24h", label: t("secondarySwimlane.hours2") }]} />
     </View>
     <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>
-      {turns ? <>{turns} 轮 · 峰值 <Text style={{ color: hue(theme, "violet", "text"), fontWeight: "800" }}>{peak} 个同时执行</Text>{peakAt ? `（${clock(peakAt)}）` : ""}{hidden ? ` · 另有 ${hidden} 个 Agent 未显示` : ""}</> : "这个时间窗内没有记录到对话轮次"}
+      {turns ? tParts(peakAt ? hidden ? "secondarySwimlane.summaryAtHidden" : "secondarySwimlane.summaryAt" : hidden ? "secondarySwimlane.summaryHidden" : "secondarySwimlane.summary", { turns, peak, time: peakAt ? clock(peakAt) : "", hidden }).map((part, index) => part.param === "peak" ? <Text key={index} style={{ color: hue(theme, "violet", "text"), fontWeight: "800" }}>{part.text}</Text> : part.text) : t("secondarySwimlane.noConversationTurnsRecordedInThis")}
     </Text>
     <View onLayout={event => setWidth(Math.round(event.nativeEvent.layout.width))} style={{ gap: 4 }}>
       {width > 0 && lanes.length ? <>
@@ -51,8 +53,8 @@ export const Swimlane = memo(function Swimlane({ theme, events, agents, now, com
         </View>
         {lanes.map(lane => {
           const running = lane.spans.some(span => span.open && span.kind === "running");
-          const summary = lane.spans.filter(span => span.kind !== "approval").map(span => `${looks[span.kind].label} ${shortDuration(span.end - span.start)}`).join("，");
-          return <Pressable key={lane.agentId} accessibilityRole="button" accessibilityLabel={`泳道 ${lane.title}：${summary || "等审批"}`} onPress={() => onSelect(lane.agentId)}
+          const summary = lane.spans.filter(span => span.kind !== "approval").map(span => `${looks[span.kind].label} ${shortDuration(span.end - span.start)}`).join(t("secondarySwimlane.message2"));
+          return <Pressable key={lane.agentId} accessibilityRole="button" accessibilityLabel={t("secondarySwimlane.lane", { value1: lane.title, value2: summary || t("secondarySwimlane.waitingForApproval") })} onPress={() => onSelect(lane.agentId)}
             style={state => ({ flexDirection: "row", alignItems: "center", gap: space.sm, height: 24, borderRadius: radius.sm, opacity: state.pressed ? 0.7 : 1 })}>
             <Text numberOfLines={1} style={{ width: labelWidth, color: running ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: running ? "700" : "500" }}>{lane.title}</Text>
             <View style={{ width: track, height: 24 }}>

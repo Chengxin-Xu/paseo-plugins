@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/react-native";
@@ -7,10 +8,10 @@ import { parseTime, type RunStatus, type ScheduleRunRow } from "../shared/schedu
 
 /** How a schedule run looks everywhere: 执行中 blue and spinning, 失败 red, 成功 green, 结果未知 grey. */
 export const runLooks: Record<RunStatus, { label: string; hue: Hue; icon: string }> = {
-  running: { label: "执行中", hue: "run", icon: "LoaderCircle" },
-  succeeded: { label: "成功", hue: "ok", icon: "Check" },
-  failed: { label: "失败", hue: "fail", icon: "X" },
-  unknown: { label: "结果未知", hue: "muted", icon: "CircleHelp" },
+  running: { get label() { return t("secondaryScheduleLooks.running"); }, hue: "run", icon: "LoaderCircle" },
+  succeeded: { get label() { return t("secondaryScheduleLooks.succeeded"); }, hue: "ok", icon: "Check" },
+  failed: { get label() { return t("secondaryScheduleLooks.failed"); }, hue: "fail", icon: "X" },
+  unknown: { get label() { return t("secondaryScheduleLooks.unknownResult"); }, hue: "muted", icon: "CircleHelp" },
 };
 const DAY = 86_400_000;
 const pad = (value: number) => String(value).padStart(2, "0");
@@ -28,9 +29,9 @@ export function RunGlyph({ theme, status, size = 16 }: { theme: PluginTheme; sta
 /** 「定时」 on a session row: the Agent was created by a schedule run. */
 export function ScheduleBadge({ theme }: { theme: PluginTheme }) {
   const violet = hueColor(theme, "violet");
-  return <View accessibilityLabel="由定时任务创建" style={{ flexDirection: "row", alignItems: "center", gap: 2, height: 18, paddingHorizontal: 5, borderRadius: radius.full, backgroundColor: tint(violet, tintAlpha(theme)) }}>
+  return <View accessibilityLabel={t("secondaryScheduleLooks.createdByASchedule")} style={{ flexDirection: "row", alignItems: "center", gap: 2, height: 18, paddingHorizontal: 5, borderRadius: radius.full, backgroundColor: tint(violet, tintAlpha(theme)) }}>
     <Icon name="CalendarClock" size={10} color={violet} />
-    <Text style={{ color: hueColor(theme, "violet", "text"), fontSize: 11, fontWeight: "800" }}>定时</Text>
+    <Text style={{ color: hueColor(theme, "violet", "text"), fontSize: 11, fontWeight: "800" }}>{t("secondaryScheduleLooks.scheduled")}</Text>
   </View>;
 }
 
@@ -44,22 +45,22 @@ export function runTimeLabel(iso: string, now: number): string {
   const time = parseTime(iso);
   if (!time) return "";
   const date = new Date(time);
-  return now - time < 7 * DAY ? `${pad(date.getHours())}:${pad(date.getMinutes())}` : `${date.getMonth() + 1}月${date.getDate()}日`;
+  return now - time < 7 * DAY ? `${pad(date.getHours())}:${pad(date.getMinutes())}` : t("secondaryScheduleLooks.message", { value1: date.getMonth() + 1, value2: date.getDate() });
 }
 /** 10月8日 23:24 for cards outside the feed. */
 export function runMoment(iso: string): string {
   const time = parseTime(iso);
   if (!time) return "";
   const date = new Date(time);
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return t("secondaryScheduleLooks.message2", { value1: date.getMonth() + 1, value2: date.getDate(), value3: pad(date.getHours()), value4: pad(date.getMinutes()) });
 }
 /** 9 分钟后 / 3 小时后 / 2 天后 for the next run. */
 export function untilLabel(iso: string | null, now: number): string | null {
   const time = parseTime(iso);
   if (!time) return null;
   const minutes = Math.round((time - now) / 60_000);
-  if (minutes <= 0) return "即将运行";
-  return minutes < 60 ? `${minutes} 分钟后` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时后` : `${Math.round(minutes / 1440)} 天后`;
+  if (minutes <= 0) return t("secondaryScheduleLooks.runningSoon");
+  return minutes < 60 ? t("secondaryScheduleLooks.inMinutes", { count: minutes }) : minutes < 1440 ? t("secondaryScheduleLooks.inHours", { count: Math.round(minutes / 60) }) : t("secondaryScheduleLooks.inDays", { count: Math.round(minutes / 1440) });
 }
 /** Finished runs only (a running one ticks in its LiveTimer); runs rebuilt from Agent labels have no reliable duration. */
 export function runDurationLabel(run: Pick<ScheduleRunRow, "startedAt" | "endedAt" | "status" | "source">): string | null {

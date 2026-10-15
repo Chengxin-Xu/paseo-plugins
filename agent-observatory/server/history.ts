@@ -1,3 +1,5 @@
+import { onTextChange } from "../shared/i18n";
+import { t } from "../shared/text";
 import { randomUUID } from "node:crypto";
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -10,13 +12,13 @@ import { rememberArchiveReadOrigin } from "./read-state";
 export interface HistoryTransport { request(message: Record<string, unknown>, responseType: string): Promise<Record<string, unknown>> }
 /** What a running restore reports (its current step) and how plugin shutdown stops it before the next host request. */
 export interface RestoreProgress { onStep?: (message: string) => void; signal?: AbortSignal }
-const CANCELED = "观测台正在重新加载，恢复已中止。";
+let CANCELED = t("serverHistory.m001");
 /** The host's reasons a workspace cannot come back (its own messages are English). */
-const UNRECOVERABLE: Record<string, string> = {
-  workspace_not_found: "关联工作区已不在宿主中，无法恢复。",
-  project_not_found: "这个工作区所属的项目已被删除，无法恢复。",
-  workspace_directory_missing: "工作区目录已不存在，又不是可以重建的 worktree，无法恢复。",
-  project_directory_missing: "重建这个 worktree 需要的源仓库已不存在，无法恢复。",
+let UNRECOVERABLE: Record<string, string> = {
+  workspace_not_found: t("serverHistory.m002"),
+  project_not_found: t("serverHistory.m003"),
+  workspace_directory_missing: t("serverHistory.m004"),
+  project_directory_missing: t("serverHistory.m005"),
 };
 const hostText = (error: unknown) => error instanceof Error ? error.message : String(error);
 /**
@@ -26,34 +28,34 @@ const hostText = (error: unknown) => error instanceof Error ? error.message : St
  */
 export async function restoreArchivedSession(paseo: PaseoApi, agentId: string, transport: HistoryTransport, rememberOrigin?: typeof rememberArchiveReadOrigin, progress: RestoreProgress = {}): Promise<RestoreOutcome> {
   let result: RestoreOutcome = { status: "failed", agentId, workspaceId: null, workspaceRestored: false,
-    workspaceAction: null, message: "恢复未完成" };
+    workspaceAction: null, message: t("serverHistory.m006") };
   // A step that changes something waits for the previous one and never starts once the plugin is shutting down.
   const step = (message: string) => { if (progress.signal?.aborted) throw new Error(CANCELED); progress.onStep?.(message); };
   try {
-    step("正在读取会话状态");
+    step(t("serverHistory.m007"));
     const handle = paseo.agents.ref(agentId);
     const initial = await handle.refresh();
-    if (!initial?.agent) return { ...result, status: "needs_native", message: "此会话已不在当前宿主中，无法恢复。" };
+    if (!initial?.agent) return { ...result, status: "needs_native", message: t("serverHistory.m008") };
     const agent = initial.agent;
     result.workspaceId = agent.workspaceId ?? null;
-    if (!agent.archivedAt) return { ...result, status: "already_active", message: "原会话已处于可用状态，可直接打开。" };
-    if (agent.status === "running" || agent.activeTurn) return { ...result, status: "needs_native", message: "会话仍有活动任务，请在原生会话中处理，避免中断执行。" };
-    if (!agent.persistence || agent.providerUnavailable) return { ...result, status: "needs_native", message: "原会话缺少可恢复的持久化记录，或其提供方不可用。请在 Paseo 原生会话中检查。" };
+    if (!agent.archivedAt) return { ...result, status: "already_active", message: t("serverHistory.m009") };
+    if (agent.status === "running" || agent.activeTurn) return { ...result, status: "needs_native", message: t("serverHistory.m010") };
+    if (!agent.persistence || agent.providerUnavailable) return { ...result, status: "needs_native", message: t("serverHistory.m011") };
     await rememberOrigin?.({agentId,archivedAt:agent.archivedAt,lastUserMessageAt:agent.lastUserMessageAt??null});
     if (agent.workspaceId) {
-      step("正在检查关联工作区");
+      step(t("serverHistory.m012"));
       const workspace = await paseo.workspaces.ref(agent.workspaceId).refresh();
       if (!workspace) {
         const inspection = await transport.request({ type: "workspace.recovery.inspect.request", workspaceId: agent.workspaceId }, "workspace.recovery.inspect.response");
         const state = object(inspection.state);
         if (state.kind !== "recoverable") {
-          if (state.reason !== "workspace_not_archived") return { ...result, status: "needs_native", message: UNRECOVERABLE[string(state.reason)] ?? "关联工作区无法安全恢复，请在 Paseo 中检查。" };
+          if (state.reason !== "workspace_not_archived") return { ...result, status: "needs_native", message: UNRECOVERABLE[string(state.reason)] ?? t("serverHistory.m013") };
         } else {
-          if (state.action !== "unarchive" && state.action !== "restore") return { ...result, status: "needs_native", message: "宿主要求的工作区恢复方式不受支持。" };
-          step(state.action === "restore" ? "正在重建关联的 worktree，可能要一两分钟" : "正在恢复关联工作区");
+          if (state.action !== "unarchive" && state.action !== "restore") return { ...result, status: "needs_native", message: t("serverHistory.m014") };
+          step(state.action === "restore" ? t("serverHistory.m015") : t("serverHistory.m016"));
           const restored = await transport.request({ type: "workspace.recovery.restore.request", workspaceId: agent.workspaceId }, "workspace.recovery.restore.response")
-            .catch(error => { throw new Error(`关联工作区恢复失败：${hostText(error)}`); });
-          if (restored.accepted !== true) throw new Error(`关联工作区恢复失败：${string(restored.error) || "宿主未接受工作区恢复"}`);
+            .catch(error => { throw new Error(t("serverHistory.m017", { value1: hostText(error) })); });
+          if (restored.accepted !== true) throw new Error(t("serverHistory.m018", { value1: string(restored.error) || t("serverHistory.m019") }));
           result = { ...result, workspaceRestored: true, workspaceAction: state.action };
         }
       }
@@ -61,18 +63,18 @@ export async function restoreArchivedSession(paseo: PaseoApi, agentId: string, t
     // Another client may already have restored or started the session while its
     // workspace was being recovered. Never refresh an active session here.
     const current = await handle.refresh();
-    if (!current?.agent) throw new Error("恢复过程中会话已不可用");
-    if (!current.agent.archivedAt) return { ...result, status: "already_active", message: "原会话已恢复，可直接打开。" };
-    if (current.agent.status === "running" || current.agent.activeTurn) return { ...result, status: "needs_native", message: "会话已开始执行，请打开原生会话查看。" };
-    step("正在重新打开原会话");
+    if (!current?.agent) throw new Error(t("serverHistory.m020"));
+    if (!current.agent.archivedAt) return { ...result, status: "already_active", message: t("serverHistory.m021") };
+    if (current.agent.status === "running" || current.agent.activeTurn) return { ...result, status: "needs_native", message: t("serverHistory.m022") };
+    step(t("serverHistory.m023"));
     const refreshed = await transport.request({ type: "refresh_agent_request", agentId }, "status");
-    if (refreshed.status !== "agent_refreshed" || refreshed.agentId !== agentId) throw new Error("宿主未确认原会话恢复");
-    progress.onStep?.("正在确认恢复结果");
+    if (refreshed.status !== "agent_refreshed" || refreshed.agentId !== agentId) throw new Error(t("serverHistory.m024"));
+    progress.onStep?.(t("serverHistory.m025"));
     const confirmed = await handle.refresh();
-    if (!confirmed?.agent || confirmed.agent.archivedAt) throw new Error("宿主尚未确认会话退出归档状态，请刷新后查看");
-    return { ...result, status: "restored", message: result.workspaceRestored ? "关联工作区与原会话已恢复，未发送新任务。" : "原会话已恢复，未发送新任务。" };
+    if (!confirmed?.agent || confirmed.agent.archivedAt) throw new Error(t("serverHistory.m026"));
+    return { ...result, status: "restored", message: result.workspaceRestored ? t("serverHistory.m027") : t("serverHistory.m028") };
   } catch (error) {
-    return { ...result, status: "failed", message: `${restoreFailureText(error)}${result.workspaceRestored ? "（工作区已恢复，会话需继续检查。）" : ""}` };
+    return { ...result, status: "failed", message: `${restoreFailureText(error)}${result.workspaceRestored ? t("serverHistory.m029") : ""}` };
   }
 }
 
@@ -96,7 +98,7 @@ export class RestoreJobs {
   async start(agentId: string, run: (progress: RestoreProgress) => Promise<RestoreOutcome>): Promise<RestoreSessionResult> {
     this.prune();
     const joined = this.running.get(agentId); if (joined) return { ...joined.view };
-    const pending: RestoreSessionResult = { status: "pending", agentId, workspaceId: null, workspaceRestored: false, workspaceAction: null, message: "正在恢复会话…", jobId: null };
+    const pending: RestoreSessionResult = { status: "pending", agentId, workspaceId: null, workspaceRestored: false, workspaceAction: null, message: t("serverHistory.m030"), jobId: null };
     if (this.closed) return { ...pending, status: "failed", message: CANCELED };
     const job: RestoreJob = { id: randomUUID(), agentId, view: pending, endedAt: null, abort: new AbortController() };
     job.view = { ...pending, jobId: job.id };
@@ -136,3 +138,14 @@ export function registerHistory(server: PluginServerContext, bridge: Pick<Provid
   });
   return () => { restores.close(); };
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  CANCELED = t("serverHistory.m001");
+  UNRECOVERABLE = {
+  workspace_not_found: t("serverHistory.m002"),
+  project_not_found: t("serverHistory.m003"),
+  workspace_directory_missing: t("serverHistory.m004"),
+  project_directory_missing: t("serverHistory.m005"),
+};
+});

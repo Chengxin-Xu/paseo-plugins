@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { FlatList, Icon } from "@getpaseo/plugin/client/react-native";
@@ -24,10 +25,10 @@ const nativePhase = (status: AgentStatus): Phase => status === "running" ? "runn
 function ChildState({ theme, agent }: { theme: PluginTheme; agent: AgentRecord }) {
   const phase = phaseOf(agent);
   if (phase === "running" && agent.activeTurnStartedAt) return <LiveTimer since={agent.activeTurnStartedAt} color={hueColor(theme, "run", "text")} />;
-  if (phase === "approval") return <PhasePill theme={theme} hue="warn" label="待审批" />;
-  if (phase === "error") return <PhasePill theme={theme} hue="fail" label="异常" />;
-  if (phase === "unread") return <PhasePill theme={theme} hue="ok" label="未读" />;
-  if (phase === "idle") return <PhasePill theme={theme} hue="violet" label="待回复" />;
+  if (phase === "approval") return <PhasePill theme={theme} hue="warn" label={t("secondarySubtasksView.waitingForApproval")} />;
+  if (phase === "error") return <PhasePill theme={theme} hue="fail" label={t("secondarySubtasksView.error")} />;
+  if (phase === "unread") return <PhasePill theme={theme} hue="ok" label={t("secondarySubtasksView.unread")} />;
+  if (phase === "idle") return <PhasePill theme={theme} hue="violet" label={t("secondarySubtasksView.waitingForReply")} />;
   return <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{statusNames[agent.status]}</Text>;
 }
 function NativeChild({ child, parentAgent, theme, inset, onBack, header }: { child: ProviderSubagent; parentAgent: AgentRecord; theme: PluginTheme; inset: number; onBack: () => void; header?: ReactNode }) {
@@ -38,16 +39,16 @@ function NativeChild({ child, parentAgent, theme, inset, onBack, header }: { chi
   }, enabled: foreground && tab === "result" && !!timeline.page, staleTime: Infinity, retry: 1 });
   const data = useMemo(() => nativeChildResult(rootId, child, timeline.page, first.data), [rootId, child, timeline.page, first.data]);
   const status = nativeStatus(child.status);
-  const shownAgent: AgentRecord = { ...parentAgent, id: data.agentId, title: child.description || child.title || "原生子任务", provider: child.provider,
+  const shownAgent: AgentRecord = { ...parentAgent, id: data.agentId, title: child.description || child.title || t("secondarySubtasksView.nativeSubtasks"), provider: child.provider,
     status, rawStatus: child.status, cwd: child.cwd ?? parentAgent.cwd, createdAt: child.createdAt, updatedAt: child.updatedAt,
     parentAgentId: rootId, pendingPermissionCount: 0, attentionReason: null, attentionTimestamp: null, requiresAttention: undefined, archivedAt: null };
   const openEvidence = (ref: string) => { setFocusRef(ref); setTab("timeline"); };
   const childHeader = <View style={{ gap: space.sm, paddingTop: space.md }}>
     {header}
-    <View style={{ alignItems: "flex-start", marginLeft: -space.sm }}><Button theme={theme} label="子任务" icon="ChevronLeft" variant="ghost" size="sm" accessibilityLabel="返回子任务树" onPress={onBack} /></View>
-    <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}><PhaseLine theme={theme} agent={shownAgent} /><MetaLine theme={theme} parts={[child.provider, "原生子任务", "只读"]} /></View>
+    <View style={{ alignItems: "flex-start", marginLeft: -space.sm }}><Button theme={theme} label={t("secondarySubtasksView.subtask")} icon="ChevronLeft" variant="ghost" size="sm" accessibilityLabel={t("secondarySubtasksView.backToSubtaskTree")} onPress={onBack} /></View>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}><PhaseLine theme={theme} agent={shownAgent} /><MetaLine theme={theme} parts={[child.provider, t("secondarySubtasksView.nativeSubtasks"), t("secondarySubtasksView.readOnly")]} /></View>
     <Text selectable style={{ color: theme.colors.foreground, fontSize: fontSize.title, fontWeight: "500", lineHeight: 22 }}>{shownAgent.title}</Text>
-    <Segmented theme={theme} size="sm" value={tab} onChange={setTab} accessibilityLabel="子任务视图" options={[{ value: "result", label: "结果" }, { value: "timeline", label: "时间线" }]} />
+    <Segmented theme={theme} size="sm" value={tab} onChange={setTab} accessibilityLabel={t("secondarySubtasksView.subtaskView")} options={[{ value: "result", label: t("secondarySubtasksView.result") }, { value: "timeline", label: t("secondarySubtasksView.timeline") }]} />
   </View>;
   return tab === "result" ? <ResultView theme={theme} agent={shownAgent} data={data} loading={timeline.loading || (first.isPending && first.fetchStatus === "fetching")} error={timeline.error || first.error?.message}
     header={childHeader} inset={inset} onRefresh={() => { timeline.refresh(); void first.refetch(); }} onOpenEvidence={openEvidence} />
@@ -65,36 +66,36 @@ export function SubtasksView({ agent, agents, theme, inset, onSelectAgent, heade
   const child = native.find(candidate => candidate.id === selected);
   if (child) return <NativeChild key={`${agent.id}:${child.id}`} child={child} parentAgent={agent} theme={theme} inset={inset} onBack={() => setSelected(null)} header={header} />;
   const rows: SubtaskRow[] = [
-    ...(managed.length ? [{ kind: "section" as const, id: "managed", label: "Paseo 子 Agent", count: managed.length }, ...managed.map(row => ({ ...row, kind: "managed" as const, id: `managed:${row.item.id}` }))] : []),
-    { kind: "section", id: "native", label: "原生子任务", count: native.length, action: <IconButton theme={theme} icon="RefreshCw" label="刷新原生子任务" size="sm" onPress={() => void query.refetch()} disabled={query.isFetching} /> },
+    ...(managed.length ? [{ kind: "section" as const, id: "managed", label: t("secondarySubtasksView.paseoSubagents"), count: managed.length }, ...managed.map(row => ({ ...row, kind: "managed" as const, id: `managed:${row.item.id}` }))] : []),
+    { kind: "section", id: "native", label: t("secondarySubtasksView.nativeSubtasks"), count: native.length, action: <IconButton theme={theme} icon="RefreshCw" label={t("secondarySubtasksView.refreshNativeSubtasks")} size="sm" onPress={() => void query.refetch()} disabled={query.isFetching} /> },
     ...nativeRows.map(row => ({ ...row, kind: "native" as const, id: `native:${row.item.id}` })),
   ];
   const indent = (depth: number) => depth ? { marginLeft: 16 + (Math.min(depth, 3) - 1) * 22, paddingLeft: 6, borderLeftWidth: hairline, borderLeftColor: colors.border } : undefined;
   return <FlatList data={rows} keyExtractor={row => row.id} style={{ flex: 1, minHeight: 0 }} initialNumToRender={12} windowSize={5} contentContainerStyle={{ paddingHorizontal: inset, paddingBottom: space.xxl }}
     ListHeaderComponent={<View style={{ gap: space.md, paddingBottom: space.xs }}>{header}
-      {agent.parentAgentId ? <View style={{ alignItems: "flex-start", marginLeft: -space.sm, marginTop: header ? 0 : space.md }}><Button theme={theme} label="查看上级 Agent" icon="CornerLeftUp" variant="ghost" size="sm" onPress={() => onSelectAgent(agent.parentAgentId!)} /></View> : null}
-      {query.error ? <Banner theme={theme} tone="danger" message={query.error.message} action={{ label: "重试", onPress: () => void query.refetch() }} /> : null}
+      {agent.parentAgentId ? <View style={{ alignItems: "flex-start", marginLeft: -space.sm, marginTop: header ? 0 : space.md }}><Button theme={theme} label={t("secondarySubtasksView.viewParentAgent")} icon="CornerLeftUp" variant="ghost" size="sm" onPress={() => onSelectAgent(agent.parentAgentId!)} /></View> : null}
+      {query.error ? <Banner theme={theme} tone="danger" message={query.error.message} action={{ label: t("secondarySubtasksView.retry"), onPress: () => void query.refetch() }} /> : null}
     </View>}
     renderItem={({ item: row }) => {
       if (row.kind === "section") return <View style={{ marginHorizontal: -space.md }}><SectionHeader theme={theme} title={row.label} count={row.count} action={row.action} /></View>;
       if (row.kind === "managed") return <View style={[{ marginHorizontal: -space.md }, indent(row.depth)]}>
-        <Row theme={theme} title={row.item.title} accessibilityLabel={`查看子 Agent ${row.item.title}`} onPress={() => onSelectAgent(row.item.id)}
+        <Row theme={theme} title={row.item.title} accessibilityLabel={t("secondarySubtasksView.viewSubagent", { value1: row.item.title })} onPress={() => onSelectAgent(row.item.id)}
           leading={<View accessibilityLabel={readLabel(row.item)}><StatusGlyph theme={theme} phase={phaseOf(row.item)} /></View>}
           trailing={<ChildState theme={theme} agent={row.item} />}
           subtitle={<MetaLine theme={theme} parts={[providerLine(row.item), relativeTime(row.item.lastActivityAt)]} />} />
       </View>;
       const status = nativeStatus(row.item.status), open = !collapsed.has(row.item.id);
       return <View style={[{ marginHorizontal: -space.md }, indent(row.depth)]}>
-        <Row theme={theme} title={row.item.description || row.item.title || row.item.id} accessibilityLabel={`查看原生子任务 ${row.item.description || row.item.title || row.item.id}`} onPress={() => setSelected(row.item.id)}
+        <Row theme={theme} title={row.item.description || row.item.title || row.item.id} accessibilityLabel={t("secondarySubtasksView.viewNativeSubtask", { value1: row.item.description || row.item.title || row.item.id })} onPress={() => setSelected(row.item.id)}
           leading={<StatusGlyph theme={theme} phase={nativePhase(status)} />} trailing={<Text style={{ color: hueColor(theme, status === "running" ? "run" : status === "error" ? "fail" : "muted", "text"), fontSize: fontSize.meta }}>{statusNames[status]}</Text>}
-          subtitle={<MetaLine theme={theme} parts={[row.item.provider, relativeTime(row.item.updatedAt), row.broken ? "异常父链已断开" : null]} />} />
-        {row.children > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "折叠" : "展开"} ${row.children} 个子任务`} accessibilityState={{ expanded: open }} hitSlop={{ top: 6, bottom: 8, left: 6, right: 6 }}
+          subtitle={<MetaLine theme={theme} parts={[row.item.provider, relativeTime(row.item.updatedAt), row.broken ? t("secondarySubtasksView.invalidParentChainDisconnected") : null]} />} />
+        {row.children > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={t("secondarySubtasksView.subtasks", { value1: open ? t("secondarySubtasksView.fold") : t("secondarySubtasksView.expand"), value2: row.children })} accessibilityState={{ expanded: open }} hitSlop={{ top: 6, bottom: 8, left: 6, right: 6 }}
           onPress={() => setCollapsed(previous => { const next = new Set(previous); next.has(row.item.id) ? next.delete(row.item.id) : next.add(row.item.id); return next; })}
           style={state => ({ flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: space.xs, marginLeft: 24, marginTop: -6, marginBottom: space.xs, minHeight: 24, paddingHorizontal: 6, borderRadius: radius.sm, backgroundColor: (state as { hovered?: boolean }).hovered || state.pressed ? colors.surface1 : "transparent" })}>
           <Icon name={open ? "ChevronDown" : "ChevronRight"} size={12} color={colors.foregroundMuted} />
-          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{row.children} 个子任务</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondarySubtasksView.subtasks2", { count: row.children })}</Text>
         </Pressable> : null}
       </View>;
     }}
-    ListFooterComponent={query.isPending ? <Skeleton theme={theme} rows={2} /> : !managed.length && !native.length ? <EmptyState theme={theme} icon="GitBranch" title="没有子任务" message="这个会话还没有派生子 Agent 或原生子任务" /> : query.data?.truncated ? <View style={{ paddingTop: space.sm }}><MetaLine theme={theme} parts={["子任务超过保留范围，只显示部分"]} /></View> : null} />;
+    ListFooterComponent={query.isPending ? <Skeleton theme={theme} rows={2} /> : !managed.length && !native.length ? <EmptyState theme={theme} icon="GitBranch" title={t("secondarySubtasksView.noSubtasks")} message={t("secondarySubtasksView.thisSessionHasNotCreatedAny")} /> : query.data?.truncated ? <View style={{ paddingTop: space.sm }}><MetaLine theme={theme} parts={[t("secondarySubtasksView.someSubtasksAreOutsideTheRetained")]} /></View> : null} />;
 }

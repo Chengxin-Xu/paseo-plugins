@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { statsTimeZoneSchema } from "./stats";
@@ -91,7 +92,7 @@ export type ObservationInterval = z.infer<typeof observationIntervalSchema>;
 export function mergeAnalytics(previous: AnalyticsState | undefined, response: AnalyticsResponse | AnalyticsSnapshot): AnalyticsState {
   if (!("mode" in response)) return response;
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return snapshot; }
-  if (!previous) throw new Error("本地分析缓存已失效，正在重新读取完整数据。");
+  if (!previous) throw new Error(t("sharedAnalytics.m001"));
   const intervals = previous.coverageIntervals ?? [], tail = response.coverageTail, last = intervals.at(-1);
   if (!tail || !last || last.start !== tail.start || last.end === tail.end) return previous;
   return { ...previous, coverageIntervals: [...intervals.slice(0, -1), { ...tail }] };
@@ -145,8 +146,8 @@ export function analyticsDayStart(day: number, zone: AnalyticsZone | null | unde
 const sign = (minutes: number) => `${minutes < 0 ? "−" : "+"}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, "0")}:${String(Math.abs(minutes) % 60).padStart(2, "0")}`;
 /** How a reply's days are cut, for the page: 本机时区 America/New_York · 本机时区 UTC−07:00（固定偏移） · UTC（没有取得本机时区）. */
 export function analyticsZoneLabel(zone: AnalyticsZone | null | undefined, now = Date.now()): string {
-  if (!zone) return "UTC（没有取得本机时区）";
-  return zone.name ? `本机时区 ${zone.name}` : `本机时区 UTC${sign(analyticsOffsetAt(zone, now) / 60_000)}（固定偏移）`;
+  if (!zone) return t("sharedAnalytics.m002");
+  return zone.name ? t("sharedAnalytics.m003", { value1: zone.name }) : t("sharedAnalytics.m004", { value1: sign(analyticsOffsetAt(zone, now) / 60_000) });
 }
 
 export interface HourlyHeatmapCell {

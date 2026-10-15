@@ -1,3 +1,5 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -125,7 +127,7 @@ export const getStats = defineRpc({
 export type StatsState = StatsSnapshot & { revision?: string };
 export function mergeStats(previous: StatsState | undefined, response: StatsResponse): StatsState {
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return { ...snapshot, revision: response.revision }; }
-  if (!previous) throw new Error("本地统计缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedStats.m001"));
   return previous;
 }
 
@@ -158,7 +160,15 @@ export function vendorOf(model: string | null | undefined, provider?: string | n
   if (/glm|zhipu/.test(text)) return "zhipu";
   return "other";
 }
-export const vendorNames: Record<string, string> = {
+export let vendorNames: Record<string, string> = {
   anthropic: "Anthropic", openai: "OpenAI", google: "Google", xai: "xAI", moonshot: "Moonshot", deepseek: "DeepSeek",
-  bytedance: "字节", alibaba: "阿里", zhipu: "智谱", other: "其他",
+  bytedance: t("sharedStats.m002"), alibaba: t("sharedStats.m003"), zhipu: t("sharedStats.m004"), other: t("sharedStats.m005"),
 };
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  vendorNames = {
+  anthropic: "Anthropic", openai: "OpenAI", google: "Google", xai: "xAI", moonshot: "Moonshot", deepseek: "DeepSeek",
+  bytedance: t("sharedStats.m002"), alibaba: t("sharedStats.m003"), zhipu: t("sharedStats.m004"), other: t("sharedStats.m005"),
+};
+});

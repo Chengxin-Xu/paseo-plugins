@@ -1,5 +1,12 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { addDefaults, t } from "./i18n";
+import { kitDeferred } from "./locales/kit/zh-CN.json";
+
+addDefaults({ kitDeferred });
+
+/** Longest name for the message in a confirmation (`what`: "message", "answer", a translated word such as "Eingabeaufforderung"). */
+export const SEND_NOUN_LIMIT = 80;
 
 /**
  * Sending to existing agents through a plugin's server ledger (`server/deferred-send.ts`): 「等这一轮结束再发」 and
@@ -60,7 +67,7 @@ export function deferredSendContracts(prefix: string) {
       input: z.object({
         group: sendKey.optional(), guard: DeferredGuardSchema.optional(),
         agentId: z.string().min(1), text: z.string().min(1).max(200_000), messageId: z.string().min(8).max(100), source: z.string().max(200).optional(),
-        key: sendKey.optional(), what: z.string().max(10).optional(), consent: ConsentSchema.nullable().optional(),
+        key: sendKey.optional(), what: z.string().max(SEND_NOUN_LIMIT).optional(), consent: ConsentSchema.nullable().optional(),
       }),
       output: DeferredSendResultSchema,
     }),
@@ -105,20 +112,20 @@ export function deferOffer(
   if (!agent || plan.kind !== "confirm") return null;
   const approval = (agent.pendingPermissions ?? 0) > 0 || (agent.requiresAttention === true && agent.attentionReason === "permission");
   return approval
-    ? { label: "等审批处理完再发", note: "不动这次审批，等你处理完、这一轮结束后自动发送" }
-    : { label: "等这一轮结束再发", note: "不打断当前回合，等它这一轮结束后自动发送" };
+    ? { label: t("kitDeferred.afterApprovalLabel"), note: t("kitDeferred.afterApprovalNote") }
+    : { label: t("kitDeferred.afterTurnLabel"), note: t("kitDeferred.afterTurnNote") };
 }
 
 /** Short status for a chip, and its tone (kit `Tone`): amber while waiting or sending, orange when it needs you, green once sent. */
 export function deferredBadge(view: Pick<DeferredView, "state">): { label: string; tone: "warning" | "orange" | "success" | "neutral" | "danger" } {
   switch (view.state) {
-    case "queued": return { label: "排队中", tone: "warning" };
-    case "held": return { label: "待确认", tone: "orange" };
-    case "sending": return { label: "发送中", tone: "warning" };
-    case "sent": return { label: "已送达", tone: "success" };
-    case "maybe-sent": return { label: "可能已送达", tone: "warning" };
-    case "canceled": return { label: "已取消", tone: "neutral" };
-    case "discarded": return { label: "未发送", tone: "danger" };
-    case "expired": return { label: "已过期", tone: "danger" };
+    case "queued": return { label: t("kitDeferred.queued"), tone: "warning" };
+    case "held": return { label: t("kitDeferred.held"), tone: "orange" };
+    case "sending": return { label: t("kitDeferred.sending"), tone: "warning" };
+    case "sent": return { label: t("kitDeferred.sent"), tone: "success" };
+    case "maybe-sent": return { label: t("kitDeferred.maybeSent"), tone: "warning" };
+    case "canceled": return { label: t("kitDeferred.canceled"), tone: "neutral" };
+    case "discarded": return { label: t("kitDeferred.discarded"), tone: "danger" };
+    case "expired": return { label: t("kitDeferred.expired"), tone: "danger" };
   }
 }

@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -26,7 +27,7 @@ const deviceZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().
 /** 「约 6 小时后」 / 「约 40 分钟后」. */
 function fromNow(at: number, now: number): string {
   const minutes = Math.max(1, Math.round((at - now) / 60_000));
-  return minutes < 60 ? `约 ${minutes} 分钟后` : `约 ${Math.round(minutes / 60)} 小时后`;
+  return minutes < 60 ? t("secondaryStopCard.inAboutMinutes", { count: minutes }) : t("secondaryStopCard.inAboutHours", { count: Math.round(minutes / 60) });
 }
 const resumesKey = (hostId: string | undefined, agentId: string) => ["agent-observatory", hostId ?? "host", "resume", agentId] as const;
 /**
@@ -90,10 +91,10 @@ export function StopCard({ theme, agent, heartbeats, onOpenConversation, onSched
   if (!stop || agent.archivedAt || agent.status === "running" || agent.status === "initializing") return null;
   if (stop.kind !== "quota") {
     const silent = stop.kind === "silent", hue: Hue = "amber";
-    return <Card theme={theme} hue={hue} icon={silent ? "CircleDashed" : "CircleDotDashed"} title={silent ? "空轮" : "可能未收尾"}
+    return <Card theme={theme} hue={hue} icon={silent ? "CircleDashed" : "CircleDotDashed"} title={silent ? t("secondaryStopCard.emptyTurn") : t("secondaryStopCard.possiblyUnfinished")}
       pill={<PhasePill theme={theme} hue={hue} label={clockLabel(stop.at, now)} />}
-      text={silent ? "这一轮结束了，但没有任何文字、工具调用或推理输出。可以回到会话里让它重试。" : agent.stop?.closedMidTurn ? "宿主关闭会话时这一轮还没结束，可能还没做完。可以回到会话里让它接着做；看过后点「知道了」。" : "这一轮停在工具调用之后，没有收尾回复，可能还没做完。可以回到会话里让它接着做。"}
-      actions={onOpenConversation ? <Button theme={theme} size="sm" tone={hue} icon="ArrowUpRight" label="打开会话" onPress={onOpenConversation} /> : null} />;
+      text={silent ? t("secondaryStopCard.thisTurnEndedWithoutTextTool") : agent.stop?.closedMidTurn ? t("secondaryStopCard.thisTurnWasStillRunningWhen") : t("secondaryStopCard.thisTurnStoppedAfterATool")}
+      actions={onOpenConversation ? <Button theme={theme} size="sm" tone={hue} icon="ArrowUpRight" label={t("secondaryStopCard.openSession")} onPress={onOpenConversation} /> : null} />;
   }
   const reset = stop.resetAt ? Date.parse(stop.resetAt) : NaN, known = Number.isFinite(reset), guessed = known && stop.resetGuessed === true;
   const wake = known ? resumeTime(reset, now) : null, clock = (at: number) => clockLabel(at, now);
@@ -101,41 +102,41 @@ export function StopCard({ theme, agent, heartbeats, onOpenConversation, onSched
   const entry = resumeFor(resumes.data?.entries, agent.id, stop.at);
   const legacy = entry ? null : legacyResume(heartbeats, now, new Set(resumes.data?.entries.map(item => item.scheduleId)));
   const optimistic = !entry && !legacy && justScheduled !== null && justScheduled > now - 60_000 ? justScheduled : null;
-  const look = entry ? resumeLook(entry, clock) : legacy || optimistic ? { hue: "pink" as const, icon: "AlarmClock", pill: `${clock(legacy?.at ?? optimistic!)} 续跑`,
-    text: `已安排 ${clock(legacy?.at ?? optimistic!)} 自动续跑一次。`, cancellable: !!legacy, again: false, pending: true } : null;
+  const look = entry ? resumeLook(entry, clock) : legacy || optimistic ? { hue: "pink" as const, icon: "AlarmClock", pill: t("secondaryStopCard.continue", { value1: clock(legacy?.at ?? optimistic!) }),
+    text: t("secondaryStopCard.scheduledOneAutomaticContinuationAt", { value1: clock(legacy?.at ?? optimistic!) }), cancellable: !!legacy, again: false, pending: true } : null;
   const waiting = !!look?.pending, handed = handoverOf(agent.id, stop.at);
   const hue: Hue = "orange";
   const resetText = known
-    ? reset > now ? guessed ? `用量额度或限流让这一轮停下了。提示里没写时区，按本机时区推测 ${clock(reset)} 恢复（${fromNow(reset, now)}）。`
-      : `用量额度或限流让这一轮停下了。按本机时区 ${clock(reset)} 恢复（${fromNow(reset, now)}）。` : `额度应已在 ${clock(reset)} 恢复，可以继续了。`
-    : "用量额度或限流让这一轮停下了，回复里没有写明恢复时间。";
+    ? reset > now ? guessed ? t("secondaryStopCard.aQuotaOrRateLimitStopped", { value1: clock(reset), value2: fromNow(reset, now) })
+      : t("secondaryStopCard.aQuotaOrRateLimitStopped2", { value1: clock(reset), value2: fromNow(reset, now) }) : t("secondaryStopCard.theQuotaShouldHaveResetAt", { value1: clock(reset) })
+    : t("secondaryStopCard.aQuotaOrRateLimitStopped3");
   const scheduleId = entry?.scheduleId ?? legacy?.scheduleId ?? null;
   const doCancel = async () => {
     setCanceling(true);
     try {
       const result = await cancel({ agentId: agent.id, ...(scheduleId ? { scheduleId } : {}) });
       storeEntry(cache, hostId, result.entry);
-      if (result.status === "canceled") { toast.show("已取消续跑", { variant: "success" }); setJustScheduled(null); onScheduled?.(); }
+      if (result.status === "canceled") { toast.show(t("secondaryStopCard.continuationCanceled"), { variant: "success" }); setJustScheduled(null); onScheduled?.(); }
       else toast.show(result.message, { variant: "warning" });
-    } catch (reason) { toast.error(reason instanceof Error ? reason.message : "取消续跑失败"); }
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : t("secondaryStopCard.couldNotCancelContinuation")); }
     finally { setCanceling(false); setArming(false); }
   };
   const red = hueColor(theme, "red");
   const actions = <>
     {look && !look.again ? null : <Button theme={theme} size="sm" variant="primary" tone={hue} icon="AlarmClock"
-      label={look?.again && entry?.status === "failed" ? "重新安排…" : wake ? `恢复后续跑 · ${clock(wake)} 唤醒` : "恢复后续跑…"} onPress={() => setConfirming(true)} />}
-    {look?.cancellable && !arming ? <Button theme={theme} size="sm" tone="red" icon="AlarmClockOff" label="取消续跑" onPress={() => setArming(true)} /> : null}
-    {handed ? onHandedOver ? <Button theme={theme} size="sm" tone="violet" icon="ArrowUpRight" label={`打开「${handed.profile}」接手的 Agent`} onPress={() => onHandedOver(handed.agentId)} />
-      : <PhasePill theme={theme} hue="violet" icon="ArrowRightLeft" label={`已交给「${handed.profile}」接着做`} />
-      : <Button theme={theme} size="sm" tone="violet" icon="ArrowRightLeft" label="交给另一个 Provider…" onPress={() => setHanding(true)} />}
-    {onOpenConversation ? <Button theme={theme} size="sm" variant="ghost" icon="ArrowUpRight" label="打开会话" onPress={onOpenConversation} /> : null}
+      label={look?.again && entry?.status === "failed" ? t("secondaryStopCard.reschedule") : wake ? t("secondaryStopCard.continueAfterResetWakeAt", { value1: clock(wake) }) : t("secondaryStopCard.continueAfterReset")} onPress={() => setConfirming(true)} />}
+    {look?.cancellable && !arming ? <Button theme={theme} size="sm" tone="red" icon="AlarmClockOff" label={t("secondaryStopCard.cancelContinuation")} onPress={() => setArming(true)} /> : null}
+    {handed ? onHandedOver ? <Button theme={theme} size="sm" tone="violet" icon="ArrowUpRight" label={t("secondaryStopCard.openTheAgentTakingOver", { value1: handed.profile })} onPress={() => onHandedOver(handed.agentId)} />
+      : <PhasePill theme={theme} hue="violet" icon="ArrowRightLeft" label={t("secondaryStopCard.handedOverTo", { value1: handed.profile })} />
+      : <Button theme={theme} size="sm" tone="violet" icon="ArrowRightLeft" label={t("secondaryStopCard.handOverToAnotherProvider")} onPress={() => setHanding(true)} />}
+    {onOpenConversation ? <Button theme={theme} size="sm" variant="ghost" icon="ArrowUpRight" label={t("secondaryStopCard.openSession")} onPress={onOpenConversation} /> : null}
   </>;
   return <>
-    <Card theme={theme} hue={hue} icon="BatteryWarning" title="额度用尽" pulse={!waiting}
-      pill={<PhasePill theme={theme} hue={hue} solid label={known ? guessed ? `约 ${clock(reset)} 恢复` : `${clock(reset)} 恢复` : "恢复时间未知"} />}
+    <Card theme={theme} hue={hue} icon="BatteryWarning" title={t("secondaryStopCard.quotaExhausted")} pulse={!waiting}
+      pill={<PhasePill theme={theme} hue={hue} solid label={known ? guessed ? t("secondaryStopCard.resetsAround", { value1: clock(reset) }) : t("secondaryStopCard.resets", { value1: clock(reset) }) : t("secondaryStopCard.resetTimeUnknown")} />}
       text={resetText}
-      note={waiting ? `到点时它正忙或宿主不在线，会在 ${RESUME_WINDOW_TEXT}内自动再试，真正送出才算完成。` : look ? null
-        : `续跑需要你确认：会建一个只运行一次的心跳，到点给这个 Agent 发一条续跑提示；没送出会在 ${RESUME_WINDOW_TEXT}内自动再试。安排后可以在这张卡片上取消。`}
+      note={waiting ? t("secondaryStopCard.ifItIsBusyOrPaseo", { value1: RESUME_WINDOW_TEXT }) : look ? null
+        : t("secondaryStopCard.yourConfirmationCreatesAOneTime", { value1: RESUME_WINDOW_TEXT })}
       actions={actions}>
       {look ? <Enter active key={`${look.hue}:${look.pill}`}>
         <View testID="resume-state" {...aria({ live: "polite" })} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, padding: space.sm, borderRadius: radius.md, backgroundColor: tint(hueColor(theme, look.hue), tintAlpha(theme)) }}>
@@ -149,9 +150,9 @@ export function StopCard({ theme, agent, heartbeats, onOpenConversation, onSched
         </View>
       </Enter> : null}
       {arming ? <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm, padding: space.sm, borderRadius: radius.md, borderWidth: hairline, borderColor: tint(red, 0.5), backgroundColor: tint(red, tintAlpha(theme) * 0.6) }}>
-        <Text style={{ flexGrow: 1, flexShrink: 1, minWidth: 160, color: theme.colors.foreground, fontSize: fontSize.small }}>取消后到点不会再唤醒它，确定吗？</Text>
-        <Button theme={theme} size="sm" variant="danger" icon="AlarmClockOff" label="确认取消续跑" busy={canceling} disabled={canceling} onPress={() => void doCancel()} />
-        <Button theme={theme} size="sm" variant="ghost" label="不取消" onPress={() => setArming(false)} />
+        <Text style={{ flexGrow: 1, flexShrink: 1, minWidth: 160, color: theme.colors.foreground, fontSize: fontSize.small }}>{t("secondaryStopCard.cancelingMeansItWillNotWake")}</Text>
+        <Button theme={theme} size="sm" variant="danger" icon="AlarmClockOff" label={t("secondaryStopCard.confirmCancelingContinuation")} busy={canceling} disabled={canceling} onPress={() => void doCancel()} />
+        <Button theme={theme} size="sm" variant="ghost" label={t("secondaryStopCard.keepContinuation")} onPress={() => setArming(false)} />
       </View> : null}
       {resumes.data?.error ? <MetaLine theme={theme} numberOfLines={2} parts={[resumes.data.error]} /> : null}
     </Card>
@@ -208,17 +209,17 @@ function ResumeSheet({ theme, open, onClose, agent, reset, guessed, hostId, base
       // Another heartbeat wakes in the confirmed minute: the server moved it on, and its reply says to when (F2). Without a heartbeat
       // its create's answer was lost: the reply says the observatory checks for it (codex-obs-resume-recheck11-F3).
       const moved = Math.floor(runAt / 60_000) !== Math.floor(when / 60_000), unconfirmed = !result.scheduleId;
-      toast.show(result.existing || moved || unconfirmed ? result.message : `已安排 ${clockLabel(runAt)} 续跑`, { variant: result.existing || unconfirmed ? "info" : "success" }); onScheduled?.(runAt, result.entry ?? null); onClose();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "安排续跑失败"); }
+      toast.show(result.existing || moved || unconfirmed ? result.message : t("secondaryStopCard.scheduledContinuationAt", { value1: clockLabel(runAt) }), { variant: result.existing || unconfirmed ? "info" : "success" }); onScheduled?.(runAt, result.entry ?? null); onClose();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t("secondaryStopCard.couldNotScheduleContinuation")); }
     finally { setBusy(false); }
   };
   const orange = hueColor(theme, "orange");
-  const options: Array<{ value: Wait; label: string }> = [...(windowReset ? [{ value: "window" as const, label: `按额度窗口：${clockLabel(windowReset.resetAt, now)} 重置` }] : []), ...WAITS.map(value => ({ value, label: `${value} 小时后` }))];
-  const basis = reset !== null ? guessed ? `提示里没写时区，按本机时区推测额度 ${clockLabel(reset, now)} 恢复，晚 2 分钟再唤醒` : `额度 ${clockLabel(reset, now)} 恢复，晚 2 分钟再唤醒`
-    : wait === "window" && windowReset ? `按额度窗口推算：${windowReset.account} 的「${windowReset.window}」${clockLabel(windowReset.resetAt, now)} 重置，晚 2 分钟再唤醒` : null;
-  return <Sheet title="恢复后续跑" open={open} onClose={onClose}>
+  const options: Array<{ value: Wait; label: string }> = [...(windowReset ? [{ value: "window" as const, label: t("secondaryStopCard.useQuotaWindowResets", { value1: clockLabel(windowReset.resetAt, now) }) }] : []), ...WAITS.map(value => ({ value, label: t("secondaryStopCard.inHours", { count: value }) }))];
+  const basis = reset !== null ? guessed ? t("secondaryStopCard.theMessageHasNoTimeZone", { value1: clockLabel(reset, now) }) : t("secondaryStopCard.quotaResetsAtWithWakeUp", { value1: clockLabel(reset, now) })
+    : wait === "window" && windowReset ? t("secondaryStopCard.estimatedFromTheQuotaWindowFor", { value1: windowReset.account, value2: windowReset.window, value3: clockLabel(windowReset.resetAt, now) }) : null;
+  return <Sheet title={t("secondaryStopCard.continueAfterReset2")} open={open} onClose={onClose}>
     {reset === null ? <View style={{ gap: space.sm }}>
-      <Text style={{ color: colors.foreground, fontSize: fontSize.body }}>回复里没有恢复时间。多久之后唤醒它？</Text>
+      <Text style={{ color: colors.foreground, fontSize: fontSize.body }}>{t("secondaryStopCard.theReplyHasNoResetTime")}</Text>
       <View accessibilityRole="radiogroup" style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
         {options.map(option => { const selected = wait === option.value;
           return <Pressable key={String(option.value)} accessibilityRole="radio" accessibilityLabel={option.label} {...aria({ checked: selected })} onPress={() => setWait(option.value)}
@@ -227,22 +228,22 @@ function ResumeSheet({ theme, open, onClose, agent, reset, guessed, hostId, base
             <Text numberOfLines={1} style={{ color: selected ? hueColor(theme, "orange", "text") : colors.foreground, fontSize: fontSize.small, fontWeight: selected ? "700" : "500" }}>{option.label}</Text>
           </Pressable>; })}
       </View>
-      {windowReset ? <MetaLine theme={theme} numberOfLines={2} parts={[`「按额度窗口」按 ${windowReset.account} 的用量读数推算，账号对不上时会早或晚`]} /> : null}
+      {windowReset ? <MetaLine theme={theme} numberOfLines={2} parts={[t("secondaryStopCard.useQuotaWindowEstimatesFromS", { value1: windowReset.account })]} /> : null}
     </View> : null}
     {at !== null ? <View style={{ gap: 4 }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>唤醒时间（本机时区{zone ? ` ${zone}` : ""}）</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStopCard.wakeTimeDeviceTimeZone", { value1: zone ? ` ${zone}` : "" })}</Text>
       <Text style={{ color: hueColor(theme, "orange", "text"), fontSize: 22, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{clockLabel(at, now)}</Text>
       <MetaLine theme={theme} numberOfLines={3} parts={[basis, fromNow(at, now)]} />
     </View> : null}
     <View style={{ gap: 4 }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>到点时「{agent.title || "这个 Agent"}」会收到</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStopCard.atTheScheduledTimeReceives", { value1: agent.title || t("secondaryStopCard.thisAgent") })}</Text>
       <Text selectable style={{ color: colors.foreground, fontSize: fontSize.small, lineHeight: 20, padding: space.sm, borderRadius: radius.md, backgroundColor: colors.surface1 }}>{RESUME_PROMPT}</Text>
     </View>
-    <MetaLine theme={theme} numberOfLines={5} parts={[`只运行一次。到点时它正忙或宿主不在线，会在 ${RESUME_WINDOW_TEXT}内自动再试，真正送出才算完成；在那之前你自己给它发了消息，就不再续跑。安排后可以在停下卡片上取消。`]} />
+    <MetaLine theme={theme} numberOfLines={5} parts={[t("secondaryStopCard.runsOnceIfItIsBusy", { value1: RESUME_WINDOW_TEXT })]} />
     {error ? <Text style={{ color: hueColor(theme, "fail", "text"), fontSize: fontSize.small }}>{error}</Text> : null}
     <View style={{ flexDirection: "row", gap: space.sm, justifyContent: "flex-end" }}>
-      <Button theme={theme} label="取消" onPress={onClose} />
-      <Button theme={theme} variant="primary" tone="orange" icon="AlarmClock" label={at !== null ? `确认 ${clockLabel(at, now)} 续跑` : "先选唤醒时间"} busy={busy} disabled={busy || at === null} onPress={() => void confirm()} />
+      <Button theme={theme} label={t("secondaryStopCard.cancel")} onPress={onClose} />
+      <Button theme={theme} variant="primary" tone="orange" icon="AlarmClock" label={at !== null ? t("secondaryStopCard.confirmContinuationAt", { value1: clockLabel(at, now) }) : t("secondaryStopCard.chooseAWakeTimeFirst")} busy={busy} disabled={busy || at === null} onPress={() => void confirm()} />
     </View>
   </Sheet>;
 }

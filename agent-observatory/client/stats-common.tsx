@@ -1,3 +1,5 @@
+import { currentLanguage } from "../shared/i18n";
+import { t } from "../shared/text";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -6,7 +8,7 @@ import { STATS_RANGES, vendorNames, type StatsBreakdownRow, type StatsRange, typ
 import { Banner, EmptyState, Segmented, Skeleton, Spacer, fontSize, gradient, hue, hueFor, isDarkTheme, radius, relativeTime, space, withAlpha, type Hue } from "./kit";
 import { InfoButton } from "./ui";
 
-export const rangeOptions = STATS_RANGES.map(value => ({ value, label: value === "7d" ? "7 天" : value === "30d" ? "30 天" : "90 天" }));
+export const rangeOptions = STATS_RANGES.map(value => ({ value, get label() { return value === "7d" ? t("secondaryStatsCommon.days") : value === "30d" ? t("secondaryStatsCommon.days2") : t("secondaryStatsCommon.days3"); } }));
 export interface StatsViewProps {
   theme: PluginTheme; compact: boolean; stats?: StatsSnapshot; loading: boolean; error?: string;
   range: StatsRange; onRange: (range: StatsRange) => void; onRefresh: () => void;
@@ -31,7 +33,7 @@ export function rowHues(rows: readonly StatsBreakdownRow[], kind: "model" | "pro
   }
   return result;
 }
-export const vendorLabel = (vendor: string | null | undefined) => vendorNames[vendor ?? "other"] ?? vendor ?? "其他";
+export const vendorLabel = (vendor: string | null | undefined) => vendorNames[vendor ?? "other"] ?? vendor ?? t("secondaryStatsCommon.other");
 
 /** A small filled disk with a white icon — the dashboards' marker for a metric or record. */
 export function IconDisk({ theme, icon, colors, size = 28 }: { theme: PluginTheme; icon: string; colors: readonly [Hue, Hue] | readonly [Hue]; size?: number }) {
@@ -41,23 +43,23 @@ export function IconDisk({ theme, icon, colors, size = 28 }: { theme: PluginThem
 }
 
 /** Range picker + freshness line + ⓘ, shared by 看板 / 明细 / 横评 / Token (`generatedAt` and `info` override the statistics defaults). */
-export function StatsHeader({ theme, compact, stats, range, onRange, extra, generatedAt, info, infoTitle = "关于统计" }: {
+export function StatsHeader({ theme, compact, stats, range, onRange, extra, generatedAt, info, infoTitle = t("secondaryStatsCommon.aboutStatistics") }: {
   theme: PluginTheme; compact: boolean; stats?: StatsSnapshot; range: StatsRange; onRange: (range: StatsRange) => void; extra?: ReactNode;
   generatedAt?: string; info?: readonly string[]; infoTitle?: string;
 }) {
   const updated = generatedAt ?? stats?.generatedAt;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-    <Segmented theme={theme} size="sm" value={range} onChange={onRange} accessibilityLabel="统计范围" options={rangeOptions} />
+    <Segmented theme={theme} size="sm" value={range} onChange={onRange} accessibilityLabel={t("secondaryStatsCommon.statisticsRange")} options={rangeOptions} />
     {extra}
     <Spacer />
-    {updated && !compact ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>更新于 {relativeTime(updated)}</Text> : null}
+    {updated && !compact ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStatsCommon.updated", { value1: relativeTime(updated) })}</Text> : null}
     <InfoButton theme={theme} title={infoTitle} lines={info ?? [
-      "会话数来自 Paseo 的全部会话（含已归档），按创建时间计入你所在时区的日期。",
-      stats?.observedSince ? `轮次、时长、并发从 ${new Date(stats.observedSince).toLocaleDateString("zh-CN")} 起由插件观测。` : "轮次、时长、并发由插件开始观测后累计。",
-      stats?.contentSince ? `消息、工具调用和代码行数从 ${new Date(stats.contentSince).toLocaleDateString("zh-CN")} 起统计，只看每轮新增的时间线内容。` : "消息、工具调用和代码行数会在下一轮对话结束后开始统计。",
-      "代码行数按编辑工具的 diff 估算（新增 / 删除行），不是 git 提交统计。",
-      "成功率 = 完成 ÷（完成 + 失败）；被你中断或取消的轮次不计入。",
-      "环比对比的是紧挨着的上一个同样长的周期。",
+      t("secondaryStatsCommon.sessionCountsIncludeAllPaseoSessions"),
+      stats?.observedSince ? t("secondaryStatsCommon.thePluginHasTrackedTurnsDuration", { value1: new Date(stats.observedSince).toLocaleDateString(currentLanguage()) }) : t("secondaryStatsCommon.turnsDurationAndConcurrencyAccumulateFrom"),
+      stats?.contentSince ? t("secondaryStatsCommon.messagesToolCallsAndLinesOf", { value1: new Date(stats.contentSince).toLocaleDateString(currentLanguage()) }) : t("secondaryStatsCommon.messageToolCallAndCodeLine"),
+      t("secondaryStatsCommon.codeLineCountsAreEstimatedFrom"),
+      t("secondaryStatsCommon.successRateCompletedCompletedFailedTurns"),
+      t("secondaryStatsCommon.periodComparisonsUseTheImmediatelyPreceding"),
     ]} />
   </View>;
 }
@@ -65,8 +67,8 @@ export function StatsHeader({ theme, compact, stats, range, onRange, extra, gene
 /** Loading / error / empty wrapper for statistics pages. */
 export function StatsGate({ theme, stats, loading, error, onRefresh, children }: { theme: PluginTheme; stats?: StatsSnapshot; loading: boolean; error?: string; onRefresh: () => void; children: (stats: StatsSnapshot) => ReactNode }) {
   if (!stats) return loading ? <Skeleton theme={theme} rows={6} />
-    : <EmptyState theme={theme} icon={error ? "WifiOff" : "ChartNoAxesCombined"} tone={error ? "danger" : "violet"} title={error ? "统计暂时读不到" : "还没有统计数据"} message={error ?? "派出 Agent 后，这里会长出你的使用画像"} action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />;
-  return <>{error ? <Banner theme={theme} tone="warning" message={`统计同步失败，显示的是上次结果：${error}`} action={{ label: "重试", onPress: onRefresh }} /> : null}{children(stats)}</>;
+    : <EmptyState theme={theme} icon={error ? "WifiOff" : "ChartNoAxesCombined"} tone={error ? "danger" : "violet"} title={error ? t("secondaryStatsCommon.statisticsAreTemporarilyUnavailable") : t("secondaryStatsCommon.noStatisticsYet")} message={error ?? t("secondaryStatsCommon.sendOutAnAgentToStart")} action={{ label: t("secondaryStatsCommon.retry"), onPress: onRefresh, icon: "RefreshCw" }} />;
+  return <>{error ? <Banner theme={theme} tone="warning" message={t("secondaryStatsCommon.statisticsSyncFailedShowingThePrevious", { value1: error })} action={{ label: t("secondaryStatsCommon.retry"), onPress: onRefresh }} /> : null}{children(stats)}</>;
 }
 
 /** Frosted pill used on gradient heroes. */

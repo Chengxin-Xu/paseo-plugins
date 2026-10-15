@@ -1,3 +1,4 @@
+import { t } from "./text";
 /** Pure dashboard models. This module is shared by native and web clients. */
 import type { StopReason } from "./stop-reason";
 import type { ReplyNudge } from "./reply";
@@ -267,7 +268,7 @@ export function summarizeRequest(value: unknown): PendingRequest {
   if (kind === "question") {
     const questions = Array.isArray(input.questions) ? input.questions.map(recordOf) : [], first = questions[0] ?? {};
     const options = (Array.isArray(first.options) ? first.options : []).map(option => clip(typeof option === "string" ? option : recordOf(option).label, 40)).filter((label): label is string => !!label).slice(0, 4);
-    return { kind, title: clip(first.question, 200) ?? clip(request.title, 160) ?? clip(request.description, 160), detail: questions.length > 1 ? `共 ${questions.length} 个问题` : clip(first.header, 40), options };
+    return { kind, title: clip(first.question, 200) ?? clip(request.title, 160) ?? clip(request.description, 160), detail: questions.length > 1 ? t("sharedModel.m001", { value1: questions.length }) : clip(first.header, 40), options };
   }
   if (kind === "plan") {
     const plan = typeof input.plan === "string" ? input.plan : "", heading = plan.split("\n").map(line => line.replace(/^\s*#+\s*|\*\*/g, "").trim()).find(Boolean);
@@ -559,10 +560,10 @@ export function normalizeAgent(source: AgentSource, options: { workspaceName?: s
   const managedWorktree = cwd !== null && /[\\/]\.paseo[\\/]worktrees[\\/]/.test(cwd);
   const placementRoot = text(checkout?.mainRepoRoot) ?? (managedWorktree ? null : text(checkout?.worktreeRoot) ?? text(checkout?.cwd));
   const projectRootPath = placementRoot ?? text(source.projectRootPath) ?? (managedWorktree ? null : cwd);
-  const projectName = text(options.project?.projectName) ?? text(source.projectName) ?? projectRootPath?.split(/[\\/]/).filter(Boolean).at(-1) ?? "未关联项目";
+  const projectName = text(options.project?.projectName) ?? text(source.projectName) ?? projectRootPath?.split(/[\\/]/).filter(Boolean).at(-1) ?? t("sharedModel.m002");
   return {
     id: source.id,
-    title: text(source.title) ?? "未命名 Agent",
+    title: text(source.title) ?? t("sharedModel.m003"),
     provider: text(source.provider) ?? "unknown",
     model: text(source.model),
     workspaceId: text(source.workspaceId),
@@ -809,27 +810,27 @@ export function flattenAgentForest(forest: readonly AgentTreeNode[]): Array<{ no
 }
 
 export function statusLabel(status: AgentStatus): string {
-  return { running: "执行中", waiting: "待审批", idle: "待回复", completed: "已完成", quiet: "空闲", error: "异常", initializing: "启动中", closed: "已关闭", canceled: "已取消" }[status];
+  return { running: t("sharedModel.m004"), waiting: t("sharedModel.m005"), idle: t("sharedModel.m006"), completed: t("sharedModel.m007"), quiet: t("sharedModel.m008"), error: t("sharedModel.m009"), initializing: t("sharedModel.m010"), closed: t("sharedModel.m011"), canceled: t("sharedModel.m012") }[status];
 }
 
 export function formatDuration(milliseconds: number | null | undefined): string {
   if (milliseconds == null || !Number.isFinite(milliseconds)) return "—";
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-  if (seconds < 60) return `${seconds}秒`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}分 ${seconds % 60}秒`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时 ${Math.floor(seconds % 3600 / 60)}分`;
-  return `${Math.floor(seconds / 86400)}天 ${Math.floor(seconds % 86400 / 3600)}小时`;
+  if (seconds < 60) return t("sharedModel.m013", { seconds: seconds });
+  if (seconds < 3600) return t("sharedModel.m014", { value1: Math.floor(seconds / 60), value2: seconds % 60 });
+  if (seconds < 86400) return t("sharedModel.m015", { value1: Math.floor(seconds / 3600), value2: Math.floor(seconds % 3600 / 60) });
+  return t("sharedModel.m016", { value1: Math.floor(seconds / 86400), value2: Math.floor(seconds % 86400 / 3600) });
 }
 
 export function formatRelativeTime(value: string | null | undefined, now = Date.now()): string {
   const at = timestamp(value);
   if (at === null || !Number.isFinite(now)) return "—";
   const seconds = Math.max(0, Math.floor((now - at) / 1000));
-  if (seconds < 5) return "刚刚";
-  if (seconds < 60) return `${seconds}秒前`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`;
-  return `${Math.floor(seconds / 86400)}天前`;
+  if (seconds < 5) return t("sharedModel.m017");
+  if (seconds < 60) return t("sharedModel.m018", { seconds: seconds });
+  if (seconds < 3600) return t("sharedModel.m019", { value1: Math.floor(seconds / 60) });
+  if (seconds < 86400) return t("sharedModel.m020", { value1: Math.floor(seconds / 3600) });
+  return t("sharedModel.m021", { value1: Math.floor(seconds / 86400) });
 }
 
 export function formatTokens(value: number | null | undefined): string {

@@ -1,3 +1,4 @@
+import { previewLanguage, setPreviewLanguage } from "./i18n";
 import { fixtureStats } from "./stats-fixture";
 import { createFixtureLedger } from "./deferred-fixture";
 import { quickReplyGroup, quickReplyGuard, quickReplyKey } from "../client/deferred-state";
@@ -160,6 +161,7 @@ export function useRpc(contract) {
     globalThis.__previewRpcCalls.push({ name: contract.name, input: { ...input } });
     let result;
     switch (contract.name) {
+      case "i18n.languages": result = { setting: previewLanguage, resolved: previewLanguage, system: "zh-CN", device: "zh-CN", folder: "/fixture/plugin-data/agent-observatory/locales", languages: [{ code: "zh-CN", name: "简体中文", builtIn: true, custom: false, coverage: 1, issues: [] }, { code: "en", name: "English", builtIn: true, custom: false, coverage: 1, issues: [] }] }; break;
       case "observatory.preferences.get": result=preferenceSnapshot(input.viewKey);break;
       case "observatory.deferred.send": {
         result = await fixtureLedger.send(input);
@@ -398,4 +400,27 @@ export function ToastHost() {
   return <div role="status" aria-live="polite" style={{ position: "fixed", left: 0, right: 0, bottom: 20, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", zIndex: 2000 }}>
     {toasts.map(toast => <div key={toast.id} style={{ maxWidth: "min(420px, calc(100vw - 32px))", padding: "9px 14px", borderRadius: 10, background: colors.surface2, border: `1px solid ${toast.variant === "error" ? colors.statusDanger : colors.border}`, color: toast.variant === "error" ? colors.statusDanger : colors.foreground, fontSize: 13, lineHeight: "19px", boxShadow: "0 6px 24px rgba(0,0,0,0.18)" }}>{toast.message}</div>)}
   </div>;
+}
+
+
+// Host settings controls used by the in-app language section. Only the fixture preview uses DOM elements.
+export function useSettings() {
+  const [values, setValues] = useState({ language: previewLanguage });
+  return { status: "ready", revision: "fixture", values, saving: false, saveError: null,
+    async save(next) { setValues(next); setPreviewLanguage(next.language === "auto" ? "zh-CN" : next.language); return true; } };
+}
+export function SettingsSection({ title, children }) {
+  return <section style={{ color: theme().colors.foreground, display: "flex", flexDirection: "column", gap: 8 }}><h3 style={{ fontSize: 14, margin: 0 }}>{title}</h3>{children}</section>;
+}
+export function SettingsCard({ children }) {
+  return <div style={{ border: `1px solid ${theme().colors.border}`, borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 12 }}>{children}</div>;
+}
+export function SettingsRow({ label, hint, children, error }) {
+  return <div style={{ fontSize: 13 }}><div>{label}</div>{hint && <div style={{ fontSize: 11, color: theme().colors.foregroundMuted, marginTop: 4, overflowWrap: "anywhere" }}>{hint}</div>}{children}{error && <div role="alert">{error}</div>}</div>;
+}
+export function SettingsSelect({ label, hint, value, options, onValueChange, disabled, error }) {
+  return <SettingsRow label={label} hint={hint} error={error}><select aria-label={label} value={value} onChange={event => onValueChange(event.target.value)} disabled={disabled} style={{ marginTop: 8, maxWidth: "100%" }}>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></SettingsRow>;
+}
+export function SettingsAction({ label, actionLabel, onPress }) {
+  return <SettingsRow label={label}><button onClick={onPress}>{actionLabel}</button></SettingsRow>;
 }

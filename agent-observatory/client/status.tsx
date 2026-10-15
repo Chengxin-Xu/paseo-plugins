@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type ViewStyle } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -18,22 +19,22 @@ export type Phase = SessionPhase;
 /** A palette hue, one of the semantic aliases (run blue, warn amber, fail red, ok green), or muted grey. */
 export type Hue = PaletteHue | "run" | "warn" | "fail" | "ok" | "muted";
 export const phases: Record<Phase, { label: string; hue: Hue; icon: string; hint: string }> = {
-  running: { label: "执行中", hue: "blue", icon: "LoaderCircle", hint: "Agent 正在工作，右侧按秒计时。这一轮已结束、子任务还在后台跑时也算，标「后台」" },
-  starting: { label: "启动中", hue: "sky", icon: "LoaderCircle", hint: "会话正在启动" },
-  approval: { label: "待审批", hue: "amber", icon: "Hand", hint: "有命令、文件改动等权限请求等你批准" },
-  question: { label: "提问", hue: "violet", icon: "MessageCircleQuestion", hint: "Agent 在问你问题、给了选项，等你回答（计入待回复）" },
-  plan: { label: "计划待批", hue: "amber", icon: "ClipboardList", hint: "Agent 写好了计划，等你批准后才动手" },
-  error: { label: "异常", hue: "red", icon: "X", hint: "这一轮失败了，可在详情里看原因；看过并点「知道了」后不再计入需要处理" },
-  quota: { label: "额度用尽", hue: "orange", icon: "BatteryWarning", hint: "这一轮因用量额度或限流停下，显示按本机时区的恢复时间，可安排恢复后续跑" },
-  silent: { label: "空轮", hue: "amber", icon: "CircleDashed", hint: "这一轮结束了，但没有任何文字、工具调用或推理" },
-  unfinished: { label: "未收尾", hue: "amber", icon: "CircleDotDashed", hint: "这一轮停在工具调用之后、没有收尾回复，或者宿主关闭会话时它还没结束，可能没做完" },
-  unread: { label: "未读", hue: "pink", icon: "Mail", hint: "Agent 已完成这一轮，结果你还没看" },
-  idle: { label: "待回复", hue: "violet", icon: "MessageCircleMore", hint: "Agent 的最后一条回复在问你：要不要继续、选哪个、需要你提供什么" },
-  done: { label: "已完成", hue: "green", icon: "Check", hint: "这一轮已完成，结果你已经看过" },
-  snoozed: { label: "稍后", hue: "indigo", icon: "AlarmClock", hint: "未读结果已延后提醒" },
-  quiet: { label: "空闲", hue: "muted", icon: "CirclePause", hint: "Agent 已停下，这一轮没有记录到结果" },
-  closed: { label: "已关闭", hue: "muted", icon: "CircleStop", hint: "会话已关闭" },
-  canceled: { label: "已取消", hue: "muted", icon: "CircleSlash", hint: "这一轮被取消" },
+  running: { get label() { return t("secondaryStatus.running"); }, hue: "blue", icon: "LoaderCircle", get hint() { return t("secondaryStatus.theAgentIsWorkingWithElapsed"); } },
+  starting: { get label() { return t("secondaryStatus.starting"); }, hue: "sky", icon: "LoaderCircle", get hint() { return t("secondaryStatus.theSessionIsStarting"); } },
+  approval: { get label() { return t("secondaryStatus.waitingForApproval"); }, hue: "amber", icon: "Hand", get hint() { return t("secondaryStatus.commandsFileChangesOrOtherPermission"); } },
+  question: { get label() { return t("secondaryStatus.question"); }, hue: "violet", icon: "MessageCircleQuestion", get hint() { return t("secondaryStatus.theAgentHasAQuestionWith"); } },
+  plan: { get label() { return t("secondaryStatus.planNeedsApproval"); }, hue: "amber", icon: "ClipboardList", get hint() { return t("secondaryStatus.theAgentHasAPlanReady"); } },
+  error: { get label() { return t("secondaryStatus.error"); }, hue: "red", icon: "X", get hint() { return t("secondaryStatus.thisTurnFailedViewDetailsFor"); } },
+  quota: { get label() { return t("secondaryStatus.quotaExhausted"); }, hue: "orange", icon: "BatteryWarning", get hint() { return t("secondaryStatus.thisTurnStoppedDueToA"); } },
+  silent: { get label() { return t("secondaryStatus.emptyTurn"); }, hue: "amber", icon: "CircleDashed", get hint() { return t("secondaryStatus.thisTurnEndedWithoutTextTool"); } },
+  unfinished: { get label() { return t("secondaryStatus.unfinished"); }, hue: "amber", icon: "CircleDotDashed", get hint() { return t("secondaryStatus.thisTurnStoppedAfterATool"); } },
+  unread: { get label() { return t("secondaryStatus.unread"); }, hue: "pink", icon: "Mail", get hint() { return t("secondaryStatus.theAgentFinishedThisTurnBut"); } },
+  idle: { get label() { return t("secondaryStatus.waitingForReply"); }, hue: "violet", icon: "MessageCircleMore", get hint() { return t("secondaryStatus.theAgentSLastReplyAsks"); } },
+  done: { get label() { return t("secondaryStatus.completed"); }, hue: "green", icon: "Check", get hint() { return t("secondaryStatus.thisTurnIsCompleteAndYou"); } },
+  snoozed: { get label() { return t("secondaryStatus.snoozed"); }, hue: "indigo", icon: "AlarmClock", get hint() { return t("secondaryStatus.theUnreadResultReminderIsSnoozed"); } },
+  quiet: { get label() { return t("secondaryStatus.idle"); }, hue: "muted", icon: "CirclePause", get hint() { return t("secondaryStatus.theAgentStoppedButNoResult"); } },
+  closed: { get label() { return t("secondaryStatus.closed"); }, hue: "muted", icon: "CircleStop", get hint() { return t("secondaryStatus.theSessionIsClosed"); } },
+  canceled: { get label() { return t("secondaryStatus.canceled"); }, hue: "muted", icon: "CircleSlash", get hint() { return t("secondaryStatus.thisTurnWasCanceled"); } },
 };
 export const phaseOrder: readonly Phase[] = ["running", "starting", "approval", "question", "plan", "error", "quota", "silent", "unfinished", "unread", "idle", "done", "snoozed", "quiet", "closed", "canceled"];
 /** Phases that want attention or are working right now; they get weight and a tinted row. */
@@ -139,16 +140,16 @@ export function PhaseLine({ theme, agent, snoozed = false }: { theme: PluginThem
   const muted = meta.hue === "muted";
   const label = meta.label;
   const background = phase === "running" && !agent.activeTurnStartedAt ? agent.background : null;
-  const detail: ReactNode = phase === "running" && agent.activeTurnStartedAt ? <LiveTimer since={agent.activeTurnStartedAt} color={text} prefix="已运行 " size={fontSize.small} />
-    : background ? background.since ? <LiveTimer since={background.since} color={text} prefix="后台子任务已运行 " size={fontSize.small} /> : `后台子任务 ${background.running} 个在执行`
-    : phase === "approval" && agent.pendingPermissionCount > 0 ? `${agent.pendingPermissionCount} 项请求等你处理`
-    : phase === "question" ? agent.pendingPermissionCount > 1 ? `${agent.pendingPermissionCount} 个问题等你回答` : "等你回答"
-    : phase === "plan" ? "等你批准计划"
-    : phase === "quota" ? agent.stop?.resetAt ? agent.stop.resetGuessed ? `约 ${clockLabel(agent.stop.resetAt)} 恢复（推测）` : `${clockLabel(agent.stop.resetAt)} 恢复` : "恢复时间未知"
-    : phase === "silent" ? "这一轮没有任何输出" : phase === "unfinished" ? agent.stop?.closedMidTurn ? "宿主关闭时还没结束" : "停在工具调用之后"
-    : phase === "unread" ? "新结果等你查看" : phase === "snoozed" ? "未读，已延后提醒" : phase === "done" ? "结果已读"
-    : phase === "idle" ? agent.lastActivityAt ? `在问你 · ${relativeTime(agent.lastActivityAt)}` : "在问你"
-    : phase === "quiet" ? "没有记录到这一轮的结果" : null;
+  const detail: ReactNode = phase === "running" && agent.activeTurnStartedAt ? <LiveTimer since={agent.activeTurnStartedAt} color={text} prefix={t("secondaryStatus.runningFor")} size={fontSize.small} />
+    : background ? background.since ? <LiveTimer since={background.since} color={text} prefix={t("secondaryStatus.backgroundSubtasksRunningFor")} size={fontSize.small} /> : t("secondaryStatus.backgroundSubtasksRunning", { value1: background.running })
+    : phase === "approval" && agent.pendingPermissionCount > 0 ? t("secondaryStatus.requestsNeedYou", { count: agent.pendingPermissionCount })
+    : phase === "question" ? agent.pendingPermissionCount > 1 ? t("secondaryStatus.questionsAwaitYourAnswer", { count: agent.pendingPermissionCount }) : t("secondaryStatus.waitingForYourAnswer")
+    : phase === "plan" ? t("secondaryStatus.waitingForYourPlanApproval")
+    : phase === "quota" ? agent.stop?.resetAt ? agent.stop.resetGuessed ? t("secondaryStatus.resetsAroundEstimated", { value1: clockLabel(agent.stop.resetAt) }) : t("secondaryStatus.resets", { value1: clockLabel(agent.stop.resetAt) }) : t("secondaryStatus.resetTimeUnknown")
+    : phase === "silent" ? t("secondaryStatus.noOutputInThisTurn") : phase === "unfinished" ? agent.stop?.closedMidTurn ? t("secondaryStatus.stillRunningWhenPaseoClosed") : t("secondaryStatus.stoppedAfterAToolCall")
+    : phase === "unread" ? t("secondaryStatus.aNewResultAwaitsYou") : phase === "snoozed" ? t("secondaryStatus.unreadReminderSnoozed") : phase === "done" ? t("secondaryStatus.resultRead")
+    : phase === "idle" ? agent.lastActivityAt ? t("secondaryStatus.askingYou", { value1: relativeTime(agent.lastActivityAt) }) : t("secondaryStatus.askingYou2")
+    : phase === "quiet" ? t("secondaryStatus.noResultRecordedForThisTurn") : null;
   return <View accessibilityLabel={readLabel(agent)} style={{ flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: space.xs + 2, minHeight: 26, paddingLeft: 6, paddingRight: 10, borderRadius: radius.full, backgroundColor: muted ? theme.colors.surface2 : tint(color, tintAlpha(theme)) }}>
     <Pop count={changes} size={16}><StatusGlyph theme={theme} phase={phase} /></Pop>
     <Text numberOfLines={1} style={{ color: muted ? theme.colors.foreground : text, fontSize: fontSize.small, fontWeight: "600" }}>{label}</Text>

@@ -1,3 +1,6 @@
+import { joinList } from "../shared/i18n";
+import { currentLanguage } from "../shared/i18n";
+import { t } from "../shared/text";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { usePaseo, useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -43,11 +46,11 @@ interface AgentDetailProps { hostId: string; agent: AgentRecord;
   /** Heartbeats that wake this Agent (opus-B8). */ heartbeats?: readonly HeartbeatSummary[];
   /** Extra menu entries from the host view, e.g. 在观测台中查看 in the panel. */ extraActions?: readonly MenuAction[] }
 // Each tab has its own colour, so the section you are in reads at a glance.
-const tabs = [{ value: "result", label: "结果", icon: "FileCheck", tone: "green" }, { value: "digest", label: "复盘", icon: "ChartGantt", tone: "fuchsia" }, { value: "timeline", label: "时间线", icon: "ListTree", tone: "blue" }, { value: "children", label: "子任务", icon: "Workflow", tone: "violet" },
-  { value: "diagnostics", label: "诊断", icon: "Stethoscope", tone: "orange" }, { value: "insights", label: "分析", icon: "Sparkles", tone: "pink" }] as const;
+const tabs = [{ value: "result", get label() { return t("coreAgentDetail.result"); }, icon: "FileCheck", tone: "green" }, { value: "digest", get label() { return t("coreAgentDetail.recap"); }, icon: "ChartGantt", tone: "fuchsia" }, { value: "timeline", get label() { return t("coreAgentDetail.timeline"); }, icon: "ListTree", tone: "blue" }, { value: "children", get label() { return t("coreAgentDetail.subtasks"); }, icon: "Workflow", tone: "violet" },
+  { value: "diagnostics", get label() { return t("coreAgentDetail.diagnostics"); }, icon: "Stethoscope", tone: "orange" }, { value: "insights", get label() { return t("coreAgentDetail.analysis"); }, icon: "Sparkles", tone: "pink" }] as const;
 type DetailTab = typeof tabs[number]["value"];
 type Action = { key: string; label: string; icon: string; onPress: () => void; busy?: boolean; disabled?: boolean };
-const localTime = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "未报告";
+const localTime = (value: string | null) => value ? new Date(value).toLocaleString(currentLanguage(), { hour12: false }) : t("coreAgentDetail.notReported");
 
 export function AgentDetail({ hostId, agent, agents, theme, compact, navigation, onSelectAgent, onClose, telemetry, onReadNext, onSnooze, queue, initialEvidenceRef, onOpenSchedules, heartbeats, extraActions = [] }: AgentDetailProps) {
   const { colors } = theme;
@@ -96,7 +99,8 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     // cannot be resumed), so its result may stay unreadable: the server checks the exact token then (P2-4). The result on screen
     // must have been read for this very turn: a heartbeat's turn keeps the host's tokens, its completion and round do not (codex-obs-attn-F1).
     const unreadable = !!result.error && agent.rawStatus === "closed";
-    if (ackKind !== "problem" && !unreadable && (!result.data || !sameResultSource(agent, result.data.source))) { toast.show("结果正在更新，请等最新回复载入后再标记"); void result.refetch(); return; }
+    // Catalog migration preserves the guarded notice: if (ackKind !== "problem" && !unreadable && (!result.data || !sameResultSource(agent, result.data.source))) { toast.show("结果正在更新，请等最新回复载入后再标记"); void result.refetch(); return; }
+    if (ackKind !== "problem" && !unreadable && (!result.data || !sameResultSource(agent, result.data.source))) { toast.show(t("coreAgentDetail.theResultIsUpdatingWaitForThe")); void result.refetch(); return; }
     setReading(true);
     try {
       // A result names the completion shown as unread: after another prompt the host's attention still carries the first,
@@ -126,11 +130,11 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
         if (answer.status === "stale") void queryCache.invalidateQueries({ queryKey: telemetryQueryKey(hostId) });
       }
       void queryCache.invalidateQueries({ queryKey: readReceiptQueryKey });
-    } catch (error) { toast.error(error instanceof Error ? error.message : "已读同步失败"); }
+    } catch (error) { toast.error(error instanceof Error ? error.message : t("coreAgentDetail.couldNotSyncReadStatus")); }
     finally { setReading(false); }
   };
-  const openConversation = () => { try { Promise.resolve(navigation?.openAgent({ agentId: agent.id })).catch(error => toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`)); } catch (error) { toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`); } };
-  const archiveOriginal = async () => { setArchiving(true); try { await paseo.agents.ref(agent.id).archive(); toast.show("已归档", { variant: "success" }); onClose?.(); } catch (error) { toast.error(error instanceof Error ? error.message : "归档失败，请重试"); } finally { setArchiving(false); } };
+  const openConversation = () => { try { Promise.resolve(navigation?.openAgent({ agentId: agent.id })).catch(error => toast.error(t("coreAgentDetail.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") }))); } catch (error) { toast.error(t("coreAgentDetail.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") })); } };
+  const archiveOriginal = async () => { setArchiving(true); try { await paseo.agents.ref(agent.id).archive(); toast.show(t("coreAgentDetail.archived"), { variant: "success" }); onClose?.(); } catch (error) { toast.error(error instanceof Error ? error.message : t("coreAgentDetail.couldNotArchiveTryAgain")); } finally { setArchiving(false); } };
   // 恢复会话 runs as a job on the server and is read every few seconds: a slow worktree rebuild outlasts the host's 30 s RPC limit (opus-F73).
   const restoring = useRestoreSession(agent.id);
   const restoreOriginal = async () => {
@@ -138,7 +142,7 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     if (answer.status === "restored" || answer.status === "already_active") { toast.show(answer.message, { variant: "success" }); openConversation(); }
     else if (answer.status === "failed") toast.error(answer.message); else toast.show(answer.message);
   };
-  const snooze = onSnooze ? () => { void onSnooze(agent).catch(error => toast.error(error instanceof Error ? error.message : "稍后处理失败")); } : undefined;
+  const snooze = onSnooze ? () => { void onSnooze(agent).catch(error => toast.error(error instanceof Error ? error.message : t("coreAgentDetail.couldNotSnooze"))); } : undefined;
   const openEvidence = (ref: string) => { setFocusRef(ref); setTab("timeline"); };
   const permissions = permissionRequests(pendingDetails.data?.agent ?? timeline.snapshot);
   const pending = agent.pendingPermissionCount;
@@ -146,42 +150,42 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   const waiting = waitingKind(agent);
 
   // A question is answered and a plan read in the conversation itself (opus-F12).
-  const open: Action | null = navigation ? { key: "open", label: waiting === "question" ? "去回答" : waiting === "plan" ? "查看计划" : pending ? "处理审批" : "打开会话", icon: "ArrowUpRight", onPress: openConversation } : null;
-  const read: Action | null = ackKind === "result" ? { key: onReadNext ? "next" : "read", label: onReadNext ? "已读并看下一个" : "标记已读", icon: onReadNext ? "ListChecks" : "Check", onPress: () => void acknowledge(!!onReadNext), busy: reading, disabled: result.isPending }
-    : ackKind === "question" ? { key: "read", label: "标记已读", icon: "Check", onPress: () => void acknowledge(false), busy: reading, disabled: result.isPending }
-    : ackKind === "problem" ? { key: "read", label: "知道了", icon: "Check", onPress: () => void acknowledge(false), busy: reading } : null;
-  const archive: Action | null = !agent.archivedAt && readState === "read" ? { key: "archive", label: "归档", icon: "Archive", onPress: () => void archiveOriginal(), busy: archiving } : null;
-  const restoreAction: Action | null = agent.archivedAt ? { key: "restore", label: restoring.restoring ? "正在恢复…" : "恢复会话", icon: "History", onPress: () => void restoreOriginal(), busy: restoring.restoring } : null;
-  const snoozeAction: Action | null = (ackKind === "result" || ackKind === "question") && snooze ? { key: "snooze", label: "稍后处理", icon: "Clock3", onPress: snooze } : null;
+  const open: Action | null = navigation ? { key: "open", label: waiting === "question" ? t("coreAgentDetail.answer") : waiting === "plan" ? t("coreAgentDetail.viewPlan") : pending ? t("coreAgentDetail.reviewApproval") : t("coreAgentDetail.openSession"), icon: "ArrowUpRight", onPress: openConversation } : null;
+  const read: Action | null = ackKind === "result" ? { key: onReadNext ? "next" : "read", label: onReadNext ? t("coreAgentDetail.markReadAndNext") : t("coreAgentDetail.markRead"), icon: onReadNext ? "ListChecks" : "Check", onPress: () => void acknowledge(!!onReadNext), busy: reading, disabled: result.isPending }
+    : ackKind === "question" ? { key: "read", label: t("coreAgentDetail.markRead"), icon: "Check", onPress: () => void acknowledge(false), busy: reading, disabled: result.isPending }
+    : ackKind === "problem" ? { key: "read", label: t("coreAgentDetail.gotIt"), icon: "Check", onPress: () => void acknowledge(false), busy: reading } : null;
+  const archive: Action | null = !agent.archivedAt && readState === "read" ? { key: "archive", label: t("coreAgentDetail.archive"), icon: "Archive", onPress: () => void archiveOriginal(), busy: archiving } : null;
+  const restoreAction: Action | null = agent.archivedAt ? { key: "restore", label: restoring.restoring ? t("coreAgentDetail.restoring") : t("coreAgentDetail.restoreSession"), icon: "History", onPress: () => void restoreOriginal(), busy: restoring.restoring } : null;
+  const snoozeAction: Action | null = (ackKind === "result" || ackKind === "question") && snooze ? { key: "snooze", label: t("coreAgentDetail.snooze"), icon: "Clock3", onPress: snooze } : null;
   const ordered = (agent.archivedAt ? [restoreAction, open] : [open, read, compact ? null : snoozeAction, archive]).filter((item): item is Action => !!item);
   const variantOf = (action: Action, index: number): ButtonVariant => index === 0 ? "primary" : action.key === "read" || action.key === "next" || (agent.archivedAt && action.key === "open") ? "secondary" : "ghost";
   const menu: MenuAction[] = [
-    ...(unread && onReadNext ? [{ key: "read-only", label: "标记已读", icon: "Check", hint: "留在当前结果", disabled: reading || result.isPending, onPress: () => void acknowledge(false) }] : []),
-    ...(compact && snoozeAction ? [{ key: "snooze", label: "稍后处理", icon: "Clock3", hint: "1 小时后再提醒，有新结果会立即提醒", onPress: snoozeAction.onPress }] : []),
+    ...(unread && onReadNext ? [{ key: "read-only", label: t("coreAgentDetail.markRead"), icon: "Check", hint: t("coreAgentDetail.stayOnThisResult"), disabled: reading || result.isPending, onPress: () => void acknowledge(false) }] : []),
+    ...(compact && snoozeAction ? [{ key: "snooze", label: t("coreAgentDetail.snooze"), icon: "Clock3", hint: t("coreAgentDetail.remindIn1HourOrImmediatelyWhen"), onPress: snoozeAction.onPress }] : []),
     // refetch() forces a read even while the query waits, which would load an archived schedule session.
-    ...(tab === "result" && !waitForTap ? [{ key: "refresh", label: "刷新结果", icon: "RefreshCw", onPress: () => void result.refetch() }] : []),
-    ...(agent.parentAgentId ? [{ key: "parent", label: "查看上级 Agent", icon: "CornerLeftUp", onPress: () => onSelectAgent(agent.parentAgentId!) }] : []),
-    { key: "copy-id", label: "复制 Agent ID", icon: "Copy", onPress: () => { void copyText(agent.id).then(() => toast.show("已复制 Agent ID")).catch(() => toast.error("复制失败")); } },
+    ...(tab === "result" && !waitForTap ? [{ key: "refresh", label: t("coreAgentDetail.refreshResult"), icon: "RefreshCw", onPress: () => void result.refetch() }] : []),
+    ...(agent.parentAgentId ? [{ key: "parent", label: t("coreAgentDetail.viewParentAgent"), icon: "CornerLeftUp", onPress: () => onSelectAgent(agent.parentAgentId!) }] : []),
+    { key: "copy-id", label: t("coreAgentDetail.copyAgentId"), icon: "Copy", onPress: () => { void copyText(agent.id).then(() => toast.show(t("coreAgentDetail.agentIdCopied"))).catch(() => toast.error(t("coreAgentDetail.couldNotCopy"))); } },
     ...extraActions,
   ];
   const header = <View style={{ gap: space.sm, paddingTop: compact ? space.lg : 0 }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 26 }}>
       <PhaseLine theme={theme} agent={displayedAgent} />
-      {!compact && onClose ? <><Spacer /><IconButton theme={theme} icon="X" label="关闭详情" size="sm" onPress={onClose} /></> : null}
+      {!compact && onClose ? <><Spacer /><IconButton theme={theme} icon="X" label={t("coreAgentDetail.closeDetails")} size="sm" onPress={onClose} /></> : null}
     </View>
     <Text selectable numberOfLines={compact ? undefined : 3} style={{ color: colors.foreground, fontSize: fontSize.heading, fontWeight: "600", lineHeight: 26 }}>{agent.title}</Text>
     <IdentityLine theme={theme} agent={agent} compact={compact} />
     <LiveMeta theme={theme} agent={agent} totalRunMs={observed?.totalRunMs} tools={result.data?.metrics.tools} />
     {agent.background && agent.status === "running" && !agent.activeTurnStartedAt ? <Banner theme={theme} tone="info" icon="Workflow"
-      message={`这一轮已结束，后台还有 ${agent.background.running} 个子任务在执行${agent.background.labels.length ? `：${agent.background.labels.join("、")}` : ""}`}
-      action={{ label: "查看子任务", onPress: () => setTab("children") }} /> : null}
-    {restoring.restoring ? <Banner theme={theme} tone="info" icon="History" message={restoring.progress ?? "正在恢复会话…"} /> : null}
+      message={t("coreAgentDetail.thisTurnHasEndedSubtasksAreStill", { value1: agent.background.running, value2: agent.background.labels.length ? t("coreAgentDetail.message", { value1: joinList(agent.background.labels) }) : "" })}
+      action={{ label: t("coreAgentDetail.viewSubtasks"), onPress: () => setTab("children") }} /> : null}
+    {restoring.restoring ? <Banner theme={theme} tone="info" icon="History" message={restoring.progress ?? t("coreAgentDetail.restoringSession")} /> : null}
     {!compact && ordered.length ? <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm, paddingTop: space.xs }}>
       {ordered.map((action, index) => <Button key={action.key} theme={theme} label={action.label} icon={action.icon} variant={variantOf(action, index)} busy={action.busy} disabled={action.disabled} onPress={action.onPress} />)}
-      <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
-      {queue ? <MetaLine theme={theme} parts={[`未读 ${queue.index} / ${queue.total}`]} /> : null}
+      <IconButton theme={theme} icon="Ellipsis" label={t("coreAgentDetail.moreActions")} onPress={() => setMenuOpen(true)} />
+      {queue ? <MetaLine theme={theme} parts={[t("coreAgentDetail.unread", { value1: queue.index, value2: queue.total })]} /> : null}
     </View> : null}
-    {!compact && !ordered.length ? <View style={{ alignItems: "flex-start" }}><IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} /></View> : null}
+    {!compact && !ordered.length ? <View style={{ alignItems: "flex-start" }}><IconButton theme={theme} icon="Ellipsis" label={t("coreAgentDetail.moreActions")} onPress={() => setMenuOpen(true)} /></View> : null}
   </View>;
   // Six sections: phones drop the icons and let the row scroll sideways instead of clipping the last tab.
   const tabBar = compact ? <ScrollView horizontal showsHorizontalScrollIndicator={false}><Tabs theme={theme} value={tab} onChange={setTab} options={tabs.map(({ icon: _icon, ...option }) => option)} /></ScrollView>
@@ -193,7 +197,7 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   // 交给另一个 Provider opens the new Agent: in the app when possible, else here.
   const openHandedOver = (id: string) => {
     if (!navigation) { onSelectAgent(id); return; }
-    try { Promise.resolve(navigation.openAgent({ agentId: id })).catch(error => toast.error(`新 Agent 打开失败：${error instanceof Error ? error.message : "请稍后重试"}`)); } catch (error) { toast.error(`新 Agent 打开失败：${error instanceof Error ? error.message : "请稍后重试"}`); }
+    try { Promise.resolve(navigation.openAgent({ agentId: id })).catch(error => toast.error(t("coreAgentDetail.couldNotOpenNewAgent", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") }))); } catch (error) { toast.error(t("coreAgentDetail.couldNotOpenNewAgent", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") })); }
   };
   const stopCard = agent.stop ? <StopCard theme={theme} agent={agent} heartbeats={heartbeats} hostId={hostId} onOpenConversation={navigation ? openConversation : undefined} onHandedOver={openHandedOver}
     onScheduled={() => { void queryCache.invalidateQueries({ queryKey: heartbeatsQueryKey(hostId) }); }} /> : null;
@@ -202,8 +206,8 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   // A schedule Agent whose session cannot be read (an ACP session cannot be resumed, the log is gone) still has the reply its run recorded.
   const recordedFallback = !!scheduleRunId && !recordedFirst && !!result.error && !result.data;
   const body = tab === "result" ? waitForTap ? <RecordedRunResult theme={theme} runId={scheduleRunId!} header={scrolled} lead={lead} inset={inset} onLoadFull={() => setFullResult(true)} />
-    : recordedFallback ? <RecordedRunResult theme={theme} runId={scheduleRunId!} header={scrolled} lead={lead} inset={inset} loadLabel="重试读取会话" loadHint={null} loading={result.isFetching}
-      notice={`会话读取失败：${describeRunError(result.error?.message)?.summary ?? "请稍后重试"}。下面是定时任务记录的回复。`} onLoadFull={() => void result.refetch()} />
+    : recordedFallback ? <RecordedRunResult theme={theme} runId={scheduleRunId!} header={scrolled} lead={lead} inset={inset} loadLabel={t("coreAgentDetail.retryLoadingSession")} loadHint={null} loading={result.isFetching}
+      notice={t("coreAgentDetail.couldNotLoadSessionTheReplyRecorded", { value1: describeRunError(result.error?.message)?.summary ?? t("coreAgentDetail.tryAgainLater") })} onLoadFull={() => void result.refetch()} />
     : <ResultView theme={theme} agent={agent} data={result.data} loading={result.isPending} error={result.error ? knownRunError(result.error.message) ?? result.error.message : undefined} header={scrolled} lead={lead} inset={inset} pending={pending} permissions={permissions} onResolvePermissions={navigation ? openConversation : undefined} onPermissionsChanged={() => void pendingDetails.refetch()} compact={compact} onOpenEvidence={openEvidence} onRefresh={() => void result.refetch()} />
     : tab === "digest" ? <AgentDigest theme={theme} compact={compact} digest={digest.data} loading={digest.isPending} error={digest.error?.message} onRefresh={() => void digest.refetch()}
       onOpenSeq={(epoch, seq) => openEvidence(`${agent.id}:${epoch}:${seq}-${seq}`)} header={scrolled} inset={inset} />
@@ -217,7 +221,7 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
           : <Diagnostics theme={theme} agent={agent} compact={compact} observed={observed} activity={activity} evidence={evidence.data} evidenceLoading={evidence.isPending} evidenceError={!!evidence.error} />}
       </View>
     </ScrollView>;
-  const actionMenu = <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />;
+  const actionMenu = <ActionMenu theme={theme} title={t("coreAgentDetail.moreActions")} open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />;
   // A running turn sweeps a thin bar across the top of the pane.
   const blue = hueColor(theme, "run");
   const sweep = agent.status === "running" && !agent.archivedAt ? <Sweep color={blue} track={tint(blue, 0.14)} /> : <View style={{ height: 2 }} />;
@@ -230,9 +234,9 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   const bottom = (agent.archivedAt ? [open, restoreAction] : read ? [read, open] : readState === "read" ? [archive, open] : [open]).filter((item): item is Action => !!item);
   return <View testID="agent-detail" style={{ flex: 1, minHeight: 0 }}>
     <Toolbar theme={theme}>
-      {onClose ? <IconButton theme={theme} icon="ChevronLeft" label="返回列表" onPress={onClose} /> : null}
-      <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{queue ? `未读 ${queue.index} / ${queue.total}` : "会话详情"}</Text>
-      <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
+      {onClose ? <IconButton theme={theme} icon="ChevronLeft" label={t("coreAgentDetail.backToList")} onPress={onClose} /> : null}
+      <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{queue ? t("coreAgentDetail.unread", { value1: queue.index, value2: queue.total }) : t("coreAgentDetail.sessionDetails")}</Text>
+      <IconButton theme={theme} icon="Ellipsis" label={t("coreAgentDetail.moreActions")} onPress={() => setMenuOpen(true)} />
     </Toolbar>
     {agent.status === "running" && !agent.archivedAt ? sweep : null}
     {body}
@@ -253,12 +257,12 @@ function DirectorySubtasks(props: Omit<Parameters<typeof SubtasksView>[0], "agen
 /** Provider, usage and totals. A running turn's elapsed time ticks in the phase line instead. */
 function LiveMeta({ theme, agent, totalRunMs, tools }: { theme: PluginTheme; agent: AgentRecord; totalRunMs?: number; tools?: number }) {
   const now = useClock(60_000);
-  const runtime = !agent.activeTurnStartedAt && totalRunMs ? `累计运行 ${formatDuration(totalRunMs)}` : null;
-  return <MetaLine theme={theme} numberOfLines={2} parts={[providerLine(agent), runtime, agent.usage.totalTokens !== null ? `${compactNumber(agent.usage.totalTokens)} tokens` : null, tools ? `${tools} 次工具调用` : null, agent.archivedAt ? `归档于 ${relativeTime(agent.archivedAt, now)}` : null]} />;
+  const runtime = !agent.activeTurnStartedAt && totalRunMs ? t("coreAgentDetail.totalRuntime", { value1: formatDuration(totalRunMs) }) : null;
+  return <MetaLine theme={theme} numberOfLines={2} parts={[providerLine(agent), runtime, agent.usage.totalTokens !== null ? t("coreAgentDetail.tokenCount", { tokens: compactNumber(agent.usage.totalTokens) }) : null, tools ? t("coreAgentDetail.toolCalls", { count: tools }) : null, agent.archivedAt ? t("coreAgentDetail.archived2", { value1: relativeTime(agent.archivedAt, now) }) : null]} />;
 }
 
-const sectionLooks: Record<string, { icon: string; tone: "blue" | "violet" | "orange" | "teal" }> = {
-  执行上下文: { icon: "FolderGit2", tone: "blue" }, 会话历史: { icon: "History", tone: "violet" }, 用量: { icon: "Gauge", tone: "orange" }, 插件观察: { icon: "Eye", tone: "teal" }, 生命周期事件: { icon: "Activity", tone: "orange" },
+const sectionLooks: Record<string, { label: string; icon: string; tone: "blue" | "violet" | "orange" | "teal" }> = {
+  context: { get label() { return t("coreAgentDetail.executionContext"); }, icon: "FolderGit2", tone: "blue" }, history: { get label() { return t("coreAgentDetail.sessionHistory"); }, icon: "History", tone: "violet" }, usage: { get label() { return t("coreAgentDetail.usage"); }, icon: "Gauge", tone: "orange" }, observation: { get label() { return t("coreAgentDetail.pluginObservations"); }, icon: "Eye", tone: "teal" }, lifecycle: { get label() { return t("coreAgentDetail.lifecycleEvents"); }, icon: "Activity", tone: "orange" },
 };
 function Diagnostics({ theme, agent, compact, observed, activity, evidence, evidenceLoading, evidenceError }: {
   theme: PluginTheme; agent: AgentRecord; compact: boolean; observed?: TelemetrySnapshot["agents"][number]; activity: TelemetrySnapshot["events"];
@@ -266,41 +270,41 @@ function Diagnostics({ theme, agent, compact, observed, activity, evidence, evid
 }) {
   const now = useClock(30_000);
   const usage = agent.usage;
-  const section = (title: string, children: ReactNode, info?: readonly string[]) => <View style={{ gap: space.xs }}>
-    <PaneLabel theme={theme} icon={sectionLooks[title]?.icon} tone={sectionLooks[title]?.tone} trailing={info ? <InfoButton theme={theme} title={`关于${title}`} lines={info} /> : undefined}>{title}</PaneLabel>
+  const section = (id: string, children: ReactNode, info?: readonly string[]) => { const title = sectionLooks[id]!.label; return <View style={{ gap: space.xs }}>
+    <PaneLabel theme={theme} icon={sectionLooks[id]?.icon} tone={sectionLooks[id]?.tone} trailing={info ? <InfoButton theme={theme} title={t("coreAgentDetail.about", { value1: title })} lines={info} /> : undefined}>{title}</PaneLabel>
     {children}
-  </View>;
+  </View>; };
   return <View style={{ gap: space.xl }}>
     {agent.lastError ? <Banner theme={theme} tone="danger" message={agent.lastError} /> : null}
-    {section("执行上下文", <View>
-      <KeyValue theme={theme} compact={compact} label="项目" value={agent.projectName} />
-      <KeyValue theme={theme} compact={compact} label="项目根目录" value={agent.projectRootPath || "未报告"} mono />
-      <KeyValue theme={theme} compact={compact} label="工作区" value={agent.workspaceName || agent.workspaceId || "尚未归属工作区"} />
-      <KeyValue theme={theme} compact={compact} label="检出类型" value={agent.checkoutKind === "worktree" ? "独立 worktree" : checkoutName(agent)} />
-      {agent.checkoutKind === "worktree" ? <><KeyValue theme={theme} compact={compact} label="Worktree 名称" value={agent.worktreeName || "未报告"} /><KeyValue theme={theme} compact={compact} label="Worktree 路径" value={agent.worktreePath || "未报告"} mono /></> : null}
-      <KeyValue theme={theme} compact={compact} label="分支" value={agent.branch || "未报告 / 分离 HEAD"} mono={!!agent.branch} />
-      <KeyValue theme={theme} compact={compact} label="Agent 工作目录" value={agent.cwd || "未报告"} mono />
-      <KeyValue theme={theme} compact={compact} label="Agent ID" value={agent.id} mono />
-      <KeyValue theme={theme} compact={compact} label="原始运行状态" value={agent.rawStatus} />
-      <KeyValue theme={theme} compact={compact} label="创建时间" value={localTime(agent.createdAt)} />
-      <KeyValue theme={theme} compact={compact} label="最近活动" value={localTime(agent.lastActivityAt)} />
-      {agent.parentAgentId ? <KeyValue theme={theme} compact={compact} label="上级 Agent" value={agent.parentAgentId} mono /> : null}
+    {section("context", <View>
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.project")} value={agent.projectName} />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.projectRoot")} value={agent.projectRootPath || t("coreAgentDetail.notReported")} mono />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.workspace")} value={agent.workspaceName || agent.workspaceId || t("coreAgentDetail.noWorkspaceAssigned")} />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.checkoutType")} value={agent.checkoutKind === "worktree" ? t("coreAgentDetail.separateWorktree") : checkoutName(agent)} />
+      {agent.checkoutKind === "worktree" ? <><KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.worktreeName")} value={agent.worktreeName || t("coreAgentDetail.notReported")} /><KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.worktreePath")} value={agent.worktreePath || t("coreAgentDetail.notReported")} mono /></> : null}
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.branch")} value={agent.branch || t("coreAgentDetail.notReportedDetachedHead")} mono={!!agent.branch} />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.agentWorkingDirectory")} value={agent.cwd || t("coreAgentDetail.notReported")} mono />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.agentId")} value={agent.id} mono />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.rawRuntimeStatus")} value={agent.rawStatus} />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.created")} value={localTime(agent.createdAt)} />
+      <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.lastActive")} value={localTime(agent.lastActivityAt)} />
+      {agent.parentAgentId ? <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.parentAgent")} value={agent.parentAgentId} mono /> : null}
     </View>)}
-    {section("会话历史", evidenceLoading ? <Skeleton theme={theme} rows={1} /> : evidenceError ? <MetaLine theme={theme} parts={["历史证据暂不可用，切换标签后会重试"]} /> : evidence ? <View style={{ gap: space.sm }}>
-      <StatRow theme={theme} stats={[{ label: "用户轮次", value: String(evidence.turns) }, { label: "工具执行", value: String(evidence.tools) }, { label: "工具失败", value: String(evidence.toolFailures), tone: evidence.toolFailures ? "danger" : undefined }]} />
-      <MetaLine theme={theme} numberOfLines={2} parts={[evidence.complete ? "覆盖宿主保留的完整历史" : evidence.coverageReason || "只覆盖部分历史窗口"]} />
+    {section("history", evidenceLoading ? <Skeleton theme={theme} rows={1} /> : evidenceError ? <MetaLine theme={theme} parts={[t("coreAgentDetail.historyEvidenceIsTemporarilyUnavailableSwitchingTabs")]} /> : evidence ? <View style={{ gap: space.sm }}>
+      <StatRow theme={theme} stats={[{ label: t("coreAgentDetail.userTurns"), value: String(evidence.turns) }, { label: t("coreAgentDetail.toolRuns"), value: String(evidence.tools) }, { label: t("coreAgentDetail.toolFailures"), value: String(evidence.toolFailures), tone: evidence.toolFailures ? "danger" : undefined }]} />
+      <MetaLine theme={theme} numberOfLines={2} parts={[evidence.complete ? t("coreAgentDetail.coversTheFullHistoryKeptByPaseo") : evidence.coverageReason || t("coreAgentDetail.coversOnlyPartOfTheHistory")]} />
     </View> : null)}
-    {section("用量", <View style={{ gap: space.sm }}>
-      <StatRow theme={theme} stats={[{ label: "输入 tokens", value: formatTokens(usage.inputTokens) }, { label: "输出 tokens", value: formatTokens(usage.outputTokens) }, { label: "缓存命中", value: formatTokens(usage.cachedInputTokens) }, { label: "API 等价费用", value: usage.costUsd === null ? "—" : `$${usage.costUsd.toFixed(4)}` }]} />
-      {usage.contextTotal !== null ? <MetaLine theme={theme} parts={[`上下文 ${formatTokens(usage.contextUsed)} / ${formatTokens(usage.contextTotal)}`]} /> : null}
-    </View>, ["只展示提供方最近一次报告的用量。", "没有报告的指标显示为 —，不当作 0。", "API 等价费用是 Agent 自己按 API 价目算的参考值；用订阅或代理时，它不是你的实际账单。"])}
-    {section("插件观察", <StatRow theme={theme} stats={[{ label: "完成轮次", value: observed ? String(observed.completedTurns) : "—" }, { label: "失败轮次", value: observed ? String(observed.failedTurns) : "—", tone: observed?.failedTurns ? "danger" : undefined }, { label: "累计运行", value: observed ? formatDuration(observed.totalRunMs) || "0 秒" : "—" }, { label: "等待审批", value: observed ? formatDuration(observed.permissionWaitMs) || "0 秒" : "—" }]} />,
-      ["从插件开始观察后累计，不是会话的终身总量。"])}
-    {activity.length ? section("生命周期事件", <View>{activity.map(event => <View key={event.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32 }}>
+    {section("usage", <View style={{ gap: space.sm }}>
+      <StatRow theme={theme} stats={[{ label: t("coreAgentDetail.inputTokens"), value: formatTokens(usage.inputTokens) }, { label: t("coreAgentDetail.outputTokens"), value: formatTokens(usage.outputTokens) }, { label: t("coreAgentDetail.cacheHits"), value: formatTokens(usage.cachedInputTokens) }, { label: t("coreAgentDetail.apiEquivalentCost"), value: usage.costUsd === null ? "—" : `$${usage.costUsd.toFixed(4)}` }]} />
+      {usage.contextTotal !== null ? <MetaLine theme={theme} parts={[t("coreAgentDetail.context", { value1: formatTokens(usage.contextUsed), value2: formatTokens(usage.contextTotal) })]} /> : null}
+    </View>, [t("coreAgentDetail.showsOnlyTheProviderSLatestReported"), t("coreAgentDetail.unreportedMetricsShowAsNot0"), t("coreAgentDetail.apiEquivalentCostIsTheAgentS")])}
+    {section("observation", <StatRow theme={theme} stats={[{ label: t("coreAgentDetail.completedTurns"), value: observed ? String(observed.completedTurns) : "—" }, { label: t("coreAgentDetail.failedTurns"), value: observed ? String(observed.failedTurns) : "—", tone: observed?.failedTurns ? "danger" : undefined }, { label: t("coreAgentDetail.totalRuntime2"), value: observed ? formatDuration(observed.totalRunMs) || t("coreAgentDetail.value0Seconds") : "—" }, { label: t("coreAgentDetail.waitingForApproval"), value: observed ? formatDuration(observed.permissionWaitMs) || t("coreAgentDetail.value0Seconds") : "—" }]} />,
+      [t("coreAgentDetail.countsFromWhenThePluginBeganObserving")])}
+    {activity.length ? section("lifecycle", <View>{activity.map(event => <View key={event.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32 }}>
       <EventGlyph theme={theme} type={event.type} size={14} />
       <Text numberOfLines={1} style={{ flex: 1, color: theme.colors.foreground, fontSize: fontSize.small }}>{eventLabel(event)}</Text>
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{relativeTime(event.at, now)}</Text>
     </View>)}</View>) : null}
-    {Object.keys(agent.labels).length ? <CodeBlock theme={theme} label="Agent 标签" value={agent.labels} /> : null}
+    {Object.keys(agent.labels).length ? <CodeBlock theme={theme} label={t("coreAgentDetail.agentLabels")} value={agent.labels} /> : null}
   </View>;
 }

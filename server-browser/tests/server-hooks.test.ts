@@ -18,7 +18,7 @@ function host(){
     handle:(contract:{name:string},handler:Handler)=>{rpc.set(contract.name,handler);},
     on:(name:string,handler:Handler)=>{events.set(name,handler);return()=>{};},
     before:(name:string,handler:Handler)=>{before.set(name,handler);return()=>{};},
-    registerSettings(){},registerProvider(){},
+    registerSettings(){return {read:async()=>({status:'ready',revision:'r1',values:{language:'zh-CN'}}),subscribe:()=>()=>{}};},registerProvider(){},
   } as unknown as PluginServerContext;
   const restored:string[][]=[],frames:unknown[][]=[],directories:[string,string][]=[],retired:string[]=[],orphanCalls:unknown[][]=[],unretired:string[]=[],inputs:unknown[][]=[];
   const manager={

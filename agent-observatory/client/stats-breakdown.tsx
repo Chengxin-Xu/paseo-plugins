@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -10,19 +11,19 @@ import { IconDisk, StatsGate, StatsHeader, rowHues, trackFor, vendorLabel, type 
 
 export type BreakdownDimension = "models" | "vendors" | "providers" | "projects" | "tools" | "observed";
 const dimensions: Array<{ value: BreakdownDimension; label: string; icon: string; tone: Hue }> = [
-  { value: "models", label: "模型", icon: "Cpu", tone: "cyan" }, { value: "vendors", label: "厂商", icon: "Building2", tone: "orange" },
-  { value: "providers", label: "Harness", icon: "SquareTerminal", tone: "violet" }, { value: "projects", label: "项目", icon: "FolderGit2", tone: "blue" },
-  { value: "tools", label: "工具", icon: "Wrench", tone: "teal" }, { value: "observed", label: "观测", icon: "Activity", tone: "pink" },
+  { value: "models", get label() { return t("secondaryStatsBreakdown.model"); }, icon: "Cpu", tone: "cyan" }, { value: "vendors", get label() { return t("secondaryStatsBreakdown.vendor"); }, icon: "Building2", tone: "orange" },
+  { value: "providers", get label() { return t("secondaryStatsBreakdown.harness"); }, icon: "SquareTerminal", tone: "violet" }, { value: "projects", get label() { return t("secondaryStatsBreakdown.project"); }, icon: "FolderGit2", tone: "blue" },
+  { value: "tools", get label() { return t("secondaryStatsBreakdown.tools"); }, icon: "Wrench", tone: "teal" }, { value: "observed", get label() { return t("secondaryStatsBreakdown.observations"); }, icon: "Activity", tone: "pink" },
 ];
 type RowMetric = "turns" | "sessions" | "runMs" | "toolCalls" | "linesAdded";
 const rowMetrics: Record<RowMetric, { label: string; format: (value: number) => string }> = {
-  turns: { label: "轮次", format: bigNumber }, sessions: { label: "会话", format: bigNumber }, runMs: { label: "时长", format: shortHours },
-  toolCalls: { label: "工具", format: bigNumber }, linesAdded: { label: "代码", format: value => `+${bigNumber(value)}` },
+  turns: { get label() { return t("secondaryStatsBreakdown.turns"); }, format: bigNumber }, sessions: { get label() { return t("secondaryStatsBreakdown.sessions"); }, format: bigNumber }, runMs: { get label() { return t("secondaryStatsBreakdown.duration"); }, format: shortHours },
+  toolCalls: { get label() { return t("secondaryStatsBreakdown.tools"); }, format: bigNumber }, linesAdded: { get label() { return t("secondaryStatsBreakdown.code"); }, format: value => `+${bigNumber(value)}` },
 };
 const kindLooks: Record<ToolKind, { label: string; icon: string; hue: Hue }> = {
-  shell: { label: "命令行", icon: "SquareTerminal", hue: "orange" }, read: { label: "读文件", icon: "FileText", hue: "blue" }, edit: { label: "改文件", icon: "FilePen", hue: "green" },
-  search: { label: "搜索", icon: "Search", hue: "indigo" }, web: { label: "联网", icon: "Globe", hue: "cyan" }, agent: { label: "子 Agent", icon: "Bot", hue: "fuchsia" },
-  plan: { label: "计划", icon: "ListChecks", hue: "teal" }, other: { label: "其他", icon: "Puzzle", hue: "gray" },
+  shell: { get label() { return t("secondaryStatsBreakdown.commandLine"); }, icon: "SquareTerminal", hue: "orange" }, read: { get label() { return t("secondaryStatsBreakdown.readFiles"); }, icon: "FileText", hue: "blue" }, edit: { get label() { return t("secondaryStatsBreakdown.editFiles"); }, icon: "FilePen", hue: "green" },
+  search: { get label() { return t("secondaryStatsBreakdown.search"); }, icon: "Search", hue: "indigo" }, web: { get label() { return t("secondaryStatsBreakdown.web"); }, icon: "Globe", hue: "cyan" }, agent: { get label() { return t("secondaryStatsBreakdown.subagents"); }, icon: "Bot", hue: "fuchsia" },
+  plan: { get label() { return t("secondaryStatsBreakdown.plan"); }, icon: "ListChecks", hue: "teal" }, other: { get label() { return t("secondaryStatsBreakdown.other"); }, icon: "Puzzle", hue: "gray" },
 };
 
 function Stat({ theme, label, value, color }: { theme: PluginTheme; label: string; value: string; color?: Hue }) {
@@ -43,20 +44,20 @@ function RowMark({ theme, row, color, kind }: { theme: PluginTheme; row: StatsBr
 function TableHeader({ theme, metric, context }: { theme: PluginTheme; metric: RowMetric; context: boolean }) {
   const cell = (label: string, width: number | undefined, active = false, flex?: number) => <Text numberOfLines={1} style={{ width, flex, textAlign: flex ? "left" : "right", color: active ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: 11, fontWeight: active ? "800" : "600" }}>{label}</Text>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: trackFor(theme) }}>
-    <View style={{ width: columns.rank + 20 + space.sm }} />{cell("名称", undefined, false, 1.6)}<View style={{ flex: 1 }} />
-    {cell(rowMetrics[metric].label, columns.value, true)}{cell("占比", columns.share)}{cell("成功率", columns.rate)}{cell("平均每轮", columns.avg)}{cell("工具/轮", columns.tools)}{cell("代码 +/−", columns.code)}{context ? cell("上下文", columns.context) : null}
+    <View style={{ width: columns.rank + 20 + space.sm }} />{cell(t("secondaryStatsBreakdown.name"), undefined, false, 1.6)}<View style={{ flex: 1 }} />
+    {cell(rowMetrics[metric].label, columns.value, true)}{cell(t("secondaryStatsBreakdown.share"), columns.share)}{cell(t("secondaryStatsBreakdown.successRate"), columns.rate)}{cell(t("secondaryStatsBreakdown.averagePerTurn"), columns.avg)}{cell(t("secondaryStatsBreakdown.toolsTurn"), columns.tools)}{cell(t("secondaryStatsBreakdown.code2"), columns.code)}{context ? cell(t("secondaryStatsBreakdown.context"), columns.context) : null}
   </View>;
 }
 function WideRow({ theme, row, rank, color, metric, max, total, kind, context }: { theme: PluginTheme; row: StatsBreakdownRow; rank: number; color: Hue; metric: RowMetric; max: number; total: number; kind: BreakdownDimension; context: boolean }) {
   const { colors } = theme, value = row[metric], rate = successRate(row), avg = averageTurnMs(row);
-  const sub = kind === "models" || kind === "providers" ? vendorLabel(row.vendor) : `${row.activeDays} 天活跃`;
+  const sub = kind === "models" || kind === "providers" ? vendorLabel(row.vendor) : t("secondaryStatsBreakdown.activeDays", { value1: row.activeDays });
   const figure = (text: string, width: number, color?: string, weight: "600" | "800" = "600") => <Text numberOfLines={1} style={{ width, textAlign: "right", color: color ?? colors.foreground, fontSize: fontSize.small, fontWeight: weight, fontVariant: ["tabular-nums"] }}>{text}</Text>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 50, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: trackFor(theme) }}>
     <Text style={{ width: columns.rank, color: rank <= 3 ? hue(theme, color, "text") : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: "800", fontVariant: ["tabular-nums"], textAlign: "center" }}>{rank}</Text>
     <RowMark theme={theme} row={row} color={color} kind={kind} />
     <View style={{ flex: 1.6, minWidth: 0 }}>
       <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{row.label}</Text>
-      <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>{sub}{row.running ? ` · ${row.running} 个执行中` : ""}</Text>
+      <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>{sub}{row.running ? t("secondaryStatsBreakdown.running", { value1: row.running }) : ""}</Text>
     </View>
     <View style={{ flex: 1, minWidth: 60 }}><InlineBar value={value} max={max} color={hue(theme, color)} track={trackFor(theme)} height={8} /></View>
     {figure(rowMetrics[metric].format(value), columns.value, undefined, "800")}
@@ -81,12 +82,12 @@ function Podium({ theme, rows, colors, metric, total, compact }: { theme: Plugin
           <View style={[{ width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: withAlpha("#ffffff", 0.7) }, gradient(theme, medals[index]!, { angle: 135 })]}>
             <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "900" }}>{index + 1}</Text>
           </View>
-          {compact ? null : <Text numberOfLines={1} style={{ flex: 1, color: withAlpha("#ffffff", 0.85), fontSize: 11, fontWeight: "700" }}>{row.vendor ? vendorLabel(row.vendor) : `${row.activeDays} 天活跃`}</Text>}
+          {compact ? null : <Text numberOfLines={1} style={{ flex: 1, color: withAlpha("#ffffff", 0.85), fontSize: 11, fontWeight: "700" }}>{row.vendor ? vendorLabel(row.vendor) : t("secondaryStatsBreakdown.activeDays", { value1: row.activeDays })}</Text>}
         </View>
         <Text numberOfLines={compact ? 2 : 1} style={{ color: "#ffffff", fontSize: compact ? fontSize.small : fontSize.body, fontWeight: "800", lineHeight: compact ? 17 : 20 }}>{row.label}</Text>
         <View style={{ flex: 1 }} />
         <Text numberOfLines={1} style={{ color: "#ffffff", fontSize: compact ? fontSize.title : 22, fontWeight: "900", fontVariant: ["tabular-nums"] }}>{rowMetrics[metric].format(row[metric])}</Text>
-        <Text numberOfLines={1} style={{ color: withAlpha("#ffffff", 0.85), fontSize: 11, fontWeight: "700" }}>占 {percent(total ? row[metric] / total : 0)}</Text>
+        <Text numberOfLines={1} style={{ color: withAlpha("#ffffff", 0.85), fontSize: 11, fontWeight: "700" }}>{t("secondaryStatsBreakdown.share2", { value1: percent(total ? row[metric] / total : 0) })}</Text>
       </View>; })}
   </View>;
 }
@@ -94,14 +95,14 @@ function Podium({ theme, rows, colors, metric, total, compact }: { theme: Plugin
 function BreakdownRow({ theme, row, rank, color, metric, max, total, kind, compact }: { theme: PluginTheme; row: StatsBreakdownRow; rank: number; color: Hue; metric: RowMetric; max: number; total: number; kind: BreakdownDimension; compact: boolean }) {
   const { colors } = theme, value = row[metric], rate = successRate(row), avg = averageTurnMs(row);
   const mark = <RowMark theme={theme} row={row} color={color} kind={kind} />;
-  const sub = kind === "models" || kind === "providers" ? vendorLabel(row.vendor) : `${row.activeDays} 天活跃`;
+  const sub = kind === "models" || kind === "providers" ? vendorLabel(row.vendor) : t("secondaryStatsBreakdown.activeDays", { value1: row.activeDays });
   return <View style={{ paddingVertical: 10, gap: 6, borderBottomWidth: 1, borderBottomColor: trackFor(theme) }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
       <Text style={{ width: 20, color: rank <= 3 ? hue(theme, color, "text") : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: "800", fontVariant: ["tabular-nums"], textAlign: "center" }}>{rank}</Text>
       {mark}
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{row.label}</Text>
-        <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>{sub}{row.running ? ` · ${row.running} 个执行中` : ""}</Text>
+        <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>{sub}{row.running ? t("secondaryStatsBreakdown.running", { value1: row.running }) : ""}</Text>
       </View>
       {!compact ? <View style={{ width: "26%" }}><InlineBar value={value} max={max} color={hue(theme, color)} track={trackFor(theme)} height={7} /></View> : null}
       <Text style={{ width: compact ? undefined : 76, color: colors.foreground, fontSize: fontSize.body, fontWeight: "800", textAlign: "right", fontVariant: ["tabular-nums"] }}>{rowMetrics[metric].format(value)}</Text>
@@ -109,11 +110,11 @@ function BreakdownRow({ theme, row, rank, color, metric, max, total, kind, compa
     </View>
     {compact ? <View style={{ marginLeft: 28 + space.sm * 2 }}><InlineBar value={value} max={max} color={hue(theme, color)} track={trackFor(theme)} height={6} /></View> : null}
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.lg, marginLeft: 28 + space.sm * 2 }}>
-      <Stat theme={theme} label="成功率" value={percent(rate, 1)} color={rateHue(rate)} />
-      <Stat theme={theme} label="平均每轮" value={avg ? shortHours(avg) : "—"} />
-      <Stat theme={theme} label="工具/轮" value={row.turns && row.toolCalls ? (row.toolCalls / row.turns).toFixed(1) : "—"} />
-      <Stat theme={theme} label="代码" value={code(row)} />
-      {kind !== "projects" && row.contextMax ? <Stat theme={theme} label="上下文" value={percent(row.contextUsed! / row.contextMax)} /> : null}
+      <Stat theme={theme} label={t("secondaryStatsBreakdown.successRate")} value={percent(rate, 1)} color={rateHue(rate)} />
+      <Stat theme={theme} label={t("secondaryStatsBreakdown.averagePerTurn")} value={avg ? shortHours(avg) : "—"} />
+      <Stat theme={theme} label={t("secondaryStatsBreakdown.toolsTurn")} value={row.turns && row.toolCalls ? (row.toolCalls / row.turns).toFixed(1) : "—"} />
+      <Stat theme={theme} label={t("secondaryStatsBreakdown.code")} value={code(row)} />
+      {kind !== "projects" && row.contextMax ? <Stat theme={theme} label={t("secondaryStatsBreakdown.context")} value={percent(row.contextUsed! / row.contextMax)} /> : null}
     </View>
   </View>;
 }
@@ -130,17 +131,17 @@ function BreakdownTable({ theme, stats, kind, compact }: { theme: PluginTheme; s
   const look = dimensions.find(item => item.value === kind)!;
   const shown = expanded ? rows : rows.slice(0, 8);
   const wide = width >= 860, context = kind !== "projects" && rows.some(row => row.contextMax);
-  return <Card theme={theme} title={`${look.label}分布`} icon={look.icon} color={look.tone} trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{rows.filter(row => row.key !== "__other__").length} 个</Text>}>
+  return <Card theme={theme} title={t("secondaryStatsBreakdown.distribution", { value1: look.label })} icon={look.icon} color={look.tone} trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStatsBreakdown.items", { value1: rows.filter(row => row.key !== "__other__").length })}</Text>}>
     <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ gap: space.md }}>
-      <Segmented theme={theme} size="sm" value={metric} onChange={setMetric} accessibilityLabel="排序指标" options={(Object.keys(rowMetrics) as RowMetric[]).map(value => ({ value, label: rowMetrics[value].label }))} />
+      <Segmented theme={theme} size="sm" value={metric} onChange={setMetric} accessibilityLabel={t("secondaryStatsBreakdown.sortMetric")} options={(Object.keys(rowMetrics) as RowMetric[]).map(value => ({ value, label: rowMetrics[value].label }))} />
       <Podium theme={theme} rows={rows} colors={colors} metric={metric} total={total} compact={!wide && width < 560} />
       <CompositionBar track={trackFor(theme)} height={12} segments={rows.map(row => ({ key: row.key, value: row[metric], color: hue(theme, colors.get(row.key) ?? "gray") }))} />
     </View>
-    {!rows.length ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>这个范围内还没有数据</Text>
+    {!rows.length ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>{t("secondaryStatsBreakdown.noDataInThisRangeYet")}</Text>
       : wide ? <View><TableHeader theme={theme} metric={metric} context={context} />{shown.map((row, index) => <WideRow key={row.key} theme={theme} row={row} rank={index + 1} color={colors.get(row.key) ?? "gray"} metric={metric} max={max} total={total} kind={kind} context={context} />)}</View>
       : <View>{shown.map((row, index) => <BreakdownRow key={row.key} theme={theme} row={row} rank={index + 1} color={colors.get(row.key) ?? "gray"} metric={metric} max={max} total={total} kind={kind} compact={compact} />)}</View>}
     {rows.length > 8 ? <Pressable accessibilityRole="button" onPress={() => setExpanded(!expanded)} style={{ alignSelf: "center", paddingVertical: 6, paddingHorizontal: 12, borderRadius: radius.full }}>
-      <Text style={{ color: hue(theme, look.tone, "text"), fontSize: fontSize.small, fontWeight: "700" }}>{expanded ? "收起" : `展开全部（还有 ${rows.length - 8} 个）`}</Text>
+      <Text style={{ color: hue(theme, look.tone, "text"), fontSize: fontSize.small, fontWeight: "700" }}>{expanded ? t("secondaryStatsBreakdown.collapse") : t("secondaryStatsBreakdown.expandAllMore", { value1: rows.length - 8 })}</Text>
     </Pressable> : null}
   </Card>;
 }
@@ -157,35 +158,35 @@ function ToolsView({ theme, stats, compact }: { theme: PluginTheme; stats: Stats
       <Text style={{ width: 56, textAlign: "right", color: rate >= 0.05 ? hue(theme, "red", "text") : theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{tool.failures ? `✕ ${percent(rate, 1)}` : "—"}</Text>
     </View>; };
   return <>
-    <Card theme={theme} title="工具类型" icon="Shapes" color="teal" trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{bigNumber(total)} 次</Text>}>
+    <Card theme={theme} title={t("secondaryStatsBreakdown.toolTypes")} icon="Shapes" color="teal" trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStatsBreakdown.calls", { count: bigNumber(total) })}</Text>}>
       <CompositionBar track={trackFor(theme)} height={12} segments={kinds.map(kind => ({ key: kind.kind, value: kind.calls, color: hue(theme, kindLooks[kind.kind].hue) }))} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
         {kinds.map(kind => <View key={kind.kind} style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: compact ? "45%" : 150 }}>
           <IconDisk theme={theme} icon={kindLooks[kind.kind].icon} colors={[kindLooks[kind.kind].hue]} size={24} />
           <View><Text style={{ color: theme.colors.foreground, fontSize: fontSize.small, fontWeight: "700" }}>{kindLooks[kind.kind].label} <Text style={{ color: theme.colors.foregroundMuted, fontWeight: "400" }}>{percent(total ? kind.calls / total : 0)}</Text></Text>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{bigNumber(kind.calls)} 次{kind.failures ? ` · 失败 ${bigNumber(kind.failures)}` : ""}</Text></View>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{t("secondaryStatsBreakdown.calls2", { count: bigNumber(kind.calls), value2: kind.failures ? t("secondaryStatsBreakdown.failed", { value1: bigNumber(kind.failures) }) : "" })}</Text></View>
         </View>)}
       </View>
     </Card>
-    <Card theme={theme} title="常用工具" icon="Wrench" color="cyan" trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>前 {stats.tools.length}</Text>}>
-      {stats.tools.length ? <View>{stats.tools.map(row)}</View> : <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>下一轮对话结束后开始统计工具调用</Text>}
+    <Card theme={theme} title={t("secondaryStatsBreakdown.topTools")} icon="Wrench" color="cyan" trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryStatsBreakdown.top", { value1: stats.tools.length })}</Text>}>
+      {stats.tools.length ? <View>{stats.tools.map(row)}</View> : <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>{t("secondaryStatsBreakdown.toolCallTrackingStartsAfterThe")}</Text>}
     </Card>
   </>;
 }
 
 function Summary({ theme, stats, compact }: { theme: PluginTheme; stats: StatsSnapshot; compact: boolean }) {
-  const t = stats.totals, avg = averageTurnMs(t), par = observedParallelism(stats.daily, t.peakParallel);
+  const totals = stats.totals, avg = averageTurnMs(totals), par = observedParallelism(stats.daily, totals.peakParallel);
   const items: Array<{ label: string; value: string; icon: string; colors: readonly [Hue, Hue] }> = [
-    { label: "工作时长", value: shortHours(t.runMs), icon: "Timer", colors: ["pink", "orange"] },
-    { label: "并行时长", value: shortHours(t.busyMs), icon: "Layers", colors: ["orange", "amber"] },
-    { label: "平均并发", value: par ? `${par.toFixed(1)}×` : "—", icon: "Network", colors: ["violet", "fuchsia"] },
-    { label: "平均每轮", value: avg ? shortHours(avg) : "—", icon: "Hourglass", colors: ["blue", "cyan"] },
-    { label: "消息 / 会话", value: t.sessions ? ((t.userMessages + t.assistantMessages) / t.sessions).toFixed(1) : "—", icon: "MessagesSquare", colors: ["cyan", "teal"] },
-    { label: "你发的消息", value: bigNumber(t.userMessages), icon: "User", colors: ["indigo", "violet"] },
-    { label: "代码 新增 / 删除", value: `+${bigNumber(t.linesAdded)} / −${bigNumber(t.linesRemoved)}`, icon: "FileDiff", colors: ["green", "lime"] },
-    { label: "审批等待", value: shortHours(t.waitMs), icon: "Hand", colors: ["amber", "orange"] },
+    { label: t("secondaryStatsBreakdown.workingTime"), value: shortHours(totals.runMs), icon: "Timer", colors: ["pink", "orange"] },
+    { label: t("secondaryStatsBreakdown.parallelTime"), value: shortHours(totals.busyMs), icon: "Layers", colors: ["orange", "amber"] },
+    { label: t("secondaryStatsBreakdown.averageConcurrency"), value: par ? `${par.toFixed(1)}×` : "—", icon: "Network", colors: ["violet", "fuchsia"] },
+    { label: t("secondaryStatsBreakdown.averagePerTurn"), value: avg ? shortHours(avg) : "—", icon: "Hourglass", colors: ["blue", "cyan"] },
+    { label: t("secondaryStatsBreakdown.messagesSession"), value: totals.sessions ? ((totals.userMessages + totals.assistantMessages) / totals.sessions).toFixed(1) : "—", icon: "MessagesSquare", colors: ["cyan", "teal"] },
+    { label: t("secondaryStatsBreakdown.yourMessages"), value: bigNumber(totals.userMessages), icon: "User", colors: ["indigo", "violet"] },
+    { label: t("secondaryStatsBreakdown.codeAddedRemoved"), value: `+${bigNumber(totals.linesAdded)} / −${bigNumber(totals.linesRemoved)}`, icon: "FileDiff", colors: ["green", "lime"] },
+    { label: t("secondaryStatsBreakdown.approvalWait"), value: shortHours(totals.waitMs), icon: "Hand", colors: ["amber", "orange"] },
   ];
-  return <Card theme={theme} title="时间与产出" icon="Gauge" color="pink">
+  return <Card theme={theme} title={t("secondaryStatsBreakdown.timeAndOutput")} icon="Gauge" color="pink">
     <View style={{ flexDirection: "row", flexWrap: "wrap", rowGap: space.md }}>
       {items.map(item => <View key={item.label} style={{ width: compact ? "50%" : "25%", flexDirection: "row", alignItems: "center", gap: space.sm, paddingRight: space.sm }}>
         <IconDisk theme={theme} icon={item.icon} colors={item.colors} size={30} />
@@ -202,7 +203,7 @@ function Summary({ theme, stats, compact }: { theme: PluginTheme; stats: StatsSn
 export function StatsBreakdown({ theme, compact, stats, loading, error, range, onRange, onRefresh, dimension, onDimension, observed }: StatsViewProps & {
   dimension: BreakdownDimension; onDimension: (dimension: BreakdownDimension) => void; observed: ReactNode;
 }) {
-  const picker = <Segmented theme={theme} size="sm" value={dimension} onChange={onDimension} accessibilityLabel="明细维度" options={dimensions.map(item => ({ value: item.value, label: item.label, icon: compact ? undefined : item.icon, tone: item.tone }))} />;
+  const picker = <Segmented theme={theme} size="sm" value={dimension} onChange={onDimension} accessibilityLabel={t("secondaryStatsBreakdown.breakdownDimension")} options={dimensions.map(item => ({ value: item.value, label: item.label, icon: compact ? undefined : item.icon, tone: item.tone }))} />;
   if (dimension === "observed") return <View style={{ flex: 1, minHeight: 0 }}>
     <View style={{ paddingHorizontal: compact ? space.md : space.xl, paddingTop: space.md }}><ScrollView horizontal showsHorizontalScrollIndicator={false}>{picker}</ScrollView></View>
     {observed}

@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import { bridgeBudgets, BUDGETS } from './budgets';
 import { MCP_ENVIRONMENT } from './runtime';
 
@@ -10,8 +11,44 @@ export function bridgeScript(runtimeRoot:string):string{
  return bridgeSource
   .replace('__SERVER_BROWSER_RUNTIME_ROOT__',()=>JSON.stringify(runtimeRoot))
   .replace('__SERVER_BROWSER_BUDGETS__',()=>JSON.stringify(bridgeBudgets(BUDGETS)))
-  .replace('__SERVER_BROWSER_MCP_ENVIRONMENT__',()=>JSON.stringify(MCP_ENVIRONMENT));
+  .replace('__SERVER_BROWSER_MCP_ENVIRONMENT__',()=>JSON.stringify(MCP_ENVIRONMENT))
+  .replace('__SERVER_BROWSER_TEXT__',()=>JSON.stringify(bridgeMessages()));
 }
+
+/** Resolved when the bridge starts and on every language change in its session metadata. */
+export const bridgeMessages=()=>({
+ metadataRequired:t('bridge.metadataRequired'),
+ invalidSessionFile:t('bridge.invalidSessionFile'),
+ sessionTooLarge:t('bridge.sessionTooLarge'),
+ notRunning:t('bridge.notRunning'),
+ loopbackRequired:t('bridge.loopbackRequired'),
+ mcpMissing:t('bridge.mcpMissing'),
+ mcpScriptRejected:t('bridge.mcpScriptRejected'),
+ callFailed:t('bridge.callFailed'),
+ mcpExited:t('bridge.mcpExited'),
+ mcpUnavailable:t('bridge.mcpUnavailable'),
+ toolTimeout:t('bridge.toolTimeout'),
+ controlFailed:t('bridge.controlFailed'),
+ pathsArray:t('bridge.pathsArray'),
+ workspaceMissing:t('bridge.workspaceMissing'),
+ invalidUploadPath:t('bridge.invalidUploadPath'),
+ dialogFailed:t('bridge.dialogFailed'),
+ inspectionFailed:t('bridge.inspectionFailed'),
+ panelManaged:t('bridge.panelManaged'),
+ unsafeTool:t('bridge.unsafeTool'),
+ requestDetailsBlocked:t('bridge.requestDetailsBlocked'),
+ unconfirmedTabIndex:t('bridge.unconfirmedTabIndex'),
+ unconfirmedNavigation:t('bridge.unconfirmedNavigation'),
+ targetClosed:t('bridge.targetClosed'),
+ tabsUnreadable:t('bridge.tabsUnreadable'),
+ tabsChanged:t('bridge.tabsChanged'),
+ uploadMissing:t('bridge.uploadMissing'),
+ uploadSymlink:t('bridge.uploadSymlink'),
+ uploadNotRegular:t('bridge.uploadNotRegular'),
+ uploadOutside:t('bridge.uploadOutside'),
+ unsupportedTool:t('bridge.unsupportedTool'),
+ selectionFailed:t('bridge.selectionFailed'),
+});
 
 export const bridgeSource = String.raw`import {spawn} from 'node:child_process';
 import {constants} from 'node:fs';
@@ -23,8 +60,10 @@ import {randomUUID} from 'node:crypto';
 const runtimeRoot=__SERVER_BROWSER_RUNTIME_ROOT__;
 const budgets=__SERVER_BROWSER_BUDGETS__;
 const mcpEnvironment=__SERVER_BROWSER_MCP_ENVIRONMENT__;
+let messages=__SERVER_BROWSER_TEXT__;
+function text(id,params={}){return (messages[id]||id).replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g,(whole,key)=>Object.hasOwn(params,key)?String(params[key]??''):whole);}
 const metadataPath=process.argv[2];
-if(!metadataPath) throw new Error('Browser session metadata is required.');
+if(!metadataPath) throw new Error(text('metadataRequired'));
 // What Playwright MCP writes (screenshots, request and console files, downloads) is for the daemon user alone, whatever
 // umask the Agent was started with.
 process.umask(0o077);
@@ -43,13 +82,13 @@ function send(value){if(!ending)process.stdout.write(JSON.stringify(value)+'\n')
 async function readJson(file,maxBytes){
  const handle=await open(file,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
  try{
-  const info=await handle.stat();if(!info.isFile()||info.size>maxBytes)throw new Error('Browser session file is not a small regular file.');
+  const info=await handle.stat();if(!info.isFile()||info.size>maxBytes)throw new Error(text('invalidSessionFile'));
   const buffer=Buffer.alloc(maxBytes+1);const {bytesRead}=await handle.read(buffer,0,buffer.length,0);
-  if(bytesRead>maxBytes)throw new Error('Browser session file is too large.');
+  if(bytesRead>maxBytes)throw new Error(text('sessionTooLarge'));
   return JSON.parse(buffer.subarray(0,bytesRead).toString('utf8'));
  }finally{await handle.close();}
 }
-function notRunning(){const missing=new Error('服务器浏览器尚未启动或正在恢复，请在 Paseo「服务器浏览器」面板查看状态后重试。');missing.code='ENOENT';return missing;}
+function notRunning(){const missing=new Error(text('notRunning'));missing.code='ENOENT';return missing;}
 // A session.json left by a crash, a kill or a reboot names ports anyone may hold now. It counts only while the Chromium it
 // records still runs as this user with this workspace's Profile (the plugin's own check); Chromium may rewrite its argv to
 // one space-separated process title.
@@ -64,9 +103,11 @@ async function browserRunning(value){
 }
 async function readMetadata(){
  let value;
- try{value=await readJson(metadataPath,65536);}
+ // Metadata includes bounded user translations (up to 4,000 characters per bridge message).
+ try{value=await readJson(metadataPath,1048576);}
  catch(error){if(error&&error.code==='ENOENT')throw notRunning();throw error;}
- for(const key of ['endpoint','cdpEndpoint']){const url=new URL(value[key]);if(url.protocol!=='http:'||url.hostname!=='127.0.0.1')throw new Error('Browser endpoints must be loopback.');}
+ if(value.text&&typeof value.text==='object')messages={...messages,...value.text};
+ for(const key of ['endpoint','cdpEndpoint']){const url=new URL(value[key]);if(url.protocol!=='http:'||url.hostname!=='127.0.0.1')throw new Error(text('loopbackRequired'));}
  if(!await browserRunning(value))throw notRunning();
  return value;
 }
@@ -90,8 +131,8 @@ async function mcpCli(value){
  const expected=join(runtimeRoot,'node_modules','@playwright','mcp','cli.js');
  let real,wanted,root;
  try{[real,wanted,root]=await Promise.all([realpath(typeof value==='string'&&value?value:expected),realpath(expected),realpath(runtimeRoot)]);}
- catch{throw new Error('服务器浏览器的运行时目录里没有 Playwright MCP，请在 daemon 主机运行插件目录里的 scripts/setup-runtime.mjs。');}
- if(real!==wanted||!inside(root,real))throw new Error('只能启动运行时目录里的 node_modules/@playwright/mcp/cli.js，已拒绝其他脚本。');
+ catch{throw new Error(text('mcpMissing'));}
+ if(real!==wanted||!inside(root,real))throw new Error(text('mcpScriptRejected'));
  return real;
 }
 // The workspace directory is Playwright MCP's file root and the only place uploads may come from.
@@ -121,18 +162,18 @@ async function launch(value){
   if(processChild!==child)return;
   let value;try{value=JSON.parse(line);}catch{return;}
   const item=pending.get(value.id);
-  if(item){clearTimeout(item.timer);pending.delete(value.id);value.error?item.reject(new Error(value.error.message||'Browser call failed.')):item.resolve(value.result);}
+  if(item){clearTimeout(item.timer);pending.delete(value.id);value.error?item.reject(new Error(value.error.message||text('callFailed'))):item.resolve(value.result);}
   else send(value);
  });
- function stopped(){if(processChild!==child)return;child=undefined;for(const item of pending.values()){clearTimeout(item.timer);item.reject(new Error('Browser MCP exited. Please retry.'));}pending.clear();output.close();}
+ function stopped(){if(processChild!==child)return;child=undefined;for(const item of pending.values()){clearTimeout(item.timer);item.reject(new Error(text('mcpExited')));}pending.clear();output.close();}
  processChild.on('error',error=>{process.stderr.write(error.message+'\n');stopped();});
  processChild.on('exit',stopped);
 }
 function callChild(method,params,timeoutMs){
- if(!child)return Promise.reject(new Error('Browser MCP is unavailable.'));
+ if(!child)return Promise.reject(new Error(text('mcpUnavailable')));
  const id='server-browser-internal-'+(++sequence);
  return new Promise((resolve,reject)=>{
-  const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Browser tool timed out.'));child?.kill('SIGTERM');},timeoutMs);
+  const timer=setTimeout(()=>{pending.delete(id);reject(new Error(text('toolTimeout')));child?.kill('SIGTERM');},timeoutMs);
   pending.set(id,{resolve,reject,timer});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
  });
 }
@@ -147,7 +188,7 @@ const controlTimeouts={read:budgets.readMs,diagnostics:budgets.readMs,tabs:budge
 async function control(action,extra={}){
  const fresh=await readMetadata();
  const response=await fetch(fresh.endpoint+'/'+action,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+fresh.token},body:JSON.stringify({...extra,workspaceId:fresh.workspaceId,owner,pid:process.pid}),signal:AbortSignal.timeout(controlTimeouts[action]||budgets.controlMs)});
- const data=await response.json(); if(!response.ok)throw new Error(data.error||'Browser control request failed.'); return data;
+ const data=await response.json(); if(!response.ok)throw new Error(data.error||text('controlFailed')); return data;
 }
 // Playwright MCP 0.0.82 tools the shared browser offers. Any other tool, including ones a later MCP adds, is refused.
 const readonlyTools=new Set(['browser_snapshot','browser_find','browser_wait_for','browser_take_screenshot','browser_console_messages','browser_network_requests','browser_network_request']);
@@ -171,18 +212,18 @@ function rememberTabs(result){const tabs=result.tabs||result.session?.tabs||[];t
 // Every path must be a regular file (not a symbolic link) whose real path is inside the workspace directory.
 // Relative paths are read from the workspace directory, as Playwright MCP does. The checked real paths are what MCP receives.
 async function workspaceFiles(paths){
- if(!Array.isArray(paths))throw new Error('paths 必须是文件路径数组。');
+ if(!Array.isArray(paths))throw new Error(text('pathsArray'));
  const root=await workspaceRoot();
- if(!root)throw new Error('服务器浏览器没有这个工作区的目录信息，不能上传文件。请在 Paseo 面板重新启动这个工作区的浏览器后重试。');
+ if(!root)throw new Error(text('workspaceMissing'));
  const checked=[];
  for(const item of paths){
-  if(typeof item!=='string'||!item||item.includes('\u0000'))throw new Error('上传路径无效。');
+  if(typeof item!=='string'||!item||item.includes('\u0000'))throw new Error(text('invalidUploadPath'));
   const candidate=resolve(root,item);
-  let info;try{info=await lstat(candidate);}catch{throw new Error('找不到要上传的文件：'+item);}
-  if(info.isSymbolicLink())throw new Error('不能上传符号链接：'+item+'。请改用工作区里的真实文件。');
-  if(!info.isFile())throw new Error('只能上传普通文件：'+item);
+  let info;try{info=await lstat(candidate);}catch{throw new Error(text('uploadMissing',{path:item}));}
+  if(info.isSymbolicLink())throw new Error(text('uploadSymlink',{path:item}));
+  if(!info.isFile())throw new Error(text('uploadNotRegular',{path:item}));
   const real=await realpath(candidate);
-  if(!inside(root,real))throw new Error('只能上传当前工作区目录里的文件：'+item);
+  if(!inside(root,real))throw new Error(text('uploadOutside',{path:item}));
   checked.push(real);
  }
  return checked;
@@ -209,18 +250,18 @@ async function handle(message){
  const args=message.params?.arguments||{};
  if(name==='browser_handle_dialog'){
   try{const value=await control('dialog',{accept:args.accept,promptText:args.promptText,dialogId:args.dialogId});send({jsonrpc:'2.0',id:message.id,result:textResult(value)});}
-  catch(error){refusal(message.id,error.message||'Browser dialog handling failed.');}
+  catch(error){refusal(message.id,error.message||text('dialogFailed'));}
   return;
  }
  if(name==='browser_diagnostics'||name==='browser_read_page'){
   try{const value=await control(name==='browser_diagnostics'?'diagnostics':'read',{...args,toolName:name});send({jsonrpc:'2.0',id:message.id,result:textResult(value)});}
-  catch(error){refusal(message.id,error.message||'Browser inspection failed.');}
+  catch(error){refusal(message.id,error.message||text('inspectionFailed'));}
   return;
  }
- if(name==='browser_close'||name==='browser_install'){refusal(message.id,'浏览器由 Paseo 共享面板管理。请通过面板停止或启动，不能由 Agent 关闭共享浏览器。');return;}
- if(unsafeTools.has(name)){refusal(message.id,'共享浏览器不提供在 MCP 进程中执行任意代码的工具。请改用 browser_evaluate（只在网页内执行）或其他浏览器工具。');return;}
- if(!readonlyTools.has(name)&&!writeTools.has(name)){refusal(message.id,'共享浏览器不提供工具 '+String(name)+'。请使用工具列表里的浏览器工具。');return;}
- if(name==='browser_network_request'&&!responseParts.has(args.part)){refusal(message.id,'共享浏览器不提供请求头和请求正文：其中可能有用户提交的密码、登录令牌或 Authorization 头，不带 part 的完整详情也包含请求头。请把 part 设为 response-headers 或 response-body 查看响应。');return;}
+ if(name==='browser_close'||name==='browser_install'){refusal(message.id,text('panelManaged'));return;}
+ if(unsafeTools.has(name)){refusal(message.id,text('unsafeTool'));return;}
+ if(!readonlyTools.has(name)&&!writeTools.has(name)){refusal(message.id,text('unsupportedTool',{name:String(name)}));return;}
+ if(name==='browser_network_request'&&!responseParts.has(args.part)){refusal(message.id,text('requestDetailsBlocked'));return;}
  const write=!readonlyTools.has(name)&&!(name==='browser_tabs'&&args.action==='list');
  let lease;
  try{
@@ -229,30 +270,30 @@ async function handle(message){
   if(fileTools.has(name)&&args.paths!==undefined)forwarded={...args,paths:await workspaceFiles(args.paths)};
   let tabId=args.tabId;
   if(name==='browser_tabs'&&['select','close'].includes(args.action)&&args.index!==undefined&&!tabId){
-   if(!Number.isInteger(args.index)||!tabSnapshot.has(args.index))throw new Error('标签序号没有对应的已确认目标。请先 browser_tabs list，再使用返回的稳定 tabId。');
+   if(!Number.isInteger(args.index)||!tabSnapshot.has(args.index))throw new Error(text('unconfirmedTabIndex'));
    tabId=tabSnapshot.get(args.index);
   }
   // The server checks the address with the panel's rules and returns the normalized one; MCP only ever gets that.
   lease=await control('acquire',{write,toolName:name,...(name==='browser_navigate'?{url:args.url}:{}),...(name==='browser_tabs'?{tabAction:args.action}:{}),...(tabId?{tabId}:{}),createTab:name==='browser_tabs'&&args.action==='new',closeTab:name==='browser_tabs'&&args.action==='close'});
-  if(name==='browser_navigate'){if(typeof lease.url!=='string')throw new Error('服务器没有确认导航地址，已停止。');forwarded={...args,url:lease.url};}
+  if(name==='browser_navigate'){if(typeof lease.url!=='string')throw new Error(text('unconfirmedNavigation'));forwarded={...args,url:lease.url};}
   if(name==='browser_tabs'){
    const result=await control('tabs',{leaseId:lease.leaseId,action:args.action,tabId,url:args.url});
    await control('release',{leaseId:lease.leaseId,failed:false});lease=undefined;
    send({jsonrpc:'2.0',id:message.id,result:textResult(rememberTabs(result))});return;
   }
   const selected=await control('validate',{leaseId:lease.leaseId});
-  if(!Number.isInteger(selected.activeIndex)||selected.activeIndex<0)throw new Error('目标标签页已经关闭，请重新查看标签列表。不会自动切换到其他网页。');
+  if(!Number.isInteger(selected.activeIndex)||selected.activeIndex<0)throw new Error(text('targetClosed'));
   // Populate Playwright MCP's lazy tab list before selecting an existing CDP target.
   const listing=await callChild('tools/call',{name:'browser_tabs',arguments:{action:'list'}},budgets.mcpInternalMs);
-  if(listing.isError)throw new Error('无法读取共享浏览器标签页，请重试连接。');
+  if(listing.isError)throw new Error(text('tabsUnreadable'));
   const selection=await callChild('tools/call',{name:'browser_tabs',arguments:{action:'select',index:selected.activeIndex}},budgets.mcpInternalMs);
-  if(selection.isError)throw new Error('无法选择共享浏览器的目标标签页：'+(selection.content||[]).filter(item=>item.type==='text').map(item=>item.text).join('\n'));
+  if(selection.isError)throw new Error(text('selectionFailed',{error:(selection.content||[]).filter(item=>item.type==='text').map(item=>item.text).join('\n')}));
   const validated=await control('validate',{leaseId:lease.leaseId});
-  if(validated.activeTargetId!==selected.activeTargetId||validated.activeIndex!==selected.activeIndex)throw new Error('标签列表在操作前发生变化，请刷新后重试。');
+  if(validated.activeTargetId!==selected.activeTargetId||validated.activeIndex!==selected.activeIndex)throw new Error(text('tabsChanged'));
   const result=await callChild(message.method,{...message.params,arguments:forwarded},budgets.mcpCallMs);
   await control('release',{leaseId:lease.leaseId,failed:result.isError===true});lease=undefined;
   send({jsonrpc:'2.0',id:message.id,result});
- }catch(error){refusal(message.id,error instanceof Error?error.message:'Browser call failed.');}
+ }catch(error){refusal(message.id,error instanceof Error?error.message:text('callFailed'));}
  finally{if(lease)await control('release',{leaseId:lease.leaseId,failed:true}).catch(()=>{});}
 }
 const input=createInterface({input:process.stdin});

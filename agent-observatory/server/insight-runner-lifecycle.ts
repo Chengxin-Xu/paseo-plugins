@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PaseoApi } from "./paseo-types";
 
 const insightIds = new Set<string>();
@@ -17,9 +18,9 @@ export function isInsightAgent(paseo: PaseoApi, agent: { id: string; labels?: Re
       const handle = paseo.agents.ref(agent.id);
       const current = handle.current();
       const snapshot = current ?? (await Promise.race([handle.refresh(), new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("会话标签读取超时")), 5000); timer.unref();
+        timer = setTimeout(() => reject(new Error(t("serverInsightRunnerLifecycle.m001"))), 5000); timer.unref();
       })]))?.agent;
-      if (!snapshot) throw new Error("会话元数据暂不可用");
+      if (!snapshot) throw new Error(t("serverInsightRunnerLifecycle.m002"));
       const insight = snapshot.labels?.["observatory.role"] === "insight";
       if (insight) markInsightAgent(agent.id);
       return insight || insightIds.has(agent.id);

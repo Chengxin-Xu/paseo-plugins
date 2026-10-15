@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import { createHash } from "node:crypto";
 import { statsRangeDays, vendorOf, type StatsRange } from "../../shared/stats";
 import { addTokenCounts, emptyTokenCounts, MAX_TOKEN_ROOTS, TOKEN_SOURCES, TOKEN_UNMATCHED, tokenSourceNames, tokenTotal, type TokenCounts, type TokenRow, type TokenSession, type TokenSnapshot } from "../../shared/tokens";
@@ -32,13 +33,13 @@ function sortedRows(rows: Map<string, Breakdown>): Breakdown[] {
 export const TOKEN_TEMPORARY_PROJECT = "__temporary__";
 function projectFor(cwd: string, projects: Map<string, StatsDirectoryAgent>): { key: string; label: string } {
   const agent = projects.get(cwd);
-  if (!agent && isTemporaryDirectory(cwd)) return { key: TOKEN_TEMPORARY_PROJECT, label: "临时目录" };
+  if (!agent && isTemporaryDirectory(cwd)) return { key: TOKEN_TEMPORARY_PROJECT, label: t("serverTokensSnapshot.m001") };
   return { key: agent?.projectKey || cwd || "unknown", label: agent?.projectName || projectName(cwd) };
 }
 function projectRows(rows: Breakdown[], limit: number): TokenRow[] {
   const selected = rows.length <= limit ? rows : rows.slice(0, limit - 1);
   if (rows.length > limit) {
-    const other: Breakdown = { key: "__other__", label: "其他", vendor: null, ids: new Set(), lastAt: -Infinity, ...emptyTokenCounts() };
+    const other: Breakdown = { key: "__other__", label: t("serverTokensSnapshot.m002"), vendor: null, ids: new Set(), lastAt: -Infinity, ...emptyTokenCounts() };
     for (const row of rows.slice(limit - 1)) {
       addTokenCounts(other, row); for (const id of row.ids) other.ids.add(id); other.lastAt = Math.max(other.lastAt, row.lastAt);
     }
@@ -87,7 +88,7 @@ export function buildTokenSnapshot(data: TokenData, input: { range: StatsRange; 
     if (day < from || day > today) continue;
     addTokenCounts(totals, bucket); addTokenCounts(daily[day - from], bucket);
     hours[statsLocalHour(at, zone)] += tokenTotal(bucket);
-    const model = getRow(models, bucket.model ?? "unknown", bucket.model ?? "未知", vendorOf(bucket.model, null));
+    const model = getRow(models, bucket.model ?? "unknown", bucket.model ?? t("serverTokensSnapshot.m003"), vendorOf(bucket.model, null));
     const source = getRow(sources, bucket.source, tokenSourceNames[bucket.source], null);
     for (const row of [model, source]) { addTokenCounts(row, bucket); row.lastAt = Math.max(row.lastAt, bucket.lastAt); }
   }
@@ -105,7 +106,7 @@ export function buildTokenSnapshot(data: TokenData, input: { range: StatsRange; 
     models.get(bucket.model ?? "unknown")?.ids.add(id); sources.get(bucket.source)?.ids.add(id); projects.get(project.key)?.ids.add(id);
     // No agent: the provider whose own log directory the session came from, if one does (gemini-B9).
     const owner = agent?.provider ?? owners.get(id) ?? owners.get(sessionKey(bucket.source, bucket.sessionId)) ?? null;
-    const provider = getRow(providers, owner ?? TOKEN_UNMATCHED, owner ?? "未关联会话", null);
+    const provider = getRow(providers, owner ?? TOKEN_UNMATCHED, owner ?? t("serverTokensSnapshot.m004"), null);
     addTokenCounts(provider, bucket); provider.lastAt = Math.max(provider.lastAt, bucket.lastAt); provider.ids.add(id);
     if (owner) { const mix = providerModels.get(owner) ?? new Map<string | null, number>(); mix.set(bucket.model, (mix.get(bucket.model) ?? 0) + bucket.calls); providerModels.set(owner, mix); }
     let row = sessions.get(id);
@@ -118,7 +119,7 @@ export function buildTokenSnapshot(data: TokenData, input: { range: StatsRange; 
   // Per-session detail is kept for 5,000 sessions; anything the session rows miss (never in practice) stays unmatched, so rows add up to the totals.
   const matched = emptyTokenCounts(); for (const row of providers.values()) addTokenCounts(matched, row);
   const rest = Object.fromEntries(Object.keys(matched).map(key => [key, Math.max(0, totals[key as keyof TokenCounts] - matched[key as keyof TokenCounts])])) as TokenCounts;
-  if (rest.calls || tokenTotal(rest)) addTokenCounts(getRow(providers, TOKEN_UNMATCHED, "未关联会话", null), rest);
+  if (rest.calls || tokenTotal(rest)) addTokenCounts(getRow(providers, TOKEN_UNMATCHED, t("serverTokensSnapshot.m005"), null), rest);
   for (const [provider, mix] of providerModels) {
     const top = [...mix].sort((a, b) => b[1] - a[1] || (a[0] ?? "").localeCompare(b[0] ?? ""))[0]?.[0] ?? null;
     providers.get(provider)!.vendor = vendorOf(top, provider);

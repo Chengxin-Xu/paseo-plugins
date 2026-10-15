@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 /**
  * One set of address rules for the panel, the browser Agent and restored tabs.
  * Link-local and cloud metadata addresses are refused here and again inside Chromium (see blockedHostResolverRules),
@@ -31,12 +32,12 @@ export function blockedHostResolverRules(): string {
 }
 
 export function normalizeNavigationUrl(value: string): string {
-  const trimmed = value.trim(); if (!trimmed || /[\u0000-\u001f]/.test(trimmed)) throw new Error('请输入有效的网页地址。');
+  const trimmed = value.trim(); if (!trimmed || /[\u0000-\u001f]/.test(trimmed)) throw new Error(t('navigation.invalidAddress'));
   const explicitScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed), hostWithPort = /^(localhost|[\w.-]+):\d+(?:[/?#]|$)/i.test(trimmed);
   const url = new URL(explicitScheme && !hostWithPort ? trimmed : `https://${trimmed}`);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('只支持 HTTP 或 HTTPS 网页。');
-  if (url.username || url.password) throw new Error('请在网页内登录，不要在地址中填写密码。');
-  if (isBlockedHost(url.hostname)) throw new Error('这是链路本地或云服务器元数据地址，共享浏览器不会打开。');
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(t('navigation.httpOnly'));
+  if (url.username || url.password) throw new Error(t('navigation.noCredentials'));
+  if (isBlockedHost(url.hostname)) throw new Error(t('navigation.blockedAddress'));
   return url.toString();
 }
 

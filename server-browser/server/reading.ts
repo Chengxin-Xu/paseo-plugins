@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { BrowserPage } from './browser-types';
@@ -27,13 +28,13 @@ function readerRuntime(root:string):ReaderRuntime {
 /** Read only the selected live page. No navigation, script execution from HTML, or credential access. A page that does not answer within timeoutMs fails the read. */
 export async function readPageContent(page:BrowserPage,tabId:string,input:ReadingInput,runtimeRoot?:string,timeoutMs=BUDGETS.pageReadMs):Promise<BrowserReading> {
   const selector=input.selector?.trim()??'';
-  if(selector.length>500)throw new Error('页面区域选择器过长。');
+  if(selector.length>500)throw new Error(t('reading.selectorTooLong'));
   const captured=await withTimeout(page.evaluate(`(() => {
     const selector=${JSON.stringify(selector)};
     let element;
     try { element=selector?document.querySelector(selector):document.body; }
-    catch { throw new Error('页面区域选择器无效。'); }
-    if(!element)throw new Error('指定的页面区域不存在，请刷新页面或检查选择器。');
+    catch { throw new Error(${JSON.stringify(t('reading.invalidSelector'))}); }
+    if(!element)throw new Error(${JSON.stringify(t('reading.regionMissing'))});
     const clone=element.cloneNode(true);
     for(const node of clone.querySelectorAll('script,style,noscript,template,iframe,input,textarea,select,[hidden],[aria-hidden="true"]'))node.remove();
     // Resolve relative links before passing the inert document to the article reader.
@@ -43,7 +44,7 @@ export async function readPageContent(page:BrowserPage,tabId:string,input:Readin
     const html=clone.outerHTML??'';
     const visible=element.innerText??element.textContent??'';
     return {title:document.title,url:location.href,html:html.slice(0,2000000),visible:visible.slice(0,400000),sourceTruncated:html.length>2000000||visible.length>400000};
-  })()`) as Promise<Capture>,timeoutMs,()=>{throw new Error('网页长时间没有响应，读取已停止。');});
+  })()`) as Promise<Capture>,timeoutMs,()=>{throw new Error(t('reading.timeout'));});
   let content=captured.visible.trim();
   let title=captured.title;
   let method:BrowserReading['method']='dom';
@@ -67,7 +68,7 @@ export async function readPageContent(page:BrowserPage,tabId:string,input:Readin
   if(query){
     const lines=content.split('\n'),matched=new Set<number>();
     lines.forEach((line,index)=>{if(line.toLocaleLowerCase().includes(query.toLocaleLowerCase()))for(let i=Math.max(0,index-1);i<=Math.min(lines.length-1,index+1);i++)matched.add(i);});
-    content=matched.size?[...matched].sort((a,b)=>a-b).map(index=>lines[index]).join('\n'):'未找到匹配内容。可切换到完整可见文字，或缩短搜索词。';
+    content=matched.size?[...matched].sort((a,b)=>a-b).map(index=>lines[index]).join('\n'):t('reading.noMatches');
   }
   const maxChars=Math.max(500,Math.min(60000,input.maxChars??16000));
   const characters=content.length;

@@ -1,4 +1,4 @@
-# 服务器浏览器 Server Browser 0.11
+# 服务器浏览器 Server Browser 0.12
 
 0.10.1：修复 Android App 的 Hermes 默认求值器无法加载最近画面缓存：改用闭包，保留逐主机隔离、访问顺序淘汰、字节预算、过期和卸载清理。
 
@@ -7,8 +7,23 @@ Paseo 插件：在 daemon 所在的 Linux 主机上运行 Chromium，手机和�
 浏览器 Agent 通过专用 MCP 操作同一个会话，你随时可以接管。无需另外暴露远程桌面或浏览器端口。
 
 - 要求 Paseo 0.11.1 及以上，daemon 主机为 Linux。
-- 界面和浏览器 Agent 的指令为简体中文。插件市场用的英文介绍见 [OVERVIEW.md](OVERVIEW.md)。
+- 内置英文和简体中文，默认跟随系统语言，也可以添加自己的语言。插件市场用的英文介绍见 [OVERVIEW.md](OVERVIEW.md)。
 - 插件只使用 Paseo 宿主提供的库，没有运行时 npm 依赖，安装时不执行任何构建命令；浏览器运行时需要在主机上单独准备一次，见下文。
+
+## Languages / 语言
+
+在 **Paseo 设置 → 插件 → 服务器浏览器 → 语言** 中选择 **跟随系统**（默认）、**English** 或 **简体中文**。更改后，已打开的插件界面会更新，不必刷新页面；设置保存在当前 daemon，重新连接后仍然生效。跟随系统时使用设备语言，没有对应翻译时显示英文。网页内容和已经保存的 Agent 回复保留原来的语言。
+
+自定义语言放在 daemon 主机的 `~/.paseo/plugin-data/server-browser/locales/`；设置了 `PASEO_HOME` 时，则为 `$PASEO_HOME/plugin-data/server-browser/locales/`。语言设置里显示实际目录、翻译覆盖率和文件问题。
+
+1. 复制目录里的 `templates/en.json`（或 `templates/zh-CN.json`），放到 `locales/`，以语言代码命名，例如 `ko.json` 或 `pt-BR.json`。
+2. 把 `$meta.name` 改成语言自己的名称，例如 `"$meta": { "name": "한국어" }`。保留分组名和消息键，只翻译值。
+3. 原样保留每个 `{placeholder}`。复数形式使用 CLDR 分类（如 `one`、`other`），必须保留 `other`；各形式使用同样的占位符。
+4. 在语言设置里点击 **重新读取**，再选择自己的语言。缺少或无效的条目回退到英文；占位符错误等问题会在设置里列出，不必一次翻译完。
+
+同名的 `en.json` 或 `zh-CN.json` 可以只覆盖部分内置条目。插件更新会重写 `templates/`，不会改写自己的语言文件；可对照新模板补充新增条目。
+
+要贡献内置语言，请提交 PR：新增 `shared/locales/<code>.json`，保留现有消息键与占位符，并在 `server/locales.ts` 的 `BUILTIN_CATALOGS` 中加一行注册对应目录（需要的导入一并补充）。
 
 ## 界面
 

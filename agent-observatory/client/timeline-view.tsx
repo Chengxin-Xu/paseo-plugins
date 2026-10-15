@@ -1,3 +1,5 @@
+import { currentLanguage, onTextChange } from "../shared/i18n";
+import { t } from "../shared/text";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Pressable, Text, View, type FlatList as NativeFlatList, type TextStyle } from "react-native";
 import { FlatList, Icon, copyText } from "@getpaseo/plugin/client/react-native";
@@ -72,21 +74,21 @@ export function CodeBlock({ theme, label, value, hits, current, onHitLayout }: {
   return <View style={{ borderRadius: radius.md, borderWidth: hairline, borderColor: colors.border, backgroundColor: colors.surface1, overflow: "hidden" }}>
     <View style={{ flexDirection: "row", alignItems: "center", minHeight: 32, paddingLeft: 10, paddingRight: 2, borderBottomWidth: hairline, borderBottomColor: colors.border }}>
       <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>{label}</Text>
-      <IconButton theme={theme} size="sm" icon={copied ? "Check" : copyError ? "CircleAlert" : "Copy"} tone={copied ? "success" : copyError ? "danger" : undefined} label={`复制${label}`}
+      <IconButton theme={theme} size="sm" icon={copied ? "Check" : copyError ? "CircleAlert" : "Copy"} tone={copied ? "success" : copyError ? "danger" : undefined} label={t("secondaryTimelineView.copy", { value1: label })}
         onPress={() => { void copyText(fullText).then(() => { setCopied(true); setCopyError(false); }).catch(() => setCopyError(true)); }} />
     </View>
     {current && onHitLayout && current.end <= shown.length ? <View style={{ paddingHorizontal: 10, paddingVertical: space.sm }}>
       <SplitText text={shown} hit={current} hits={hits} looks={looks} style={code} lineHeight={CODE_LINE} charWidth={CODE_CHAR} onHitLayout={onHitLayout} />
     </View> : <Text selectable style={{ paddingHorizontal: 10, paddingVertical: space.sm, ...code }}>{marked(shown, hits, current, looks)}</Text>}
-    {copyError ? <Text style={{ paddingHorizontal: 10, paddingBottom: space.sm, color: colors.foregroundMuted, fontSize: fontSize.meta }}>复制失败，可长按文本选择</Text> : null}
-    {long ? <Pressable accessibilityRole="button" accessibilityLabel={expanded ? "收起内容" : "展开完整内容"} onPress={() => setExpanded(!expanded)}
+    {copyError ? <Text style={{ paddingHorizontal: 10, paddingBottom: space.sm, color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryTimelineView.copyFailedTouchAndHoldTo")}</Text> : null}
+    {long ? <Pressable accessibilityRole="button" accessibilityLabel={expanded ? t("secondaryTimelineView.collapseContent") : t("secondaryTimelineView.expandFullContent")} onPress={() => setExpanded(!expanded)}
       style={state => ({ minHeight: 34, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", gap: space.sm, borderTopWidth: hairline, borderTopColor: colors.border, backgroundColor: (state as { hovered?: boolean }).hovered ? colors.surface2 : "transparent" })}>
-      <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta }}>{expanded ? "收起" : `展开全部 · ${fullText.length.toLocaleString()} 字符`}</Text>
-      {later ? <Badge theme={theme} tone="amber" icon="Search" label={`后面还有 ${later} 处命中`} /> : null}
+      <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta }}>{expanded ? t("secondaryTimelineView.collapse") : t("secondaryTimelineView.expandAllCharacters", { value1: fullText.length.toLocaleString() })}</Text>
+      {later ? <Badge theme={theme} tone="amber" icon="Search" label={t("secondaryTimelineView.moreMatchesBelow", { value1: later })} /> : null}
     </Pressable> : null}
   </View>;
 }
-const toolLabel: Record<string, string> = { running: "执行中", completed: "成功", failed: "失败", canceled: "取消", loading: "处理中" };
+const toolLabel: Record<string, string> = { get running() { return t("secondaryTimelineView.running"); }, get completed() { return t("secondaryTimelineView.succeeded"); }, get failed() { return t("secondaryTimelineView.failed"); }, get canceled() { return t("secondaryTimelineView.canceled"); }, get loading() { return t("secondaryTimelineView.processing"); } };
 export const TimelineEntry = memo(function TimelineEntry({ row, theme, memory, focused = false, hits, current, flash, onHitLine }: { row: TimelineRow; theme: PluginTheme; memory?: ReturnType<typeof readingMemory>; focused?: boolean;
   /** This row's find hits (shared/timeline-find) and the current hit when it is in this row. */ hits?: readonly FindHit[]; current?: FindHit | null;
   /** Bumps each time the current hit is brought to this row: the row flashes blue once. */ flash?: number;
@@ -111,9 +113,9 @@ export const TimelineEntry = memo(function TimelineEntry({ row, theme, memory, f
   const human = item.type === "user_message";
   const icon = failed ? "CircleAlert" : tool && detail.type === "sub_agent" ? "GitBranch" : tool ? "Terminal" : reasoning ? "Brain" : human ? "User" : item.type === "todo" ? "ListChecks" : "Sparkles";
   const iconColor = failed ? colors.statusDanger : tool ? toneColor(theme, "accent", "mark") : human || reasoning ? colors.foregroundMuted : colors.foreground;
-  const title = tool ? string(item.name) || "工具调用" : reasoning ? "推理摘要" : human ? "用户指令" : item.type === "assistant_message" ? "Agent 回复"
-    : item.type === "todo" ? "任务计划" : item.type === "error" ? "执行错误" : item.type === "compaction" ? "上下文压缩" : item.type === "notification" ? "执行通知" : item.type === "plugin" ? `插件记录 · ${string(item.kind)}` : item.type;
-  const clock = row.timestamp ? new Date(row.timestamp).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+  const title = tool ? string(item.name) || t("secondaryTimelineView.toolCall") : reasoning ? t("secondaryTimelineView.reasoningSummary") : human ? t("secondaryTimelineView.userInstruction") : item.type === "assistant_message" ? t("secondaryTimelineView.agentReply")
+    : item.type === "todo" ? t("secondaryTimelineView.taskPlan") : item.type === "error" ? t("secondaryTimelineView.executionError") : item.type === "compaction" ? t("secondaryTimelineView.contextCompaction") : item.type === "notification" ? t("secondaryTimelineView.executionNotice") : item.type === "plugin" ? t("secondaryTimelineView.pluginRecord", { value1: string(item.kind) }) : item.type;
+  const clock = row.timestamp ? new Date(row.timestamp).toLocaleTimeString(currentLanguage(), { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
   const text = timelineSummary(item);
   const { expandable, lines } = rowLayout(item);
   const state = string(item.status);
@@ -135,10 +137,10 @@ export const TimelineEntry = memo(function TimelineEntry({ row, theme, memory, f
       <View style={{ width: hairline, flex: 1, minHeight: 8, marginTop: 6, backgroundColor: colors.border }} />
     </View>
     <View style={{ flex: 1, minWidth: 0, paddingBottom: space.lg, gap: space.xs }}>
-      <Pressable disabled={!expandable} accessibilityRole={expandable ? "button" : undefined} accessibilityState={expandable ? { expanded } : undefined} accessibilityLabel={expandable ? `${expanded ? "收起" : "展开"}${title}` : title}
+      <Pressable disabled={!expandable} accessibilityRole={expandable ? "button" : undefined} accessibilityState={expandable ? { expanded } : undefined} accessibilityLabel={expandable ? `${expanded ? t("secondaryTimelineView.collapse") : t("secondaryTimelineView.expand")}${title}` : title}
         onPress={() => setExpanded(!expanded)} hitSlop={{ top: 6, bottom: 6 }} style={state => ({ minHeight: 22, flexDirection: "row", gap: space.sm, alignItems: "center", opacity: state.pressed ? 0.7 : 1 })}>
         <Text numberOfLines={1} style={{ flex: 1, color: failed ? colors.statusDanger : colors.foreground, fontSize: fontSize.small, fontWeight: "500", fontFamily: tool ? monoFont : undefined }}>{tool ? marked(title, of("name"), current, looks) : title}</Text>
-        {hiddenHits ? <Badge theme={theme} tone="amber" icon="Search" label={`${hiddenHits} 处命中`} /> : null}
+        {hiddenHits ? <Badge theme={theme} tone="amber" icon="Search" label={t("secondaryTimelineView.matches", { count: hiddenHits })} /> : null}
         {state ? <Text style={{ color: stateColor, fontSize: fontSize.meta }}>{toolLabel[state] ?? state}</Text> : null}
         <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{clock}</Text>
         {expandable ? <Icon name={expanded ? "ChevronUp" : "ChevronDown"} size={12} color={colors.foregroundMuted} /> : null}
@@ -153,7 +155,7 @@ export const TimelineEntry = memo(function TimelineEntry({ row, theme, memory, f
         ? <SplitText text={text} hit={summaryHit} hits={of("summary")} looks={looks} style={summaryStyle} lineHeight={tool ? 18 : 20} charWidth={tool ? CODE_CHAR : fontSize.small * 0.55} onHitLayout={onHitLayout} />
         : <Text selectable numberOfLines={clipped ? lines : undefined} style={summaryStyle}>{marked(text, of("summary"), current, looks)}</Text>}
       {expanded && tool ? <View style={{ gap: space.sm, paddingTop: space.xs }}>{toolDetails(item).map(({ label, value }) => <CodeBlock key={label} theme={theme} label={label} value={value} hits={of(`detail:${label}`)} current={here(`detail:${label}`)} onHitLayout={onHitLayout} />)}</View> : null}
-      {expanded && item.type === "plugin" ? <CodeBlock theme={theme} label="插件数据" value={item.data} hits={of("plugin")} current={here("plugin")} onHitLayout={onHitLayout} /> : null}
+      {expanded && item.type === "plugin" ? <CodeBlock theme={theme} label={t("secondaryTimelineView.pluginData")} value={item.data} hits={of("plugin")} current={here("plugin")} onHitLayout={onHitLayout} /> : null}
     </View>
     {current && flash ? <Flash count={flash} color={withAlpha(blue, 0.22)} radius={radius.md} /> : null}
   </View>;
@@ -167,34 +169,35 @@ export function FindBar({ theme, find, finder, inset, loaded, searched, filterLa
   loaded: number; searched: number; filterLabel: string | null; hasOlder: boolean; truncated: boolean; loadingOlder: boolean; onLoadOlder: () => void }) {
   const { colors } = theme;
   const asked = findTerms(find.input).length > 0, result = find.result, total = result?.hits.length ?? 0, more = result?.capped ? "+" : "";
-  const counter = !asked ? "" : !result ? "…" : total ? `${find.current + 1} / ${total}${more}` : "0 处";
-  const spoken = !asked ? "" : !result ? "正在查找" : total ? `第 ${find.current + 1} 处，共 ${total}${more ? " 多" : ""} 处` : "没有找到";
-  const scope = asked && result && !total ? `已加载的 ${loaded} 条里没有找到` : `已加载 ${loaded} 条`;
-  const parts = [filterLabel ? `${scope}，只查「${filterLabel}」${searched} 条` : scope, result?.capped ? `只列出前 ${FIND_MAX_HITS} 处，多输几个字可以缩小范围` : null,
-    hasOlder ? "更早的记录还没读取，不在查找范围内" : truncated ? "长会话只保留了最近的窗口" : null];
+  const counter = !asked ? "" : !result ? "…" : total ? `${find.current + 1} / ${total}${more}` : t("secondaryTimelineView.matches2");
+  const spoken = !asked ? "" : !result ? t("secondaryTimelineView.searching") : total ? t("secondaryTimelineView.matchOf", { value1: find.current + 1, value2: total, value3: more ? t("secondaryTimelineView.message") : "" }) : t("secondaryTimelineView.noMatches");
+  const scope = asked && result && !total ? t("secondaryTimelineView.noMatchesInLoadedRecords", { value1: loaded }) : t("secondaryTimelineView.recordsLoaded", { count: loaded });
+  const parts = [filterLabel ? t("secondaryTimelineView.searchingOnlyRecords", { value1: scope, value2: filterLabel, value3: searched }) : scope, result?.capped ? t("secondaryTimelineView.onlyTheFirstMatchesAreListed", { count: FIND_MAX_HITS }) : null,
+    hasOlder ? t("secondaryTimelineView.earlierRecordsHaveNotBeenLoaded") : truncated ? t("secondaryTimelineView.onlyTheRecentWindowIsRetained") : null];
   return <Enter active>
     <View style={{ gap: space.xs, paddingHorizontal: inset, paddingVertical: space.sm, borderBottomWidth: hairline, borderBottomColor: colors.border, backgroundColor: colors.surface0 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
-        <SearchField theme={theme} value={find.input} onChangeText={finder.setInput} onSubmit={finder.next} placeholder="查找已加载的记录" accessibilityLabel="在时间线里查找" autoFocus />
+        <SearchField theme={theme} value={find.input} onChangeText={finder.setInput} onSubmit={finder.next} placeholder={t("secondaryTimelineView.searchLoadedRecords")} accessibilityLabel={t("secondaryTimelineView.findInTimeline")} autoFocus />
         {counter ? <Text accessibilityLabel={spoken} accessibilityLiveRegion="polite" {...aria({ live: "polite" })}
           style={{ minWidth: 40, textAlign: "center", color: total ? hue(theme, "amber", "text") : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: total ? "600" : "400", fontVariant: ["tabular-nums"] }}>{counter}</Text> : null}
-        <IconButton theme={theme} icon="ChevronUp" label="上一处" disabled={!total} onPress={finder.previous} />
-        <IconButton theme={theme} icon="ChevronDown" label="下一处" disabled={!total} onPress={finder.next} />
-        <IconButton theme={theme} icon="X" label="关闭查找" onPress={finder.close} />
+        <IconButton theme={theme} icon="ChevronUp" label={t("secondaryTimelineView.previousMatch")} disabled={!total} onPress={finder.previous} />
+        <IconButton theme={theme} icon="ChevronDown" label={t("secondaryTimelineView.nextMatch")} disabled={!total} onPress={finder.next} />
+        <IconButton theme={theme} icon="X" label={t("secondaryTimelineView.closeSearch")} onPress={finder.close} />
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
         <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }}><MetaLine theme={theme} parts={parts} numberOfLines={2} /></View>
-        {hasOlder ? <Button theme={theme} size="sm" variant="ghost" icon="History" label={loadingOlder ? "正在读取…" : "读取更早"} accessibilityLabel="读取更早的记录后继续查找" busy={loadingOlder} onPress={onLoadOlder} /> : null}
+        {hasOlder ? <Button theme={theme} size="sm" variant="ghost" icon="History" label={loadingOlder ? t("secondaryTimelineView.reading") : t("secondaryTimelineView.readEarlier")} accessibilityLabel={t("secondaryTimelineView.readEarlierRecordsToContinueSearching")} busy={loadingOlder} onPress={onLoadOlder} /> : null}
       </View>
     </View>
   </Enter>;
 }
 
-const filters = [{ value: "all" as const, label: "全部" }, { value: "tools" as const, label: "工具" }, { value: "messages" as const, label: "对话" }, { value: "errors" as const, label: "异常" }];
+const filters = [{ value: "all" as const, get label() { return t("secondaryTimelineView.all"); } }, { value: "tools" as const, get label() { return t("secondaryTimelineView.tools"); } }, { value: "messages" as const, get label() { return t("secondaryTimelineView.conversation"); } }, { value: "errors" as const, get label() { return t("secondaryTimelineView.errors"); } }];
 type TimelineFilter = typeof filters[number]["value"];
 // The last find text per timeline, on this device for this app session only (like the session list's search): switching detail tabs
 // keeps it for the next 查找, which opens with it. At most 40 timelines are remembered.
 const findTexts = new Map<string, string>();
+onTextChange(() => findTexts.clear());
 export function TimelineContent({ timeline, theme, header, inset = space.lg, cacheKey = "default", focusRef }: { timeline: ReturnType<typeof useTimeline>; theme: PluginTheme; header?: ReactNode; inset?: number; cacheKey?: string; focusRef?: string | null }) {
   const paseo = usePaseo();
   const memory = useMemo(() => readingMemory(paseo, `timeline:${cacheKey}`), [paseo, cacheKey]);
@@ -249,20 +252,20 @@ export function TimelineContent({ timeline, theme, header, inset = space.lg, cac
       onScrollToIndexFailed={({ index, averageItemLength }) => { if (retryCount.current++ >= 3) return; list.current?.scrollToOffset({ offset: index * averageItemLength, animated: false }); if (retryTimer.current) clearTimeout(retryTimer.current); retryTimer.current = setTimeout(() => { if (mounted.current) list.current?.scrollToIndex({ ...(lastScroll.current?.index === index ? lastScroll.current : { index, viewPosition: 0.1 }), animated: false }); }, 200); }}
       ListHeaderComponent={<View style={{ gap: space.md, paddingBottom: space.lg }}>{header}
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingTop: header ? 0 : space.md }}>
-          <Segmented theme={theme} value={filter} onChange={setFilter} size="sm" options={filters} accessibilityLabel="时间线筛选" />
+          <Segmented theme={theme} value={filter} onChange={setFilter} size="sm" options={filters} accessibilityLabel={t("secondaryTimelineView.timelineFilter")} />
           <Spacer />
-          <SyncStatus theme={theme} state={sync} label={timeline.live ? "实时" : timeline.lastSyncedAt ? relativeTime(timeline.lastSyncedAt) : "定期同步"} />
-          <IconButton theme={theme} icon="Search" label="查找" size="sm" active={find.open} tone={find.open ? "amber" : undefined} onPress={() => { if (find.open) finder.close(); else finder.open(); }} />
-          <IconButton theme={theme} icon="RefreshCw" label="刷新执行时间线" size="sm" onPress={timeline.refresh} disabled={timeline.refreshing} />
+          <SyncStatus theme={theme} state={sync} label={timeline.live ? t("secondaryTimelineView.live") : timeline.lastSyncedAt ? relativeTime(timeline.lastSyncedAt) : t("secondaryTimelineView.periodicSync")} />
+          <IconButton theme={theme} icon="Search" label={t("secondaryTimelineView.find")} size="sm" active={find.open} tone={find.open ? "amber" : undefined} onPress={() => { if (find.open) finder.close(); else finder.open(); }} />
+          <IconButton theme={theme} icon="RefreshCw" label={t("secondaryTimelineView.refreshExecutionTimeline")} size="sm" onPress={timeline.refresh} disabled={timeline.refreshing} />
         </View>
-        {timeline.error ? <Banner theme={theme} tone="danger" message={`${timeline.error}，已读取的记录仍保留`} action={{ label: "重试", onPress: timeline.refresh }} /> : null}
-        {timeline.page?.gap ? <Banner theme={theme} tone="warning" message="部分历史已不在宿主保留范围内，时间线可能不完整" /> : null}
-        {focusMissing ? <Banner theme={theme} tone="warning" message="引用超出了当前保留的历史范围" /> : null}
-        {timeline.page?.hasOlder ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} icon="History" size="sm" label={timeline.loadingOlder ? "正在读取…" : "读取更早的记录"} accessibilityLabel="读取更早的记录" busy={timeline.loadingOlder} onPress={timeline.loadOlder} /></View> : null}
+        {timeline.error ? <Banner theme={theme} tone="danger" message={t("secondaryTimelineView.loadedRecordsAreRetained", { value1: timeline.error })} action={{ label: t("secondaryTimelineView.retry"), onPress: timeline.refresh }} /> : null}
+        {timeline.page?.gap ? <Banner theme={theme} tone="warning" message={t("secondaryTimelineView.someHistoryIsNoLongerRetained")} /> : null}
+        {focusMissing ? <Banner theme={theme} tone="warning" message={t("secondaryTimelineView.thisReferenceIsOutsideTheRetained")} /> : null}
+        {timeline.page?.hasOlder ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} icon="History" size="sm" label={timeline.loadingOlder ? t("secondaryTimelineView.reading") : t("secondaryTimelineView.readEarlierRecords")} accessibilityLabel={t("secondaryTimelineView.readEarlierRecords")} busy={timeline.loadingOlder} onPress={timeline.loadOlder} /></View> : null}
       </View>}
-      ListEmptyComponent={timeline.loading ? <Skeleton theme={theme} rows={4} /> : <EmptyState theme={theme} icon="ListTree" title={filter === "errors" ? "当前窗口没有异常" : "暂无匹配的记录"} message="换个筛选，或读取更早的记录" />}
+      ListEmptyComponent={timeline.loading ? <Skeleton theme={theme} rows={4} /> : <EmptyState theme={theme} icon="ListTree" title={filter === "errors" ? t("secondaryTimelineView.noErrorsInTheCurrentWindow") : t("secondaryTimelineView.noMatchingRecords")} message={t("secondaryTimelineView.changeTheFilterOrReadEarlier")} />}
       renderItem={({ item }) => <TimelineEntry key={`${item.key}:${memory.expanded.has(item.key)}`} row={item} theme={theme} memory={memory} focused={item.key === focusedKey}
         hits={find.result?.epoch === epoch ? find.result.byRow.get(item.key) : undefined} current={currentHit?.row === item.key ? currentHit : null} flash={currentHit?.row === item.key ? find.jump : undefined} onHitLine={onHitLine} />}
-      ListFooterComponent={rows.length ? <View style={{ alignItems: "center", paddingTop: space.sm }}><MetaLine theme={theme} parts={[`${rows.length} 条`, timeline.page?.truncated ? "长会话只加载了最近的窗口" : "按执行顺序"]} /></View> : null} />
+      ListFooterComponent={rows.length ? <View style={{ alignItems: "center", paddingTop: space.sm }}><MetaLine theme={theme} parts={[t("secondaryTimelineView.records", { count: rows.length }), timeline.page?.truncated ? t("secondaryTimelineView.onlyTheRecentWindowIsLoaded") : t("secondaryTimelineView.inExecutionOrder")]} /></View> : null} />
   </View>;
 }

@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, TextInput } from "@getpaseo/plugin/client/react-native";
 import { memo, useEffect, useRef, type ReactNode } from "react";
@@ -6,12 +7,12 @@ import { INBOX_PROJECT_ID, type BoardItem, type BoardProject, type NoteFields, t
 import { Button, IconButton, ProjectMark, control, fontSize, hairline, hue, radius, relativeTime, space, toneColor, type Hue, type Tone } from "./kit";
 
 export const KINDS: NoteKind[] = ["task", "prompt", "idea"];
-export const KIND_LABELS: Record<NoteKind, string> = { task: "任务", prompt: "提示词", idea: "想法" };
+export const KIND_LABELS: Record<NoteKind, string> = { get task() { return t("ui.task"); }, get prompt() { return t("ui.prompt"); }, get idea() { return t("ui.idea"); } };
 export const KIND_ICONS: Record<NoteKind, string> = { task: "SquareCheck", prompt: "MessageSquareText", idea: "Lightbulb" };
 /** Fixed category colors: the same in tabs, the editor, list marks and empty states. */
 export const KIND_TONES: Record<NoteKind, Hue> = { task: "blue", prompt: "violet", idea: "amber" };
 export const STATUSES: TaskStatus[] = ["todo", "doing", "done"];
-export const STATUS_LABELS: Record<TaskStatus, string> = { todo: "待办", doing: "进行中", done: "已完成" };
+export const STATUS_LABELS: Record<TaskStatus, string> = { get todo() { return t("ui.todo"); }, get doing() { return t("ui.doing"); }, get done() { return t("ui.done"); } };
 export const NEXT_STATUS: Record<TaskStatus, TaskStatus> = { todo: "doing", doing: "done", done: "todo" };
 /** Grey → blue → green, like running and done everywhere else in Paseo's plugins. */
 export const STATUS_TONES: Record<TaskStatus, Tone> = { todo: "neutral", doing: "info", done: "success" };
@@ -19,8 +20,6 @@ export const STATUS_TONES: Record<TaskStatus, Tone> = { todo: "neutral", doing: 
 export const MARK_HUES = { high: "red", pinned: "amber" } as const satisfies Record<string, Hue>;
 export const ALL_PROJECT_ID = "__all_projects__";
 
-/** The server lists boards whose Paseo project was removed under this path. */
-const RETIRED_PATH = "项目已移除，手记仍保留";
 export function statusColor(theme: PluginTheme, status: TaskStatus) { return toneColor(theme, STATUS_TONES[status], "mark"); }
 /** Colored text for a status label; 待办 keeps the regular text color. */
 export function statusText(theme: PluginTheme, status: TaskStatus) { return status === "todo" ? theme.colors.foreground : toneColor(theme, STATUS_TONES[status]); }
@@ -80,7 +79,7 @@ export function KindIcon({ theme, kind, size = 16 }: { theme: PluginTheme; kind:
   return <Icon name={KIND_ICONS[kind]} size={size} color={toneColor(theme, KIND_TONES[kind], "mark")} />;
 }
 
-type ScopeProject = Pick<BoardProject, "id" | "name" | "path">;
+type ScopeProject = Pick<BoardProject, "id" | "name" | "path" | "retired">;
 /**
  * Who a note belongs to: the kit `ProjectMark` (the project's color in every plugin), a fixed inbox tile for 随手记,
  * a grey tile for removed projects and a stack for 全部项目.
@@ -88,7 +87,7 @@ type ScopeProject = Pick<BoardProject, "id" | "name" | "path">;
 export function ScopeMark({ theme, project, size = 18 }: { theme: PluginTheme; project: ScopeProject; size?: number }) {
   if (project.id === ALL_PROJECT_ID) return <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}><Icon name="Layers" size={Math.min(16, size)} color={theme.colors.foregroundMuted} /></View>;
   const inbox = project.id === INBOX_PROJECT_ID;
-  if (!inbox && project.path !== RETIRED_PATH) return <ProjectMark theme={theme} name={project.name} size={size} />;
+  if (!inbox && !project.retired) return <ProjectMark theme={theme} name={project.name} size={size} />;
   return <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={{ width: size, height: size, borderRadius: Math.round(size * 0.3), alignItems: "center", justifyContent: "center", backgroundColor: hue(theme, inbox ? "cyan" : "gray") }}>
     <Icon name={inbox ? "Inbox" : "FolderX"} size={Math.round(size * 0.68)} color="#ffffff" />
   </View>;
@@ -96,7 +95,7 @@ export function ScopeMark({ theme, project, size = 18 }: { theme: PluginTheme; p
 
 /** Task status glyph that advances 待办 → 进行中 → 已完成 (→ 待办) on tap. */
 export function StatusToggle({ theme, item, onPress, disabled = false }: { theme: PluginTheme; item: BoardItem; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${item.title}：移到${STATUS_LABELS[NEXT_STATUS[item.status]]}`} aria-disabled={disabled} disabled={disabled} onPress={onPress} hitSlop={10}
+  return <Pressable accessibilityRole="button" accessibilityLabel={t("ui.moveStatus", { title: item.title, status: STATUS_LABELS[NEXT_STATUS[item.status]] })} aria-disabled={disabled} disabled={disabled} onPress={onPress} hitSlop={10}
     style={state => ({ width: 20, height: 20, alignItems: "center", justifyContent: "center", borderRadius: radius.full, backgroundColor: hover(state).hovered && !disabled ? theme.colors.surface2 : "transparent", opacity: disabled ? 0.5 : hover(state).pressed ? 0.6 : 1 })}>
     <StatusGlyph theme={theme} status={item.status} />
   </Pressable>;
@@ -106,12 +105,12 @@ const metaText = (theme: PluginTheme) => ({ color: theme.colors.foregroundMuted,
 /** "📌 🚩重点 · ▣ 项目 · 2 小时前": pin and flag in their colors, the project's mark before its name. */
 export function NoteMeta({ theme, item, project }: { theme: PluginTheme; item: BoardItem; project?: ScopeProject | null }) {
   const trashed = item.deletedAt !== null, high = item.priority === "high" && !trashed, text = metaText(theme);
-  const dot = <Text style={text}>·</Text>;
+  const dot = <Text style={text}>{t("ui.metaSeparator")}</Text>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minWidth: 0 }}>
     {item.pinned && !trashed ? <Icon name="Pin" size={12} color={hue(theme, MARK_HUES.pinned)} /> : null}
     {high ? <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
       <Icon name="Flag" size={12} color={hue(theme, MARK_HUES.high)} />
-      <Text style={[text, { color: hue(theme, MARK_HUES.high, "text"), fontWeight: "500" }]}>重点</Text>
+      <Text style={[text, { color: hue(theme, MARK_HUES.high, "text"), fontWeight: "500" }]}>{t("ui.priority")}</Text>
     </View> : null}
     {high ? dot : null}
     {project ? <>
@@ -119,7 +118,7 @@ export function NoteMeta({ theme, item, project }: { theme: PluginTheme; item: B
       <Text numberOfLines={1} style={[text, { flexShrink: 1 }]}>{project.name}</Text>
       {dot}
     </> : null}
-    <Text numberOfLines={1} style={[text, { flexShrink: 0 }]}>{trashed ? `删除于 ${relativeTime(item.deletedAt)}` : relativeTime(item.updatedAt)}</Text>
+    <Text numberOfLines={1} style={[text, { flexShrink: 0 }]}>{trashed ? t("ui.deletedAt", { time: relativeTime(item.deletedAt) }) : relativeTime(item.updatedAt)}</Text>
   </View>;
 }
 
@@ -163,8 +162,8 @@ export const NoteCard = memo(function NoteCard({ theme, item, project, busy, act
 export const NoteRow = memo(function NoteRow({ theme, item, project, selected = false, busy, actions }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; selected?: boolean; busy: boolean; actions: NoteActions }) {
   const { colors } = theme, trashed = item.deletedAt !== null, task = item.kind === "task" && !trashed;
   const leading = task ? <StatusToggle theme={theme} item={item} disabled={busy} onPress={() => actions.status(item, NEXT_STATUS[item.status])} /> : <KindIcon theme={theme} kind={item.kind} />;
-  const trailing = trashed ? <View style={{ marginVertical: -space.xs }}><Button theme={theme} label="恢复" icon="RotateCcw" size="sm" tone="success" disabled={busy} accessibilityLabel={`恢复：${item.title}`} onPress={() => actions.restore(item)} /></View>
-    : task ? null : <View style={{ marginVertical: -space.xs, marginRight: -space.xs }}><IconButton theme={theme} icon="Copy" size="sm" label={`复制：${item.title}`} onPress={() => actions.copy(item)} /></View>;
+  const trailing = trashed ? <View style={{ marginVertical: -space.xs }}><Button theme={theme} label={t("ui.restore")} icon="RotateCcw" size="sm" tone="success" disabled={busy} accessibilityLabel={t("ui.restoreTitle", { title: item.title })} onPress={() => actions.restore(item)} /></View>
+    : task ? null : <View style={{ marginVertical: -space.xs, marginRight: -space.xs }}><IconButton theme={theme} icon="Copy" size="sm" label={t("ui.copyTitle", { title: item.title })} onPress={() => actions.copy(item)} /></View>;
   return <PressableFrame theme={theme} label={item.title} onPress={() => actions.open(item)} selected={selected} selectedColor={toneColor(theme, KIND_TONES[item.kind], "soft")} hovered={colors.surface1} style={{ paddingVertical: 10, paddingHorizontal: space.md }}>
     <View style={[touch.through, { minHeight: 20, justifyContent: "center" }]}>{leading}</View>
     <NoteText theme={theme} item={item} project={project} previewLines={task ? 1 : 2} />
@@ -184,14 +183,14 @@ export function GroupHeader({ theme, title, count, leading, color, open, onToggl
     {count !== undefined ? <Text style={{ color: color ?? colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"], opacity: 0.8 }}>{count}</Text> : null}
   </View>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32, paddingHorizontal: space.md, paddingTop: space.sm }}>
-    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} aria-expanded={open} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
+    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={open ? t("ui.collapseTitle", { title }) : t("ui.expandTitle", { title })} aria-expanded={open} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
   </View>;
 }
 
 /** The kit `Segmented` for a task's status, with the drawn glyphs; the selected status gets its color as ground and border. */
 export function StatusSegmented({ theme, value, onChange }: { theme: PluginTheme; value: TaskStatus; onChange: (status: TaskStatus) => void }) {
   const { colors } = theme;
-  return <View accessibilityRole="tablist" accessibilityLabel="状态" style={{ flexDirection: "row", alignSelf: "flex-start", padding: space.xxs, gap: space.xxs, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
+  return <View accessibilityRole="tablist" accessibilityLabel={t("ui.status")} style={{ flexDirection: "row", alignSelf: "flex-start", padding: space.xxs, gap: space.xxs, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
     {STATUSES.map(status => {
       const selected = status === value, tinted = selected && status !== "todo";
       // aria-selected too: react-native-web 0.21 drops accessibilityState from the DOM.

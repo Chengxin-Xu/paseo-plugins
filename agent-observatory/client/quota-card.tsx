@@ -1,3 +1,5 @@
+import { onTextChange } from "../shared/i18n";
+import { t } from "../shared/text";
 import { useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -13,30 +15,30 @@ import { useClock } from "./ui";
 export { quotaForecastText, quotaWhen };
 
 /** Lines for the Token page's ⓘ sheet. */
-export const quotaInfo = [
-  "「额度」来自 Paseo 宿主的用量接口，和侧栏 Usage 同一个来源：宿主用各 Provider 自己的登录读取额度、每个账号缓存 5 分钟；插件不读任何凭据，也不直接访问厂商接口。",
-  "有页面在看额度时，观测台每 10 分钟记一次读数（打开页面时立即补读），最后一次查看 30 分钟后停止，不在没人看的时候让宿主去问厂商。读数保存 40 天：数值没变时每 10 分钟记一次心跳，超过 15 分钟没有读数的地方曲线断开。",
-  "读取失败、账号暂不可用或读数超过 15 分钟时，保留上次的读数并标出是几点读到的；这时的预测只作参考，不再红色告警，看板胶囊显示「读数 08:30」。",
-  "进度条上的竖线是节奏刻度，表示均匀使用时现在应该用到哪里，用量超过它时刻度变红。5 小时这类一天以内的窗口按最近 30 分钟以上的速度预测几点用完，只在早于重置时提示；每周窗口按本周到现在的平均节奏外推到重置时，本周过去不到十分之一时不外推。预测只是提醒，突发的用量会让它偏差很大。",
-  "账号名可能是邮箱，只保存它的哈希；同一来源有几个账号时显示「账号 1」「账号 2」和打码后的名字。",
+export let quotaInfo = [
+  t("coreQuotaCard.quotaComesFromPaseoSUsageInterface"),
+  t("coreQuotaCard.whileAPageIsViewingQuotaObservatory"),
+  t("coreQuotaCard.ifAReadFailsAnAccountIs"),
+  t("coreQuotaCard.theVerticalLineOnTheProgressBar"),
+  t("coreQuotaCard.accountNamesMayBeEmailAddressesOnly"),
 ];
 
 const toneHues: Record<QuotaTone, Hue> = { ok: "green", warning: "amber", danger: "red", neutral: "gray" };
 const toneStops: Record<QuotaTone, readonly [Hue, Hue]> = { ok: ["teal", "green"], warning: ["amber", "orange"], danger: ["orange", "red"], neutral: ["gray", "gray"] };
 const errorText: Record<typeof QUOTA_ERRORS[number], string> = {
-  disconnected: "插件和宿主的会话断开了，额度暂停更新（通常会自动恢复，一直这样可以重载插件）",
-  timeout: "宿主读取额度超时",
-  unsupported: "这个 Paseo 版本没有额度接口",
-  failed: "额度读取失败",
+  get disconnected() { return t("coreQuotaCard.thePluginSSessionWithPaseoDisconnected"); },
+  get timeout() { return t("coreQuotaCard.paseoTimedOutReadingQuota"); },
+  get unsupported() { return t("coreQuotaCard.thisPaseoVersionHasNoQuotaInterface"); },
+  get failed() { return t("coreQuotaCard.couldNotReadQuota"); },
 };
-const errorBadge: Record<typeof QUOTA_ERRORS[number], string> = { disconnected: "会话断开", timeout: "读取超时", unsupported: "不支持", failed: "读取失败" };
+const errorBadge: Record<typeof QUOTA_ERRORS[number], string> = { get disconnected() { return t("coreQuotaCard.sessionDisconnected"); }, get timeout() { return t("coreQuotaCard.readTimedOut"); }, get unsupported() { return t("coreQuotaCard.unsupported"); }, get failed() { return t("coreQuotaCard.readFailed"); } };
 
 /** 12 分钟 · 2 小时 5 分 · 3 天 4 小时 */
 function untilText(ms: number): string {
   const minutes = Math.max(1, Math.round(ms / 60_000)), hours = Math.floor(minutes / 60), days = Math.floor(hours / 24);
-  if (minutes < 60) return `${minutes} 分钟`;
-  if (hours < 24) return `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分` : ""}`;
-  return `${days} 天${hours % 24 ? ` ${hours % 24} 小时` : ""}`;
+  if (minutes < 60) return t("coreQuotaCard.minutes", { count: minutes });
+  if (hours < 24) return t("coreQuotaCard.h", { value1: hours, value2: minutes % 60 ? t("coreQuotaCard.m", { value1: minutes % 60 }) : "" });
+  return t("coreQuotaCard.d", { value1: days, value2: hours % 24 ? t("coreQuotaCard.h2", { value1: hours % 24 }) : "" });
 }
 
 /**
@@ -51,7 +53,7 @@ function QuotaBar({ theme, window, reset, stale }: { theme: PluginTheme; window:
     {ahead ? <View style={{ position: "absolute", top: -2, width: 10, height: 22 }}><Breathe><View style={{ width: 10, height: 22, borderRadius: 5, backgroundColor: withAlpha(hue(theme, "red"), 0.45) }} /></Breathe></View> : null}
     <View style={{ width: 4, height: 18, borderRadius: 2, borderWidth: 1, borderColor: isDarkTheme(theme) ? theme.colors.surface1 : theme.colors.surface0, backgroundColor: ahead ? hue(theme, "red") : theme.colors.foreground }} />
   </View>;
-  const label = `已用 ${Math.round(used)}%${pace !== null ? `，节奏刻度 ${Math.round(pace * 100)}%${ahead ? "，超前于节奏" : ""}` : ""}`;
+  const label = t("coreQuotaCard.used", { value1: Math.round(used), value2: pace !== null ? t("coreQuotaCard.paceMarker", { value1: Math.round(pace * 100), value2: ahead ? t("coreQuotaCard.aheadOfPace") : "" }) : "" });
   return <View accessibilityRole="progressbar" accessibilityLabel={label} {...aria({ valuenow: String(Math.round(used)), valuemin: "0", valuemax: "100" })} style={{ height: 18, justifyContent: "center" }}>
     <View style={{ height: 10, borderRadius: 5, backgroundColor: trackFor(theme), overflow: "hidden" }}>
       {used > 0 ? <View style={[{ width: `${Math.max(2, used)}%`, height: 10, borderRadius: 5, opacity: reset ? 0.35 : 1 }, gradient(theme, toneStops[tone], { angle: 90 })]} /> : null}
@@ -98,9 +100,9 @@ function WindowTile({ theme, window, now, compact, readingAt, current }: { theme
   const reset = quotaWindowReset(window, now), tone: QuotaTone = reset ? "neutral" : window.tone, main = toneHues[tone], dark = isDarkTheme(theme);
   const forecast = quotaForecastText(window, now, { at: readingAt, current }), resetAt = window.resetsAt ? Date.parse(window.resetsAt) : null, alarm = window.alarm && !reset && current;
   // A current forecast names its reading quietly; an older one says it in its own text.
-  const source = forecast && current && readingAt !== null && !reset && forecast.kind !== "muted" ? `据 ${quotaWhen(readingAt, now)} 的读数` : null;
+  const source = forecast && current && readingAt !== null && !reset && forecast.kind !== "muted" ? t("coreQuotaCard.basedOnTheReadingAt", { value1: quotaWhen(readingAt, now) }) : null;
   const forecastColor = !forecast ? undefined : forecast.kind === "alarm" ? hue(theme, "red", "text") : forecast.kind === "warning" ? hue(theme, "amber", "text") : forecast.kind === "calm" ? hue(theme, main, "text") : theme.colors.foregroundMuted;
-  const resetLine = reset ? `已过重置时刻 ${resetAt ? quotaWhen(resetAt, now) : ""}`.trim() : resetAt ? `${quotaWhen(resetAt, now)} 重置 · 还有 ${untilText(resetAt - now)}` : "重置时间未知";
+  const resetLine = reset ? t("coreQuotaCard.resetTimeHasPassed", { value1: resetAt ? quotaWhen(resetAt, now) : "" }).trim() : resetAt ? t("coreQuotaCard.resetsLeft", { value1: quotaWhen(resetAt, now), value2: untilText(resetAt - now) }) : t("coreQuotaCard.resetTimeUnknown");
   return <View style={[{ flexBasis: compact ? "100%" : 330, flexGrow: 1, flexShrink: 1, minWidth: 0, padding: space.md, borderRadius: 14, borderWidth: 1,
       borderColor: alarm ? hue(theme, "red", "line") : withAlpha(hue(theme, main), dark ? 0.32 : 0.24) },
     gradient(theme, [withAlpha(hue(theme, main), dark ? 0.18 : 0.09), withAlpha(hue(theme, main), dark ? 0.04 : 0.02)], { angle: 150 })]}>
@@ -133,7 +135,7 @@ function AccountBlock({ theme, account, now, compact }: { theme: PluginTheme; ac
   const summary = account.windows.filter(window => window.summary || window.alarm && current), foldable = compact && summary.length > 0 && summary.length < account.windows.length;
   const shown = foldable && !open ? summary : account.windows, color = vendorHue(vendorOf(null, account.provider));
   const initial = Array.from(account.name.trim())[0]?.toUpperCase() ?? "#";
-  const status = account.status === "error" ? "读取失败" : account.status === "unavailable" ? "暂不可用" : null;
+  const status = account.status === "error" ? t("coreQuotaCard.readFailed") : account.status === "unavailable" ? t("coreQuotaCard.temporarilyUnavailable") : null;
   return <View style={{ gap: space.sm }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
       <View style={[{ width: 22, height: 22, borderRadius: 7, alignItems: "center", justifyContent: "center" }, gradient(theme, [color, color === "orange" ? "amber" : color === "green" ? "teal" : "violet"], { angle: 135 })]}>
@@ -143,12 +145,12 @@ function AccountBlock({ theme, account, now, compact }: { theme: PluginTheme; ac
       {account.hint ? <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{account.hint}</Text> : null}
       {account.plan ? <Badge theme={theme} label={account.plan} tone={color} /> : null}
       {status ? <Badge theme={theme} label={status} tone="warning" icon="CircleAlert" /> : null}
-      {!current && account.windows.length ? <Badge theme={theme} label={readingAt !== null ? `读数 ${quotaWhen(readingAt, now)}` : "读数已过期"} tone="amber" icon="History" /> : null}
+      {!current && account.windows.length ? <Badge theme={theme} label={readingAt !== null ? t("coreQuotaCard.reading", { value1: quotaWhen(readingAt, now) }) : t("coreQuotaCard.readingExpired")} tone="amber" icon="History" /> : null}
     </View>
     {account.windows.length ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>{shown.map(window => <WindowTile key={window.id} theme={theme} window={window} now={now} compact={compact} readingAt={readingAt} current={current} />)}</View>
-      : <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>{status ? `${status}，还没有读数` : "还没有读数"}</Text>}
+      : <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.small }}>{status ? t("coreQuotaCard.noReadingsYet", { value1: status }) : t("coreQuotaCard.noReadingsYet2")}</Text>}
     {foldable ? <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} {...aria({ expanded: open })} onPress={() => setOpen(!open)} hitSlop={6} style={{ alignSelf: "flex-start", paddingVertical: 2 }}>
-      <Text style={{ color: hue(theme, "amber", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{open ? "收起" : `还有 ${account.windows.length - summary.length} 个窗口`}</Text>
+      <Text style={{ color: hue(theme, "amber", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{open ? t("coreQuotaCard.collapse") : t("coreQuotaCard.moreWindows", { count: account.windows.length - summary.length })}</Text>
     </Pressable> : null}
   </View>;
 }
@@ -173,21 +175,21 @@ export function QuotaCard({ theme, compact = false, data, loading, error, onRefr
   const live = accounts.filter(account => quotaAccountCurrent(account, now)).flatMap(account => account.windows).filter(window => !quotaWindowReset(window, now));
   const kept = accounts.filter(account => !quotaAccountCurrent(account, now) && account.windows.length);
   const color: Hue = live.some(window => window.alarm || window.tone === "danger") ? "red" : live.some(window => window.tone === "warning") || kept.length || data?.error || (!data && error) ? "amber" : live.length ? "green" : "blue";
-  const retry = onRefresh && data?.error?.kind !== "unsupported" ? { label: "重试", onPress: onRefresh } : undefined;
+  const retry = onRefresh && data?.error?.kind !== "unsupported" ? { label: t("coreQuotaCard.retry"), onPress: onRefresh } : undefined;
   const readAt = data?.readAt ? Date.parse(data.readAt) : null, oldest = accounts.reduce<number | null>((min, account) => account.readingAt ? Math.min(min ?? Infinity, Date.parse(account.readingAt)) : min, null);
-  const trailing: ReactNode = data?.refreshing ? <SyncStatus theme={theme} state="syncing" label="读取中" />
+  const trailing: ReactNode = data?.refreshing ? <SyncStatus theme={theme} state="syncing" label={t("coreQuotaCard.reading2")} />
     : data?.error ? <Badge theme={theme} label={errorBadge[data.error.kind]} tone="warning" icon="CircleAlert" />
-    : readAt !== null ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{relativeTime(readAt, now)}更新</Text> : null;
+    : readAt !== null ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{t("coreQuotaCard.updated", { value1: relativeTime(readAt, now) })}</Text> : null;
   let body: ReactNode;
-  if (!data) body = loading ? <Note theme={theme} icon="Gauge" text="正在读取额度…" /> : <Note theme={theme} icon="Gauge" text={error ? `额度暂时读不到：${error}` : "额度暂时读不到"} action={onRefresh ? { label: "重试", onPress: onRefresh } : undefined} />;
+  if (!data) body = loading ? <Note theme={theme} icon="Gauge" text={t("coreQuotaCard.readingQuota")} /> : <Note theme={theme} icon="Gauge" text={error ? t("coreQuotaCard.quotaIsTemporarilyUnavailable", { value1: error }) : t("coreQuotaCard.quotaIsTemporarilyUnavailable2")} action={onRefresh ? { label: t("coreQuotaCard.retry"), onPress: onRefresh } : undefined} />;
   else if (!accounts.length) body = <Note theme={theme} icon={data.error ? "CircleAlert" : "Gauge"} tone={data.error ? "warning" : "muted"} action={data.error ? retry : undefined}
-    text={data.error ? `${errorText[data.error.kind]}。` : data.refreshing || data.readAt === null ? "正在读取额度…" : "宿主还没有可读的额度：在这台主机上登录 Claude Code、Codex 等之后会出现在这里。"} />;
+    text={data.error ? t("coreQuotaCard.errorSentence", { error: errorText[data.error.kind] }) : data.refreshing || data.readAt === null ? t("coreQuotaCard.readingQuota") : t("coreQuotaCard.noReadableQuotaOnThisHostYet")} />;
   else body = <>
-    {data.error ? <Note theme={theme} icon="CircleAlert" tone="warning" text={`${errorText[data.error.kind]}${oldest !== null ? `，显示的是 ${quotaWhen(oldest, now)} 的读数` : ""}。`} action={retry} /> : null}
-    {error && !data.error ? <Note theme={theme} icon="WifiOff" text={`额度同步失败，显示的是上次结果：${error}`} /> : null}
+    {data.error ? <Note theme={theme} icon="CircleAlert" tone="warning" text={oldest !== null ? t("coreQuotaCard.errorWithReading", { error: errorText[data.error.kind], reading: quotaWhen(oldest, now) }) : t("coreQuotaCard.errorSentence", { error: errorText[data.error.kind] })} action={retry} /> : null}
+    {error && !data.error ? <Note theme={theme} icon="WifiOff" text={t("coreQuotaCard.quotaSyncFailedShowingThePreviousResult", { value1: error })} /> : null}
     {accounts.map(account => <AccountBlock key={account.key} theme={theme} account={account} now={now} compact={compact} />)}
   </>;
-  return <Card theme={theme} title="额度" icon="Gauge" color={color} trailing={trailing}><View style={{ gap: space.lg }}>{body}</View></Card>;
+  return <Card theme={theme} title={t("coreQuotaCard.quota")} icon="Gauge" color={color} trailing={trailing}><View style={{ gap: space.lg }}>{body}</View></Card>;
 }
 
 /**
@@ -221,3 +223,12 @@ export function QuotaChip({ theme, quota, onPress, variant = "glass" }: { theme:
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={view.accessibilityLabel} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={state => [style, { opacity: state.pressed ? 0.75 : 1 }]}>{body}</Pressable>
     : <View accessibilityLabel={view.accessibilityLabel} style={style}>{body}</View>;
 }
+
+// Refresh the shared label array when a catalog is first bound or its language changes.
+onTextChange(() => { quotaInfo = [
+  t("coreQuotaCard.quotaComesFromPaseoSUsageInterface"),
+  t("coreQuotaCard.whileAPageIsViewingQuotaObservatory"),
+  t("coreQuotaCard.ifAReadFailsAnAccountIs"),
+  t("coreQuotaCard.theVerticalLineOnTheProgressBar"),
+  t("coreQuotaCard.accountNamesMayBeEmailAddressesOnly"),
+]; });

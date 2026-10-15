@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { randomUUID } from "node:crypto";
 import { open, readFile, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,7 +44,7 @@ export class PreferencesStore {
     } catch (error) {
       if ((error as { code?: string }).code !== "ENOENT") {
         this.corrupt = true;
-        this.error = "已保存的偏好无法读取；下次保存时会保留一份损坏文件备份。";
+        this.error = t("serverPreferences.m001");
       }
     }
   }
@@ -68,7 +69,7 @@ export class PreferencesStore {
   }
 
   async update(input: PreferencesUpdate): Promise<PreferencesUpdateResult> {
-    if (this.closed) throw new Error("偏好服务正在关闭，请稍后重试。");
+    if (this.closed) throw new Error(t("serverPreferences.m002"));
     const validated = updatePreferences.input.parse(input);
     const task = this.mutations.then(() => this.apply(validated));
     this.mutations = task.then(() => {}, () => {});
@@ -86,9 +87,9 @@ export class PreferencesStore {
     if (input.deleteSavedViewId) savedViews = savedViews.filter(saved => saved.id !== input.deleteSavedViewId);
     if (input.saveView) {
       const existing = input.saveView.id ? savedViews.find(saved => saved.id === input.saveView!.id) : undefined;
-      if (input.saveView.id && !existing) throw new Error("要更新的保存视图已不存在，请刷新后重试。");
-      if (savedViews.some(saved => saved.name === input.saveView!.name && saved.id !== existing?.id)) throw new Error("已有同名视图，请选择另一个名称。");
-      if (!existing && savedViews.length >= 12) throw new Error("每个页面最多保存 12 个视图，请先删除不再使用的视图。");
+      if (input.saveView.id && !existing) throw new Error(t("serverPreferences.m003"));
+      if (savedViews.some(saved => saved.name === input.saveView!.name && saved.id !== existing?.id)) throw new Error(t("serverPreferences.m004"));
+      if (!existing && savedViews.length >= 12) throw new Error(t("serverPreferences.m005"));
       const saved: SavedView = { id: existing?.id ?? randomUUID(), name: input.saveView.name, createdAt: existing?.createdAt ?? at, updatedAt: at,
         view: { ...input.saveView.view, expanded: [...new Set(input.saveView.view.expanded)] } };
       savedViews = [saved, ...savedViews.filter(candidate => candidate.id !== saved.id)];
@@ -96,10 +97,10 @@ export class PreferencesStore {
     if (input.unsnooze) snoozes = snoozes.filter(snooze => snooze.agentId !== input.unsnooze!.agentId || Date.parse(snooze.completionAt) !== Date.parse(input.unsnooze!.completionAt));
     if (input.snooze) {
       const until = Date.parse(input.snooze.until);
-      if (until <= now || until > now + 30 * 86_400_000) throw new Error("稍后提醒时间应在现在之后、30 天以内。");
-      if (Date.parse(input.snooze.completionAt) > now) throw new Error("不能稍后提醒尚未发生的完成结果。");
+      if (until <= now || until > now + 30 * 86_400_000) throw new Error(t("serverPreferences.m006"));
+      if (Date.parse(input.snooze.completionAt) > now) throw new Error(t("serverPreferences.m007"));
       snoozes = snoozes.filter(snooze => snooze.agentId !== input.snooze!.agentId || Date.parse(snooze.completionAt) !== Date.parse(input.snooze!.completionAt));
-      if (snoozes.length >= 2000) throw new Error("稍后提醒已达到 2,000 条保留上限，请先取消部分提醒。");
+      if (snoozes.length >= 2000) throw new Error(t("serverPreferences.m008"));
       snoozes.unshift({ ...input.snooze });
     }
     const settings: ObservatorySettings = { ...this.settings, ...input.settings };
@@ -109,7 +110,7 @@ export class PreferencesStore {
     if (!changed) return { status: "updated", ...this.current(input.viewKey) };
     if (!old && this.views.size >= 32) {
       const oldest = [...this.views.values()].filter(view => view.savedViews.length === 0).sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0];
-      if (!oldest) throw new Error("已达到 32 个页面偏好上限，请先移除不再使用的保存视图。");
+      if (!oldest) throw new Error(t("serverPreferences.m009"));
       this.views.delete(oldest.key);
     }
     this.views.set(input.viewKey, { key: input.viewKey, updatedAt: at, view, savedViews });
@@ -129,7 +130,7 @@ export class PreferencesStore {
         await handle.sync();
       } finally { await handle.close(); }
       await rename(temporary, this.file); this.error = null;
-    } catch { this.error = "偏好已在内存更新，但暂时无法写入磁盘；重启后可能丢失本次变更。"; }
+    } catch { this.error = t("serverPreferences.m010"); }
     finally { await rm(temporary, { force: true }).catch(() => {}); }
   }
 

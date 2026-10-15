@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import { DIGEST_LANE_PRIORITY, type DigestLane, type DigestSegment, type DigestTurn } from "../../shared/digest";
 import type { TelemetryEvent } from "../../shared/telemetry";
 import { emptyLanes, excerpt, type FoldState } from "./model";
@@ -48,7 +49,7 @@ export function attributeTime(start: number, end: number, segments: readonly Dig
     time[lane] += at - previous;
     if (lane === "model") modelStart ??= previous;
     else if (modelStart !== null) {
-      if (previous - modelStart >= 1000) model.push({ lane: "model", start: modelStart, end: previous, status: "ok", label: "思考", turn, n: 1, seq: null });
+      if (previous - modelStart >= 1000) model.push({ lane: "model", start: modelStart, end: previous, status: "ok", label: t("serverDigestActivity.m001"), turn, n: 1, seq: null });
       modelStart = null;
     }
     previous = at;
@@ -58,7 +59,7 @@ export function attributeTime(start: number, end: number, segments: readonly Dig
     do { const edge = edges[index++]!; active[edge.lane] += edge.delta; } while (index < edges.length && edges[index]!.at === at);
   }
   span(end);
-  if (modelStart !== null && end - modelStart >= 1000) model.push({ lane: "model", start: modelStart, end, status: "ok", label: "思考", turn, n: 1, seq: null });
+  if (modelStart !== null && end - modelStart >= 1000) model.push({ lane: "model", start: modelStart, end, status: "ok", label: t("serverDigestActivity.m002"), turn, n: 1, seq: null });
   return { time, model };
 }
 
@@ -97,7 +98,7 @@ export function buildActivity(state: FoldState, options: ActivityOptions): Activ
     const start = Math.max(turn.start, wait.start), end = Math.min(turn.end ?? Math.max(turn.start, options.now), wait.end);
     if (end <= start) continue;
     byTurn.get(turn.index)!.push({ lane: "wait", start, end, status: wait.running && turn.end === null ? "running" : "ok",
-      label: "等待审批", turn: turn.index, n: 1, seq: null });
+      label: t("serverDigestActivity.m003"), turn: turn.index, n: 1, seq: null });
   }
   const segments: DigestSegment[] = [], modelSpans = new Map<number, FoldState["modelSpans"]>();
   for (const span of state.modelSpans) {

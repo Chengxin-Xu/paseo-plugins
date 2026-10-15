@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { TOKEN_SOURCES, tokenCountsSchema } from "./tokens";
@@ -173,6 +174,6 @@ export const getDigest = defineRpc({
 export type DigestState = Digest & { revision?: string };
 export function mergeDigest(previous: DigestState | undefined, response: DigestResponse): DigestState {
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...digest } = response; return { ...digest, revision: response.revision }; }
-  if (!previous) throw new Error("本地复盘缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedDigest.m001"));
   return previous;
 }

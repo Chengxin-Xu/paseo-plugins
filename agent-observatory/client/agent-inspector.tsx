@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import * as host from "@getpaseo/plugin/client";
@@ -49,14 +50,14 @@ export function AgentInspector({ theme, layout, host: target, navigation, agentI
     const origin = receipts.data?.archiveOrigins.find(item => item.agentId === agentId), receipt = receipts.data?.receipts.find(item => item.agentId === agentId);
     return applyReadReceipt(applyArchiveReadOrigin(enriched!, origin), receipt);
   }, [source, snapshot.data, telemetry.data, background.data, extras.data, receipts.data, agentId]);
-  const actions: MenuAction[] = onOpenOverview ? [{ key: "overview", label: "在观测台中查看", icon: "Orbit", hint: "打开完整的会话列表并选中这个 Agent", onPress: () => onOpenOverview(agentId) }] : [];
+  const actions: MenuAction[] = onOpenOverview ? [{ key: "overview", label: t("coreAgentInspector.viewInObservatory"), icon: "Orbit", hint: t("coreAgentInspector.openTheFullSessionListWithThis"), onPress: () => onOpenOverview(agentId) }] : [];
   return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: theme.colors.surface0 }}>
     {agent ? <AgentDetail key={`${hostId}:${agent.id}`} hostId={hostId} agent={agent} theme={theme} compact={compact} navigation={navigation} onSelectAgent={setAgentId}
       onClose={agentId !== initialId ? () => setAgentId(initialId) : undefined} telemetry={telemetry.data} onOpenSchedules={onOpenSchedules}
       heartbeats={heartbeats.data?.byAgent.get(agent.id)} extraActions={actions} />
       // Moving to a parent or child keeps the previous Agent as a placeholder until this one is read: not "not found".
       : snapshot.isPending || snapshot.isPlaceholderData ? <Skeleton theme={theme} rows={6} />
-      : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon={snapshot.error ? "WifiOff" : "SearchX"} title={snapshot.error ? "暂时读不到这个 Agent" : "当前宿主找不到这个 Agent"}
-        message={snapshot.error ? "恢复连接后会自动重试" : undefined} action={snapshot.error ? { label: "重试", icon: "RefreshCw", onPress: () => void snapshot.refetch() } : undefined} /></View>}
+      : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon={snapshot.error ? "WifiOff" : "SearchX"} title={snapshot.error ? t("coreAgentInspector.cannotReadThisAgentRightNow") : t("coreAgentInspector.thisAgentWasNotFoundOnThe")}
+        message={snapshot.error ? t("coreAgentInspector.willRetryAutomaticallyWhenTheConnectionReturns") : undefined} action={snapshot.error ? { label: t("coreAgentInspector.retry"), icon: "RefreshCw", onPress: () => void snapshot.refetch() } : undefined} /></View>}
   </View>;
 }

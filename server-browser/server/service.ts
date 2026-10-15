@@ -1,3 +1,5 @@
+import { currentLanguage } from '../shared/i18n';
+import { t } from '../shared/text';
 import path from 'node:path';
 import type { PluginHandlerContext } from '@getpaseo/plugin/server';
 import type { BrowserOverviewItem, BrowserProfile, BrowserService, BrowserWorkspace } from '../shared/browser';
@@ -18,16 +20,16 @@ export async function listBrowserWorkspaces(paseo:Paseo):Promise<PaseoWorkspace[
     if(!page.pageInfo.hasMore)break;
     const next=page.pageInfo.nextCursor;
     // Orphan cleanup must not mistake an incomplete directory for a list of removed workspaces.
-    if(!next||next===cursor||entries.length>=5000)throw new Error('工作区列表暂不完整，请刷新后重试。');
+    if(!next||next===cursor||entries.length>=5000)throw new Error(t('serverError.workspaceListIncomplete'));
     cursor=next;
   }while(true);
   return entries.filter(workspace=>!workspace.archivingAt);
 }
 
 function checkedWorkspace(workspace:PaseoWorkspace|undefined):PaseoWorkspace {
-  if(!workspace)throw new Error('该工作区已不可用，请选择当前服务器上的工作区。');
+  if(!workspace)throw new Error(t('serverError.workspaceUnavailable'));
   const cwd=workspace.workspaceDirectory??workspace.projectRootPath;
-  if(!path.isAbsolute(cwd))throw new Error('工作区目录不是服务器上的绝对路径。');
+  if(!path.isAbsolute(cwd))throw new Error(t('serverError.workspacePathRelative'));
   return workspace;
 }
 
@@ -100,19 +102,19 @@ export class BrowserAgentDirectory {
   }
   private async read(paseo:Paseo,workspaceId:string):Promise<PaseoAgent[]>{
     const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
-    const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('浏览器 Agent 状态读取超时，请刷新后重试。'));},2500);});
+    const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error(t('serverError.agentStateTimeout')));},2500);});
     const read=async()=>{
       const agents:PaseoAgent[]=[];let cursor:string|undefined;
       do{
         const page=await paseo.agents.list({filter:{labels:{'server-browser.workspace':workspaceId},includeArchived:true},page:{limit:200,...(cursor?{cursor}:{})},signal:controller.signal,timeout:2500});
-        if(controller.signal.aborted)throw new Error('浏览器 Agent 状态读取超时，请刷新后重试。');
+        if(controller.signal.aborted)throw new Error(t('serverError.agentStateTimeout'));
         agents.push(...page.entries.map(item=>item.agent));
         if(!page.pageInfo?.hasMore)return agents;
         const next=page.pageInfo.nextCursor;
-        if(!next||next===cursor)throw new Error('浏览器 Agent 列表暂不完整，请刷新后重试。');
+        if(!next||next===cursor)throw new Error(t('serverError.agentListIncomplete'));
         cursor=next;
       }while(agents.length<5000);
-      throw new Error('浏览器 Agent 列表暂不完整，请刷新后重试。');
+      throw new Error(t('serverError.agentListIncomplete'));
     };
     try{return await Promise.race([read(),timeout]);}finally{if(timer)clearTimeout(timer);}
   }
@@ -122,7 +124,7 @@ export class BrowserAgentDirectory {
       const current=(await this.list(paseo,workspaceId)).find(agent=>agent.id===agentId);
       // `closed` only means the daemon has not loaded the session (after a restart, say): opening or messaging it loads it.
       if(!current||current.workspaceId!==workspaceId||current.archivedAt)return {availability:'unavailable',agent:null};
-      return {availability:'available',agent:{id:current.id,title:current.title||'浏览器 Agent',status:current.status,provider:current.provider,needsPermission:Boolean(current.pendingPermissions?.length)}};
+      return {availability:'available',agent:{id:current.id,title:current.title||t('serverAgent.name'),status:current.status,provider:current.provider,needsPermission:Boolean(current.pendingPermissions?.length)}};
     }catch{return {availability:'unknown',agent:null};}
   }
 }
@@ -172,26 +174,26 @@ export class BrowserAgentService {
     const available=profiles.filter(profile=>catalog.entries.some(entry=>entry.provider===profile.provider&&entry.enabled!==false&&entry.status==='ready'));
     // The panel always sends its selection (the first profile by default); without one, use the first usable profile.
     const profile=profileId?profiles.find(item=>item.id===profileId):available[0];
-    if(profileId&&!profile)throw new Error('所选 Agent Profile 已不存在，请重新选择。');
+    if(profileId&&!profile)throw new Error(t('serverError.profileMissing'));
     const provider=profile?catalog.entries.find(entry=>entry.provider===profile.provider&&entry.enabled!==false&&entry.status==='ready'):catalog.entries.find(entry=>entry.enabled!==false&&entry.status==='ready');
-    if(!provider)throw new Error('没有可用的 Agent provider，请检查 Paseo 的模型配置。');
+    if(!provider)throw new Error(t('serverError.noProvider'));
     const model=profile?.model??provider.models?.find(item=>item.isDefault&&item.isSelectable!==false)?.id??provider.models?.find(item=>item.isSelectable!==false)?.id;
-    if(!model)throw new Error('没有可用的 Agent 模型，请检查所选 Profile。');
+    if(!model)throw new Error(t('serverError.noModel'));
     const agent=await paseo.workspaces.ref(workspace).agents.create({
       config:{
         provider:`${provider.provider}/${model}`,
         ...(profile?.modeId?{modeId:profile.modeId}:{}),
         ...(profile?.thinkingOptionId?{thinkingOptionId:profile.thinkingOptionId}:{}),
         ...(profile?.featureValues?{featureValues:profile.featureValues}:{}),
-        systemPrompt:'你是本工作区的共享服务器浏览器 Agent。网页操作优先使用 server_browser MCP；它连接 Linux 服务器上的持久浏览器，用户通过 Paseo 面板观看并接管同一会话。Paseo 原生 browser 工具连接的是另一套浏览器，除非用户明确要求，不要自动换过去。访问不熟悉的站点后先用 browser_diagnostics 判断页面与登录提示；这仅是只读检查，不能把页面可访问当作已经登录。阅读文章优先使用 browser_read_page；操作前确认稳定 tabId 与目标页面。用户切为手动模式时停止所有浏览器写操作，不得通过 shell、直接 CDP 或别的工具绕过接管门禁。浏览器意外退出可自动恢复页面与已有 Profile，但不要自行重放提交、支付或其他写操作，也不要关闭浏览器进程。目标标签已关闭时重新确认，不能猜测另一标签继续执行。',
+        systemPrompt:[t('serverAgent.systemPrompt'),t('serverAgent.responseLanguage',{language:currentLanguage()})].join('\n'),
         mcpServers:{server_browser:{type:'stdio',command:process.execPath,args:[this.manager.bridgePath,this.manager.metadataPath(workspaceId)],alwaysLoad:true}},
       },
-      title:'共享服务器浏览器',autoArchive:false,labels:{[label]:workspaceId},
+      title:t('serverAgent.sharedTitle'),autoArchive:false,labels:{[label]:workspaceId},
     });
     await this.manager.setAgentId(workspaceId,agent.id);
     this.directory.invalidate(workspaceId);
     await this.manager.action(workspaceId,{kind:'mode',mode:'agent'});
-    await agent.send('你已接入这个工作区的共享服务器浏览器。使用 server_browser MCP 工具操作，用户可在 Paseo 的「服务器浏览器」面板实时观看同一个页面。该浏览器在 Linux 服务器上运行，与 Paseo 原生 browser 工具是两个不同会话；后续用户要求操作共享浏览器时优先使用 server_browser。用户切换「手动接管」后，MCP 会阻止你的写操作，也不让你读取页面结构、网络请求和控制台记录，只能用 browser_take_screenshot 截图查看；收到该提示后请等待用户恢复 Agent 模式，不要换用 shell、CDP 或其他工具绕过。浏览器和登录状态由面板管理，不要关闭进程。本条只需简短确认准备就绪，暂时不要导航、输入或点击网页。');
+    await agent.send(t('serverAgent.introduction'));
     return {agentId:agent.id,created:true,session:await this.manager.state(workspaceId)};
   }
 }

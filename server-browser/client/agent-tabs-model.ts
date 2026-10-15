@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { BrowserOverviewItem, BrowserWorkspace } from '../shared/browser';
 import type { Hue } from './kit';
 import type { Look } from './overview-model';
@@ -26,17 +27,17 @@ export type AgentTabGroup = { projectKey: string; projectTitle: string; identity
  * waits for you, and amber is never a project colour (`hueFor`), so a manual browser cannot be mistaken for a project.
  */
 export const controlLooks = {
-  agent: { label: 'Agent', icon: 'Bot', hue: 'violet' },
-  manual: { label: '手动', icon: 'MousePointer2', hue: 'amber' },
+  agent: { get label() { return t("agentTabs.agent"); }, icon: 'Bot', hue: 'violet' },
+  manual: { get label() { return t("agentTabs.manual"); }, icon: 'MousePointer2', hue: 'amber' },
 } as const satisfies Record<'agent' | 'manual', { label: string; icon: string; hue: Hue }>;
 
 /** States worth a glance get a mark (errors red, approvals amber, login orange, Agent work blue); a quiet browser under manual control shows the amber pointer. */
 export function tabGlyph(state: BrowserAgentTab['state'], mode: BrowserAgentTab['mode'] = null): Look | null {
-  if (state === 'error') return { label: '异常', icon: 'CircleAlert', tone: 'danger' };
-  if (state === 'permission') return { label: '待审批', icon: 'Hand', tone: 'warning', motion: 'ping' };
-  if (state === 'login') return { label: '需登录', icon: 'LogIn', tone: 'orange' };
-  if (state === 'browser_busy') return { label: 'Agent 操作中', icon: 'LoaderCircle', tone: 'info', motion: 'spin' };
-  if (mode === 'manual' && state !== 'offline') return { label: '手动', icon: controlLooks.manual.icon, tone: controlLooks.manual.hue };
+  if (state === 'error') return { get label() { return t("agentTabs.error"); }, icon: 'CircleAlert', tone: 'danger' };
+  if (state === 'permission') return { get label() { return t("agentTabs.needsApproval"); }, icon: 'Hand', tone: 'warning', motion: 'ping' };
+  if (state === 'login') return { get label() { return t("agentTabs.loginRequired"); }, icon: 'LogIn', tone: 'orange' };
+  if (state === 'browser_busy') return { get label() { return t("agentTabs.agentIsWorking"); }, icon: 'LoaderCircle', tone: 'info', motion: 'spin' };
+  if (mode === 'manual' && state !== 'offline') return { get label() { return t("agentTabs.manual"); }, icon: controlLooks.manual.icon, tone: controlLooks.manual.hue };
   return null;
 }
 
@@ -48,32 +49,35 @@ function safeLabel(value: string | null | undefined, fallback: string): string {
 }
 /** The name a project is known by across plugins; a workspace without a project goes by its own title. */
 export function projectName(workspace: BrowserWorkspace): string {
-  return safeLabel(workspace.projectTitle, '') || safeLabel(workspace.title, '工作区');
+  return safeLabel(workspace.projectTitle, '') || safeLabel(workspace.title, t("agentTabs.workspace"));
+}
+export function projectColorIdentity(workspace: BrowserWorkspace): string {
+  return safeLabel(workspace.projectTitle, '') || safeLabel(workspace.title, '') || workspace.id;
 }
 function makeTab(workspace: BrowserWorkspace, item?: BrowserOverviewItem): BrowserAgentTab {
   const projectKey = browserProjectKey(workspace);
-  const projectTitle = safeLabel(workspace.projectTitle, '项目');
-  const workspaceTitle = safeLabel(workspace.title, '工作区');
+  const projectTitle = safeLabel(workspace.projectTitle, t("agentTabs.project"));
+  const workspaceTitle = safeLabel(workspace.title, t("agentTabs.workspace"));
   const session = item?.session;
   // A workspace's unrelated running agents never become browser agent tabs.
   const agent = item?.agent && item.agent.id === session?.agentId && session.workspaceId === workspace.id ? item.agent : null;
   const kind = agent ? 'agent' : session?.agentId ? 'unavailable' : 'manual';
-  const title = agent ? safeLabel(agent.title, '浏览器 Agent') : kind === 'unavailable' ? 'Agent 暂不可用' : '手动浏览';
+  const title = agent ? safeLabel(agent.title, t("agentTabs.browserAgent")) : kind === 'unavailable' ? t("agentTabs.agentUnavailable") : t("agentTabs.manualBrowsing");
   const busy = session?.agentBusy || session?.activity?.some((activity) => activity.source === 'agent' && activity.status === 'running');
   let state: BrowserAgentTab['state'] = 'idle';
-  let statusLabel = agent ? '空闲' : kind === 'unavailable' ? '关联 Agent 暂不可用' : '未关联 Agent';
-  if (session?.status === 'error') { state = 'error'; statusLabel = '浏览器异常'; }
-  else if (session?.status === 'recovering') { state = 'offline'; statusLabel = '浏览器恢复中'; }
-  else if (agent?.needsPermission) { state = 'permission'; statusLabel = '等待审批'; }
-  else if (session?.health?.state === 'login_required' && session.status === 'running') { state = 'login'; statusLabel = '页面需要登录'; }
-  else if (busy) { state = 'browser_busy'; statusLabel = '正在操作浏览器'; }
-  else if (agent?.status === 'running' || agent?.status === 'initializing') { state = 'agent_running'; statusLabel = 'Agent 运行中，浏览器等待任务'; }
-  else if (agent?.status === 'error') { state = 'error'; statusLabel = 'Agent 出错'; }
+  let statusLabel = agent ? t("agentTabs.idle") : kind === 'unavailable' ? t("agentTabs.linkedAgentUnavailable") : t("agentTabs.noLinkedAgent");
+  if (session?.status === 'error') { state = 'error'; statusLabel = t("agentTabs.browserError"); }
+  else if (session?.status === 'recovering') { state = 'offline'; statusLabel = t("agentTabs.browserIsRecovering"); }
+  else if (agent?.needsPermission) { state = 'permission'; statusLabel = t("agentTabs.waitingForApproval"); }
+  else if (session?.health?.state === 'login_required' && session.status === 'running') { state = 'login'; statusLabel = t("agentTabs.pageRequiresLogin"); }
+  else if (busy) { state = 'browser_busy'; statusLabel = t("agentTabs.usingTheBrowser"); }
+  else if (agent?.status === 'running' || agent?.status === 'initializing') { state = 'agent_running'; statusLabel = t("agentTabs.agentIsRunningBrowserIsWaitingFor"); }
+  else if (agent?.status === 'error') { state = 'error'; statusLabel = t("agentTabs.agentError"); }
   // `closed` is an unloaded Agent (after a daemon restart, say): still linked, it loads when opened.
-  else if (agent?.status === 'closed' && session?.status === 'running') statusLabel = 'Agent 未载入，打开时自动载入';
-  else if (session?.status === 'idle' || !session) { state = 'offline'; statusLabel = '浏览器未启动'; }
+  else if (agent?.status === 'closed' && session?.status === 'running') statusLabel = t("agentTabs.agentIsUnloadedAndWillLoadWhen");
+  else if (session?.status === 'idle' || !session) { state = 'offline'; statusLabel = t("agentTabs.browserHasNotStarted"); }
   const mode = session?.status === 'running' ? session.mode : null;
-  return { workspaceId: workspace.id, workspaceTitle, projectKey, projectTitle, identity: projectName(workspace), agentId: agent?.id || session?.agentId || null, title, subtitle: workspaceTitle, kind, state, mode, statusLabel, accessibilityLabel: `${projectTitle}，${title}，工作区 ${workspaceTitle}，${statusLabel}` };
+  return { workspaceId: workspace.id, workspaceTitle, projectKey, projectTitle, identity: projectColorIdentity(workspace), agentId: agent?.id || session?.agentId || null, title, subtitle: workspaceTitle, kind, state, mode, statusLabel, accessibilityLabel: t("agentTabs.workspace2", { value1: projectTitle, value2: title, value3: workspaceTitle, value4: statusLabel }) };
 }
 
 /** Existing sessions only, plus the explicitly selected workspace when it has no session yet. */
@@ -96,7 +100,7 @@ export function buildAgentTabGroups(items: readonly BrowserOverviewItem[], selec
       const duplicate = group.tabs.some((other) => other.workspaceId !== tab.workspaceId && other.title === tab.title && other.workspaceTitle === tab.workspaceTitle);
       if (!duplicate) return tab;
       const suffix = tab.workspaceId.slice(-6);
-      return { ...tab, subtitle: `${tab.workspaceTitle} · ${suffix}`, accessibilityLabel: `${tab.accessibilityLabel}，标识 ${suffix}` };
+      return { ...tab, subtitle: t("agentTabs.formatted", { value1: tab.workspaceTitle, value2: suffix }), accessibilityLabel: t("agentTabs.id", { value1: tab.accessibilityLabel, value2: suffix }) };
     }),
   }));
 }

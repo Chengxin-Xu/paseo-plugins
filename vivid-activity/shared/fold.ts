@@ -1,3 +1,5 @@
+import { t } from "./text";
+import { joinList } from "./i18n";
 import { estimateStarts, formatDuration, MAX_UNWITNESSED_MS } from "./timing";
 import { COUNT_LABELS, isLookKey, type LookKey } from "./vivid-model";
 
@@ -380,24 +382,28 @@ export function formatFoldDuration(ms: number | null): string | null {
 export function foldCountParts(counts: ReadonlyArray<readonly [string, number]>): Array<{ look: LookKey; text: string }> {
   return counts.filter(([, n]) => n > 0).map(([look, n]) => {
     const key = isLookKey(look) ? look : "other";
-    return { look: key, text: `${COUNT_LABELS[key]} ${n}` };
+    return { look: key, text: t("fold.categoryCount", { label: COUNT_LABELS[key], count: n }) };
   });
 }
 
 /** The summary's lead words: 「12 步」 or 「前面 7 步」. */
 export function foldTitle(summary: Pick<FoldSummary, "mode" | "steps" | "hidden">): string {
-  return summary.mode === "earlier" ? `前面 ${summary.hidden} 步` : `${summary.steps} 步`;
+  return summary.mode === "earlier" ? t("fold.earlier", { count: summary.hidden }) : t("fold.steps", { count: summary.steps });
 }
 
 /** Screen-reader label: 「展开 12 步：思考 2、命令 5，失败 1，用时 1 分 20 秒」. */
 export function foldAccessibilityLabel(
   summary: Pick<FoldSummary, "mode" | "steps" | "hidden" | "expanded" | "failed" | "canceled" | "durationMs"> & { counts: ReadonlyArray<readonly [string, number]> },
 ): string {
-  const parts = foldCountParts(summary.counts).map((part) => part.text).join("、");
+  const parts = joinList(foldCountParts(summary.counts).map((part) => part.text));
   const extras = [
-    summary.failed > 0 ? `失败 ${summary.failed}` : null,
-    summary.canceled > 0 ? `取消 ${summary.canceled}` : null,
-    summary.mode === "done" ? (formatFoldDuration(summary.durationMs) ? `用时 ${formatFoldDuration(summary.durationMs)}` : null) : null,
+    summary.failed > 0 ? t("fold.failed", { count: summary.failed }) : null,
+    summary.canceled > 0 ? t("fold.canceled", { count: summary.canceled }) : null,
+    summary.mode === "done" ? (formatFoldDuration(summary.durationMs) ? t("fold.duration", { duration: formatFoldDuration(summary.durationMs) }) : null) : null,
   ].filter(Boolean);
-  return `${summary.expanded ? "收起" : "展开"} ${foldTitle(summary)}${parts ? `：${parts}` : ""}${extras.length ? `，${extras.join("，")}` : ""}`;
+  return t(summary.expanded ? "fold.collapse" : "fold.expand", {
+    title: foldTitle(summary),
+    parts: parts ? t("fold.countsSuffix", { counts: parts }) : "",
+    extras: extras.length ? t("fold.extrasSuffix", { extras: extras.join(t("fold.extrasSeparator")) }) : "",
+  });
 }

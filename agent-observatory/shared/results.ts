@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 export const resultExcerptSchema = z.object({ text: z.string().max(60_000), ref: z.string(), at: z.string().nullable(), truncated: z.boolean() });
@@ -26,7 +27,7 @@ export type AgentResultResponse = z.infer<typeof getAgentResult.output>;
 export function mergeAgentResult(previous: AgentResultState | undefined, response: AgentResultResponse | AgentResult): AgentResultState {
   if (!("mode" in response)) return response;
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...result } = response; return result; }
-  if (!previous) throw new Error("本地结果缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedResults.m001"));
   return previous;
 }
 export type ResultExcerpt = z.infer<typeof resultExcerptSchema>;

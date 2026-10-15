@@ -30,7 +30,7 @@ export function mergeDashboard(current: DashboardData | undefined, update: Dashb
     const previous = boards.get(next.projectId);
     if (!hidden.has(next.projectId) && (update.mode || !previous || next.revision >= previous.revision)) boards.set(next.projectId, next);
   }
-  return { revision: update.revision ?? null, changedAt: now, projects: update.projects ?? current?.projects ?? [], boards: [...boards.values()], unavailable, ...(current?.writeEpoch ? { writeEpoch: current.writeEpoch } : {}) };
+  return { revision: update.revision ?? null, changedAt: now, projects: update.projects?.map(project => update.retiredProjectIds?.includes(project.id) ? { ...project, retired: true } : project) ?? current?.projects ?? [], boards: [...boards.values()], unavailable, ...(current?.writeEpoch ? { writeEpoch: current.writeEpoch } : {}) };
 }
 
 /** Keep the last known server revision, and ask the next delta to authoritatively refresh written boards.

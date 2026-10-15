@@ -1,3 +1,5 @@
+import { currentLanguage, joinList } from "../shared/i18n";
+import { t } from "../shared/text";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -39,7 +41,7 @@ function useSettled<Value>(value: Value, ms: number): Value {
 /** Last ten runs as small blocks, oldest first: a schedule's health at a glance. */
 function HealthStrip({ theme, recent }: { theme: PluginTheme; recent: readonly RunStatus[] }) {
   const slots = Array.from({ length: 10 }, (_, index) => recent[index - (10 - recent.length)] ?? null);
-  return <View accessibilityLabel={recent.length ? `最近 ${recent.length} 次：${recent.map(status => runLooks[status].label).join("、")}` : "还没有运行"} style={{ flexDirection: "row", gap: 3 }}>
+  return <View accessibilityLabel={recent.length ? t("secondaryScheduleBoard.lastRuns", { count: recent.length, value2: joinList(recent.map(status => runLooks[status].label)) }) : t("secondaryScheduleBoard.noRunsYet")} style={{ flexDirection: "row", gap: 3 }}>
     {slots.map((status, index) => <View key={index} style={{ width: 9, height: 14, borderRadius: 2,
       backgroundColor: status === null ? theme.colors.surface2 : hueColor(theme, runLooks[status].hue), opacity: status === "unknown" ? 0.45 : 1 }} />)}
   </View>;
@@ -50,10 +52,10 @@ function ScheduleCard({ theme, schedule, selected, now, zone, onPress }: { theme
   const { colors } = theme, deleted = schedule.status === "deleted", failing = schedule.recent.at(-1) === "failed", heartbeat = schedule.kind === "heartbeat";
   const accent = failing ? hueColor(theme, "fail") : schedule.running ? hueColor(theme, "run") : heartbeat ? hueColor(theme, "pink") : hueColor(theme, "violet");
   const next = schedule.status === "active" ? untilLabel(schedule.nextRunAt, now) : null;
-  const state = deleted ? "已删除" : schedule.status === "paused" ? "已暂停" : schedule.status === "completed" ? "已结束" : next ? `下次 ${next}` : null;
+  const state = deleted ? t("secondaryScheduleBoard.deleted") : schedule.status === "paused" ? t("secondaryScheduleBoard.paused") : schedule.status === "completed" ? t("secondaryScheduleBoard.ended") : next ? t("secondaryScheduleBoard.next", { value1: next }) : null;
   // The plan first: when the line is cut, the heartbeat's Agent goes before a one-shot's local time does.
   const cadence = [cadenceText(schedule, zone, now), heartbeat ? schedule.target : null].filter(Boolean).join(" · ");
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${schedule.name}，${schedule.total} 次运行${schedule.failed ? `，失败 ${schedule.failed} 次` : ""}${state ? `，${state}` : ""}`} accessibilityState={{ selected }} aria-pressed={selected} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={t("secondaryScheduleBoard.runs", { value1: schedule.name, value2: schedule.total, value3: schedule.failed ? t("secondaryScheduleBoard.failed", { value1: schedule.failed }) : "", value4: state ? t("secondaryScheduleBoard.message", { value1: state }) : "" })} accessibilityState={{ selected }} aria-pressed={selected} onPress={onPress}
     style={pressState => ({ width: CARD_WIDTH, gap: 6, paddingVertical: 9, paddingHorizontal: 11, borderRadius: radius.lg, borderWidth: selected ? 1.5 : hairline,
       borderColor: selected ? accent : failing ? tint(accent, 0.55) : colors.border,
       backgroundColor: selected ? tint(accent, tintAlpha(theme)) : (pressState as { hovered?: boolean }).hovered ? colors.surface1 : colors.surface0, opacity: deleted && !selected ? 0.75 : 1 })}>
@@ -65,7 +67,7 @@ function ScheduleCard({ theme, schedule, selected, now, zone, onPress }: { theme
     <HealthStrip theme={theme} recent={schedule.recent} />
     <View style={{ gap: 1 }}>
       {/* Two lines: a one-shot in another zone also gives its local time (一次性 · 10月11日 22:35（东京时间）· 本地 09:35). */}
-      <Text numberOfLines={2} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{cadence || "计划未知"}</Text>
+      <Text numberOfLines={2} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{cadence || t("secondaryScheduleBoard.unknownSchedule")}</Text>
       <Text numberOfLines={1} style={{ color: deleted || schedule.status !== "active" ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.meta, lineHeight: 17, fontVariant: ["tabular-nums"] }}>
         {[state, runQuota(schedule.total, schedule.maxRuns)].filter(Boolean).join(" · ")}
       </Text>
@@ -95,16 +97,16 @@ function ScheduleStrip({ theme, compact, schedules, selectedId, now, zone, onSel
   const more = schedules.length - shown.length;
   return <View onLayout={event => setWidth(event.nativeEvent.layout.width)} style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, paddingHorizontal: space.md, paddingTop: space.xs, paddingBottom: space.sm }}>
     {shown.map(card)}
-    {folds ? <Pressable accessibilityRole="button" accessibilityLabel={folded ? `显示另外 ${more} 个定时任务` : "收起定时任务"} onPress={() => setExpanded(!expanded)}
+    {folds ? <Pressable accessibilityRole="button" accessibilityLabel={folded ? t("secondaryScheduleBoard.showMoreSchedules", { value1: more }) : t("secondaryScheduleBoard.collapseSchedules")} onPress={() => setExpanded(!expanded)}
       style={state => ({ width: CARD_WIDTH, minHeight: 84, alignItems: "center", justifyContent: "center", gap: 4, borderRadius: radius.lg, borderWidth: hairline, borderStyle: "dashed", borderColor: colors.border,
         backgroundColor: (state as { hovered?: boolean }).hovered ? colors.surface1 : "transparent" })}>
       <Icon name={folded ? "ChevronDown" : "ChevronUp"} size={16} color={hueColor(theme, "violet")} />
-      <Text style={{ color: hueColor(theme, "violet", "text"), fontSize: fontSize.small, fontWeight: "600" }}>{folded ? `另外 ${more} 个任务` : "收起"}</Text>
+      <Text style={{ color: hueColor(theme, "violet", "text"), fontSize: fontSize.small, fontWeight: "600" }}>{folded ? t("secondaryScheduleBoard.moreSchedules", { value1: more }) : t("secondaryScheduleBoard.collapse")}</Text>
     </Pressable> : null}
   </View>;
 }
 function LiveDot({ theme }: { theme: PluginTheme }) {
-  return <View accessibilityLabel="正在运行" style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: hueColor(theme, "run") }} />;
+  return <View accessibilityLabel={t("secondaryScheduleBoard.running")} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: hueColor(theme, "run") }} />;
 }
 
 /** One run. The whole row is the press target; nothing inside it is a button (no nested buttons on web). */
@@ -115,11 +117,11 @@ const RunRow = memo(function RunRow({ run, theme, selected, now, onSelect }: { r
   const agentTitle = run.agent?.title && run.agent.title !== run.scheduleName ? run.agent.title : null;
   const deleted = run.source !== "schedule";
   const trailing = run.status === "running" ? <LiveTimer since={run.startedAt} color={hueColor(theme, "run", "text")} />
-    : run.status === "failed" ? <PhasePill theme={theme} hue="fail" label="失败" solid />
+    : run.status === "failed" ? <PhasePill theme={theme} hue="fail" label={t("secondaryScheduleBoard.failed2")} solid />
     : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{runTimeLabel(run.startedAt, now)}</Text>;
   const message = describeRunError(run.error)?.summary ?? run.preview;
   const badges = run.link || run.kind === "heartbeat" || deleted || (!run.agent && run.kind === "new-agent");
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${run.scheduleName}，${look.label}，${relativeTime(run.startedAt, now)}`} accessibilityState={{ selected }} aria-pressed={selected} onPress={() => onSelect(run.id)}
+  return <Pressable accessibilityRole="button" accessibilityLabel={t("secondaryScheduleBoard.message2", { value1: run.scheduleName, value2: look.label, value3: relativeTime(run.startedAt, now) })} accessibilityState={{ selected }} aria-pressed={selected} onPress={() => onSelect(run.id)}
     style={state => ({ flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 10, paddingHorizontal: space.md, borderRadius: radius.md,
       backgroundColor: wash ?? ((state as { hovered?: boolean }).hovered || state.pressed ? colors.surface1 : "transparent") })}>
     <Flash count={changes} color={tint(color, tintAlpha(theme) + 0.1)} radius={radius.md} />
@@ -132,25 +134,25 @@ const RunRow = memo(function RunRow({ run, theme, selected, now, onSelect }: { r
       </View>
       <MetaLine theme={theme} parts={[agentTitle, runDurationLabel(run), run.workspace?.branch, run.projectName]} />
       {badges ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
-        {run.link ? <Badge theme={theme} tone={linkTone(run)} icon={run.link.state === "merged" ? "GitMerge" : "GitPullRequest"} label={`${run.link.label}${run.link.state === "merged" ? " 已合并" : ""}`} /> : null}
-        {run.kind === "heartbeat" ? <Badge theme={theme} tone="pink" icon="HeartPulse" label="心跳" /> : null}
-        {!run.agent && run.kind === "new-agent" ? <Badge theme={theme} tone="amber" icon="CircleOff" label="未启动 Agent" /> : null}
-        {deleted ? <Badge theme={theme} icon="CalendarX2" label="任务已删除" /> : null}
+        {run.link ? <Badge theme={theme} tone={linkTone(run)} icon={run.link.state === "merged" ? "GitMerge" : "GitPullRequest"} label={`${run.link.label}${run.link.state === "merged" ? t("secondaryScheduleBoard.merged") : ""}`} /> : null}
+        {run.kind === "heartbeat" ? <Badge theme={theme} tone="pink" icon="HeartPulse" label={t("secondaryScheduleBoard.heartbeat")} /> : null}
+        {!run.agent && run.kind === "new-agent" ? <Badge theme={theme} tone="amber" icon="CircleOff" label={t("secondaryScheduleBoard.agentNotStarted")} /> : null}
+        {deleted ? <Badge theme={theme} icon="CalendarX2" label={t("secondaryScheduleBoard.scheduleDeleted")} /> : null}
       </View> : null}
       {message ? <Text numberOfLines={2} style={{ color: run.error ? hueColor(theme, "fail", "text") : colors.foregroundMuted, fontSize: fontSize.small, lineHeight: 19 }}>{message}</Text> : null}
     </View>
   </Pressable>;
 });
 
-type FeedItem = { kind: "group"; key: string; label: string; count: number; failed: number } | { kind: "run"; key: string; run: ScheduleRunRow } | { kind: "more"; key: string };
+type FeedItem = { kind: "group"; key: string; label: string; count: number; failed: number; today: boolean } | { kind: "run"; key: string; run: ScheduleRunRow } | { kind: "more"; key: string };
 
-function GroupHeader({ theme, label, count, failed }: { theme: PluginTheme; label: string; count: number; failed: number }) {
-  const { colors } = theme, today = label === "今天";
+function GroupHeader({ theme, label, count, failed, today }: { theme: PluginTheme; label: string; count: number; failed: number; today: boolean }) {
+  const { colors } = theme;
   return <View accessibilityRole="header" style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2, minHeight: 32, paddingHorizontal: space.md, paddingTop: space.sm }}>
     <Icon name={today ? "CalendarCheck" : "CalendarDays"} size={12} color={today ? hueColor(theme, "violet") : colors.foregroundMuted} />
     <Text style={{ color: today ? hueColor(theme, "violet", "text") : colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "600" }}>{label}</Text>
     <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{count}</Text>
-    {failed ? <Text style={{ color: hueColor(theme, "fail", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>· 失败 {failed}</Text> : null}
+    {failed ? <Text style={{ color: hueColor(theme, "fail", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>{t("secondaryScheduleBoard.failed3", { value1: failed })}</Text> : null}
   </View>;
 }
 
@@ -170,16 +172,16 @@ function RunDetail({ run, schedule, theme, compact, navigation, onClose, now, zo
     setTranscript({ state: "loading", text: null });
     try {
       const answer = await readResult({ agentId });
-      if (answer.mode !== "full") throw new Error("结果没有变化，请重试");
+      if (answer.mode !== "full") throw new Error(t("secondaryScheduleBoard.theResultHasNotChangedTry"));
       setTranscript({ state: "ready", text: answer.latestReply?.text ?? null });
-    } catch (error) { setTranscript({ state: "error", text: null, error: error instanceof Error ? error.message : "读取失败" }); }
+    } catch (error) { setTranscript({ state: "error", text: null, error: error instanceof Error ? error.message : t("secondaryScheduleBoard.readFailed") }); }
   }, [agentId, readResult]);
   // Host navigation may throw or return a rejected promise; either way the user gets a toast.
   const open = (action: () => unknown, failure: string) => {
-    const fail = (error: unknown) => toast.error(`${failure}：${error instanceof Error ? error.message : "请稍后重试"}`);
+    const fail = (error: unknown) => toast.error(t("secondaryScheduleBoard.message3", { value1: failure, value2: error instanceof Error ? error.message : t("secondaryScheduleBoard.tryAgainLater") }));
     try { void Promise.resolve(action()).catch(fail); } catch (error) { fail(error); }
   };
-  const copyId = () => { void copyText(run.id).then(() => toast.show("已复制运行 ID")).catch(() => toast.error("复制失败")); };
+  const copyId = () => { void copyText(run.id).then(() => toast.show(t("secondaryScheduleBoard.runIdCopied"))).catch(() => toast.error(t("secondaryScheduleBoard.copyFailed"))); };
   const inset = compact ? space.lg : space.xl;
   const duration = runDurationLabel(run);
   const output = detail.data?.output ?? null;
@@ -189,59 +191,59 @@ function RunDetail({ run, schedule, theme, compact, navigation, onClose, now, zo
     <View style={{ gap: space.sm }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 26 }}>
         <PhasePill theme={theme} hue={look.hue} icon={run.status === "running" ? undefined : look.icon} label={look.label} solid={run.status === "failed"} />
-        {run.status === "running" ? <LiveTimer since={run.startedAt} color={hueColor(theme, "run", "text")} prefix="已运行 " /> : duration ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>耗时 {duration}</Text> : null}
+        {run.status === "running" ? <LiveTimer since={run.startedAt} color={hueColor(theme, "run", "text")} prefix={t("secondaryScheduleBoard.runningFor")} /> : duration ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryScheduleBoard.took", { value1: duration })}</Text> : null}
         <Spacer />
-        {!compact ? <><IconButton theme={theme} icon="Copy" label="复制运行 ID" size="sm" onPress={copyId} /><IconButton theme={theme} icon="X" label="关闭详情" size="sm" onPress={onClose} /></> : null}
+        {!compact ? <><IconButton theme={theme} icon="Copy" label={t("secondaryScheduleBoard.copyRunId")} size="sm" onPress={copyId} /><IconButton theme={theme} icon="X" label={t("secondaryScheduleBoard.closeDetails")} size="sm" onPress={onClose} /></> : null}
       </View>
       <Text selectable style={{ color: colors.foreground, fontSize: fontSize.heading, fontWeight: "600", lineHeight: 26 }}>{run.scheduleName}</Text>
-      <MetaLine theme={theme} numberOfLines={2} parts={[run.kind === "heartbeat" ? `心跳 · ${heartbeatTarget ?? "Agent"}` : null, schedule ? cadenceText(schedule, zone, now) : null, schedule?.provider, run.projectName, runMoment(run.startedAt)]} />
+      <MetaLine theme={theme} numberOfLines={2} parts={[run.kind === "heartbeat" ? t("secondaryScheduleBoard.heartbeat2", { value1: heartbeatTarget ?? t("secondaryScheduleBoard.agent") }) : null, schedule ? cadenceText(schedule, zone, now) : null, schedule?.provider, run.projectName, runMoment(run.startedAt)]} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, paddingTop: space.xs }}>
-        {agentId && navigation && !unlisted ? <Button theme={theme} variant="primary" icon="ArrowUpRight" label={run.agent?.archivedAt ? "打开会话（已归档）" : "打开会话"} onPress={() => open(() => navigation.openAgent({ agentId }), "会话打开失败")} /> : null}
-        {run.workspace && navigation && !unlisted ? <Button theme={theme} icon="FolderGit2" label="打开工作区" onPress={() => open(() => navigation.openWorkspace({ workspaceId: run.workspace!.id }), "工作区打开失败")} /> : null}
-        {run.link ? <Button theme={theme} tone={linkTone(run)} icon={run.link.state === "merged" ? "GitMerge" : "GitPullRequest"} label={`打开 ${run.link.label}`} onPress={() => { void openExternalUrl(run.link!.url).catch(() => toast.error("链接打开失败")); }} /> : null}
+        {agentId && navigation && !unlisted ? <Button theme={theme} variant="primary" icon="ArrowUpRight" label={run.agent?.archivedAt ? t("secondaryScheduleBoard.openSessionArchived") : t("secondaryScheduleBoard.openSession")} onPress={() => open(() => navigation.openAgent({ agentId }), t("secondaryScheduleBoard.couldNotOpenSession"))} /> : null}
+        {run.workspace && navigation && !unlisted ? <Button theme={theme} icon="FolderGit2" label={t("secondaryScheduleBoard.openWorkspace")} onPress={() => open(() => navigation.openWorkspace({ workspaceId: run.workspace!.id }), t("secondaryScheduleBoard.couldNotOpenWorkspace"))} /> : null}
+        {run.link ? <Button theme={theme} tone={linkTone(run)} icon={run.link.state === "merged" ? "GitMerge" : "GitPullRequest"} label={t("secondaryScheduleBoard.open", { value1: run.link.label })} onPress={() => { void openExternalUrl(run.link!.url).catch(() => toast.error(t("secondaryScheduleBoard.couldNotOpenLink"))); }} /> : null}
       </View>
     </View>
     {error ? <View style={{ gap: space.xs }}>
       <Banner theme={theme} tone="danger" message={error.summary} />
-      {error.summary !== error.detail ? <Text selectable style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17, paddingHorizontal: space.xs }}>原始错误：{error.detail}</Text> : null}
+      {error.summary !== error.detail ? <Text selectable style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17, paddingHorizontal: space.xs }}>{t("secondaryScheduleBoard.originalError", { value1: error.detail })}</Text> : null}
     </View> : null}
-    {run.source === "agent" ? <Banner theme={theme} tone="info" icon="History" message="这个定时任务在观测台开始记录前已被删除，只能从 Agent 标签还原：没有计划时间、耗时和回复。" /> : null}
-    {unlisted ? <Banner theme={theme} tone="warning" icon="FolderX" message="这次运行所在的项目已从 Paseo 移除，宿主打不开它的会话和工作区；这里的信息来自 Paseo 保留的 Agent 记录。" /> : null}
+    {run.source === "agent" ? <Banner theme={theme} tone="info" icon="History" message={t("secondaryScheduleBoard.thisScheduleWasDeletedBeforeObservatory")} /> : null}
+    {unlisted ? <Banner theme={theme} tone="warning" icon="FolderX" message={t("secondaryScheduleBoard.theProjectForThisRunWas")} /> : null}
     <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme} icon="MessageSquareText" tone="success">最终回复</PaneLabel>
+      <PaneLabel theme={theme} icon="MessageSquareText" tone="success">{t("secondaryScheduleBoard.finalReply")}</PaneLabel>
       {detail.isPending ? <Skeleton theme={theme} rows={3} /> : output ? <OutputText theme={theme} text={output} />
-        : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small, lineHeight: 20 }}>{detail.data?.note ?? (detail.isError ? "暂时读不到这次运行的记录。" : "没有记录最终回复。")}</Text>}
-      {detail.data?.outputTruncated ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>回复超过 6 万字，只显示开头。</Text> : null}
+        : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small, lineHeight: 20 }}>{detail.data?.note ?? (detail.isError ? t("secondaryScheduleBoard.thisRunSRecordIsTemporarily") : t("secondaryScheduleBoard.noFinalReplyWasRecorded"))}</Text>}
+      {detail.data?.outputTruncated ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondaryScheduleBoard.theReplyExceedsCharactersOnlyThe")}</Text> : null}
       {!output && agentId && !detail.isPending && run.status !== "running" ? <View style={{ gap: space.sm, paddingTop: space.xs }}>
-        {transcript.state === "ready" ? transcript.text ? <OutputText theme={theme} text={transcript.text} /> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>会话记录里还没有回复。</Text>
-          : transcript.state === "error" ? <Banner theme={theme} tone="warning" message={`读取失败：${describeRunError(transcript.error)?.summary ?? "请稍后重试"}`} action={{ label: "重试", onPress: () => void loadTranscript() }} />
+        {transcript.state === "ready" ? transcript.text ? <OutputText theme={theme} text={transcript.text} /> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("secondaryScheduleBoard.noReplyInTheSessionRecord")}</Text>
+          : transcript.state === "error" ? <Banner theme={theme} tone="warning" message={t("secondaryScheduleBoard.readFailed2", { value1: describeRunError(transcript.error)?.summary ?? t("secondaryScheduleBoard.tryAgainLater") })} action={{ label: t("secondaryScheduleBoard.retry"), onPress: () => void loadTranscript() }} />
           : <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexWrap: "wrap" }}>
-            <Button theme={theme} icon="FileText" label="读取会话记录" busy={transcript.state === "loading"} onPress={() => void loadTranscript()} />
-            {run.agent?.archivedAt ? <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>会临时载入这个已归档会话，只在你点击时读取</Text> : null}
+            <Button theme={theme} icon="FileText" label={t("secondaryScheduleBoard.readSessionRecord")} busy={transcript.state === "loading"} onPress={() => void loadTranscript()} />
+            {run.agent?.archivedAt ? <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("secondaryScheduleBoard.temporarilyLoadsThisArchivedSessionOnly")}</Text> : null}
           </View>}
       </View> : null}
     </View>
     <View>
-      <PaneLabel theme={theme} icon="Info">运行信息</PaneLabel>
-      {run.scheduledFor ? <KeyValue theme={theme} compact={compact} label="计划于" value={new Date(run.scheduledFor).toLocaleString("zh-CN", { hour12: false })} /> : null}
-      <KeyValue theme={theme} compact={compact} label="开始" value={new Date(run.startedAt).toLocaleString("zh-CN", { hour12: false })} />
-      <KeyValue theme={theme} compact={compact} label="结束" value={run.endedAt ? new Date(run.endedAt).toLocaleString("zh-CN", { hour12: false }) : run.status === "running" ? "仍在运行" : "未知"} />
-      {run.agent ? <KeyValue theme={theme} compact={compact} label="Agent" value={run.agent.known ? `${run.agent.title ?? "未命名"}${unlisted ? "（项目已移除）" : ""}` : fresh ? "正在同步名称…" : "宿主已没有这个 Agent"} /> : null}
-      {run.workspace ? <KeyValue theme={theme} compact={compact} label="工作区" value={[run.workspace.name, run.workspace.branch].filter(Boolean).join(" · ") || run.workspace.id} /> : null}
-      <KeyValue theme={theme} compact={compact} label="记录来源" value={run.source === "schedule" ? "定时任务文件" : run.source === "ledger" ? "观测台账本（任务已删除）" : "Agent 标签（任务已删除）"} />
-      <KeyValue theme={theme} compact={compact} mono label="运行 ID" value={run.id} />
+      <PaneLabel theme={theme} icon="Info">{t("secondaryScheduleBoard.runInformation")}</PaneLabel>
+      {run.scheduledFor ? <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.scheduledFor")} value={new Date(run.scheduledFor).toLocaleString(currentLanguage(), { hour12: false })} /> : null}
+      <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.started")} value={new Date(run.startedAt).toLocaleString(currentLanguage(), { hour12: false })} />
+      <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.ended2")} value={run.endedAt ? new Date(run.endedAt).toLocaleString(currentLanguage(), { hour12: false }) : run.status === "running" ? t("secondaryScheduleBoard.stillRunning") : t("secondaryScheduleBoard.unknown")} />
+      {run.agent ? <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.agent")} value={run.agent.known ? `${run.agent.title ?? t("secondaryScheduleBoard.unnamed")}${unlisted ? t("secondaryScheduleBoard.projectRemoved") : ""}` : fresh ? t("secondaryScheduleBoard.syncingName") : t("secondaryScheduleBoard.paseoNoLongerHasThisAgent")} /> : null}
+      {run.workspace ? <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.workspace")} value={[run.workspace.name, run.workspace.branch].filter(Boolean).join(" · ") || run.workspace.id} /> : null}
+      <KeyValue theme={theme} compact={compact} label={t("secondaryScheduleBoard.recordSource")} value={run.source === "schedule" ? t("secondaryScheduleBoard.scheduleFile") : run.source === "ledger" ? t("secondaryScheduleBoard.observatoryLedgerScheduleDeleted") : t("secondaryScheduleBoard.agentLabelsScheduleDeleted")} />
+      <KeyValue theme={theme} compact={compact} mono label={t("secondaryScheduleBoard.runId")} value={run.id} />
     </View>
     {detail.data?.prompt ? <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme} icon="ScrollText">定时任务提示词</PaneLabel>
+      <PaneLabel theme={theme} icon="ScrollText">{t("secondaryScheduleBoard.schedulePrompt")}</PaneLabel>
       <Text selectable style={{ color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>{detail.data.prompt}</Text>
     </View> : null}
   </ScrollView>;
   if (!compact) return <View testID="schedule-run-detail" style={{ flex: 1, minHeight: 0 }}>{body}</View>;
   return <View testID="schedule-run-detail" style={{ flex: 1, minHeight: 0 }}>
     <Toolbar theme={theme}>
-      <IconButton theme={theme} icon="ChevronLeft" label="返回列表" onPress={onClose} />
-      <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>运行详情</Text>
-      <IconButton theme={theme} icon="Copy" label="复制运行 ID" onPress={copyId} />
+      <IconButton theme={theme} icon="ChevronLeft" label={t("secondaryScheduleBoard.backToList")} onPress={onClose} />
+      <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("secondaryScheduleBoard.runDetails")}</Text>
+      <IconButton theme={theme} icon="Copy" label={t("secondaryScheduleBoard.copyRunId")} onPress={copyId} />
     </Toolbar>
     {body}
   </View>;
@@ -322,7 +324,7 @@ export function ScheduleSurface({ theme, layout, host, navigation, params }: Plu
   const items = useMemo(() => {
     const result: FeedItem[] = [];
     for (const group of groupRunsByDay(visible, now)) {
-      result.push({ kind: "group", key: `g:${group.key}`, label: group.label, count: group.runs.length, failed: group.runs.filter(run => run.status === "failed").length });
+      result.push({ kind: "group", key: `g:${group.key}`, today: group.key === `d${new Date(now).setHours(0, 0, 0, 0)}`, label: group.label, count: group.runs.length, failed: group.runs.filter(run => run.status === "failed").length });
       for (const run of group.runs) result.push({ kind: "run", key: run.id, run });
     }
     if ((older > 0 || olderMaybe) && visible.length) result.push({ kind: "more", key: "more" });
@@ -343,45 +345,45 @@ export function ScheduleSurface({ theme, layout, host, navigation, params }: Plu
   const shownSchedules = useMemo(() => schedules.filter(schedule => heartbeats || schedule.kind !== "heartbeat" || schedule.id === view.scheduleId)
     .map((schedule, index) => ({ schedule, index, rank: schedule.running ? 0 : schedule.recent.at(-1) === "failed" ? 1 : { active: 2, paused: 3, completed: 4, deleted: 5 }[schedule.status] }))
     .sort((a, b) => a.rank - b.rank || a.index - b.index).map(item => item.schedule), [schedules, heartbeats, view.scheduleId]);
-  const sync = query.isError && !data ? { state: "error" as const, label: "读取失败" } : query.isFetching ? { state: "syncing" as const, label: typed ? "搜索中" : "同步中" } : { state: "live" as const, label: "已同步" };
+  const sync = query.isError && !data ? { state: "error" as const, label: t("secondaryScheduleBoard.readFailed") } : query.isFetching ? { state: "syncing" as const, label: typed ? t("secondaryScheduleBoard.searching") : t("secondaryScheduleBoard.syncing") } : { state: "live" as const, label: t("secondaryScheduleBoard.synced") };
   const clearFilters = () => { setView({ ...DEFAULT_VIEW, heartbeats: view.heartbeats }); setSearchText(""); };
   const menu: MenuAction[] = [
-    { key: "heartbeats", label: heartbeats ? "隐藏心跳" : "显示心跳", icon: "HeartPulse", tone: "pink", hint: "心跳是定时提醒已有 Agent 的任务，默认不混在列表里", onPress: () => setHeartbeats(!heartbeats) },
-    ...(window === "recent" ? [{ key: "older", label: "加载更早的运行", icon: "History", hint: "默认只读取最近 30 天、最多 200 次运行", onPress: () => setWindow("all") }]
-      : [{ key: "recent", label: "只看最近 30 天", icon: "CalendarRange", onPress: () => setWindow("recent") }]),
-    { key: "refresh", label: "刷新", icon: "RefreshCw", disabled: query.isFetching, onPress: () => void query.refetch() },
+    { key: "heartbeats", label: heartbeats ? t("secondaryScheduleBoard.hideHeartbeats") : t("secondaryScheduleBoard.showHeartbeats"), icon: "HeartPulse", tone: "pink", hint: t("secondaryScheduleBoard.heartbeatsRemindAnExistingAgentOn"), onPress: () => setHeartbeats(!heartbeats) },
+    ...(window === "recent" ? [{ key: "older", label: t("secondaryScheduleBoard.loadEarlierRuns"), icon: "History", hint: t("secondaryScheduleBoard.readsUpToRunsFromThe"), onPress: () => setWindow("all") }]
+      : [{ key: "recent", label: t("secondaryScheduleBoard.showOnlyTheLastDays"), icon: "CalendarRange", onPress: () => setWindow("recent") }]),
+    { key: "refresh", label: t("secondaryScheduleBoard.refresh"), icon: "RefreshCw", disabled: query.isFetching, onPress: () => void query.refetch() },
   ];
   const empty = query.isPending ? <Skeleton theme={theme} rows={6} />
-    : query.isError && !data ? <EmptyState theme={theme} icon="WifiOff" tone="danger" title="暂时读不到定时运行" message={query.error instanceof Error ? query.error.message : undefined} action={{ label: "重试", icon: "RefreshCw", onPress: () => void query.refetch() }} />
-    : (older > 0 || olderMaybe) && data?.window === "recent" ? <EmptyState theme={theme} icon="History" tone="violet" title={filtered ? "最近 30 天没有匹配的运行" : "最近 30 天没有定时运行"}
-      message={older > 0 ? `还有 ${older} 次更早的运行` : "更早的运行里可能有匹配"} action={{ label: query.isPlaceholderData ? "正在加载…" : "加载更早", icon: "History", onPress: () => setWindow("all") }} />
-    : filtered ? <EmptyState theme={theme} icon="SearchX" title="没有匹配的运行" message={!heartbeats && heartbeatTotal ? "心跳运行没有算在内，可在「心跳」里打开。" : undefined} action={{ label: "清除筛选", onPress: clearFilters }} />
+    : query.isError && !data ? <EmptyState theme={theme} icon="WifiOff" tone="danger" title={t("secondaryScheduleBoard.scheduledRunsAreTemporarilyUnavailable")} message={query.error instanceof Error ? query.error.message : undefined} action={{ label: t("secondaryScheduleBoard.retry"), icon: "RefreshCw", onPress: () => void query.refetch() }} />
+    : (older > 0 || olderMaybe) && data?.window === "recent" ? <EmptyState theme={theme} icon="History" tone="violet" title={filtered ? t("secondaryScheduleBoard.noMatchingRunsInTheLast") : t("secondaryScheduleBoard.noScheduledRunsInTheLast")}
+      message={older > 0 ? t("secondaryScheduleBoard.earlierRunsAvailable", { value1: older }) : t("secondaryScheduleBoard.earlierRunsMayContainMatches")} action={{ label: query.isPlaceholderData ? t("secondaryScheduleBoard.loading") : t("secondaryScheduleBoard.loadEarlier"), icon: "History", onPress: () => setWindow("all") }} />
+    : filtered ? <EmptyState theme={theme} icon="SearchX" title={t("secondaryScheduleBoard.noMatchingRuns")} message={!heartbeats && heartbeatTotal ? t("secondaryScheduleBoard.heartbeatRunsAreExcludedEnableThem") : undefined} action={{ label: t("secondaryScheduleBoard.clearFilters"), onPress: clearFilters }} />
     // Heartbeats were hidden on purpose and nothing else ever ran: say what is hidden instead of 「还没有定时运行」.
-    : !heartbeats && heartbeatTotal > 0 ? <EmptyState theme={theme} icon="HeartPulse" tone="pink" title={`只有心跳运行（${heartbeatTotal} 次）`} message="心跳是定时提醒已有 Agent 的任务，默认不混在列表里。"
-      action={{ label: "显示心跳", icon: "HeartPulse", onPress: () => setHeartbeats(true) }} />
-    : <EmptyState theme={theme} icon="CalendarClock" tone="violet" title="还没有定时运行" message="在左侧「计划」里新建定时任务，或让 Agent 运行 paseo schedule create。每次运行的结果都会出现在这里。" />;
+    : !heartbeats && heartbeatTotal > 0 ? <EmptyState theme={theme} icon="HeartPulse" tone="pink" title={t("secondaryScheduleBoard.onlyHeartbeatRuns", { value1: heartbeatTotal })} message={t("secondaryScheduleBoard.heartbeatsRemindAnExistingAgentOn2")}
+      action={{ label: t("secondaryScheduleBoard.showHeartbeats"), icon: "HeartPulse", onPress: () => setHeartbeats(true) }} />
+    : <EmptyState theme={theme} icon="CalendarClock" tone="violet" title={t("secondaryScheduleBoard.noScheduledRunsYet")} message={t("secondaryScheduleBoard.createAScheduleInSchedulesIn")} />;
   const more = older > 0 || olderMaybe ? <View style={{ alignItems: "center", gap: space.sm, paddingVertical: space.lg }}>
-    <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{older > 0 ? data?.window === "recent" ? `还有 ${older} 次更早的${search ? "匹配" : "运行"}` : `更早的 ${older} 次${search ? "匹配" : "运行"}没有列出` : "更早的运行里可能还有匹配"}</Text>
-    {data?.window === "recent" ? <Button theme={theme} size="sm" icon="History" label="加载更早" busy={query.isPlaceholderData} onPress={() => setWindow("all")} /> : null}
+    <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{older > 0 ? data?.window === "recent" ? t("secondaryScheduleBoard.earlierAvailable", { value1: older, value2: search ? t("secondaryScheduleBoard.matches") : t("secondaryScheduleBoard.runs2") }) : t("secondaryScheduleBoard.earlierAreNotListed", { value1: older, value2: search ? t("secondaryScheduleBoard.matches") : t("secondaryScheduleBoard.runs2") }) : t("secondaryScheduleBoard.earlierRunsMayContainMoreMatches")}</Text>
+    {data?.window === "recent" ? <Button theme={theme} size="sm" icon="History" label={t("secondaryScheduleBoard.loadEarlier")} busy={query.isPlaceholderData} onPress={() => setWindow("all")} /> : null}
   </View> : null;
   const strip = <ScheduleStrip theme={theme} compact={compact} schedules={shownSchedules} selectedId={view.scheduleId} now={now} zone={zone}
     onSelect={id => setView({ ...view, scheduleId: view.scheduleId === id ? "all" : id })} />;
   const banners = [
     data?.error ? <Banner key="error" theme={theme} tone="warning" message={data.error} /> : null,
     data?.notice ? <Banner key="notice" theme={theme} tone="warning" message={data.notice} /> : null,
-    data?.reconstructed ? <Banner key="rebuilt" theme={theme} tone="info" icon="History" message={`${data.reconstructed} 次运行来自已删除的定时任务，只能从 Agent 还原`} /> : null,
-    data?.searchLimited && serverSearched ? <Banner key="search" theme={theme} tone="info" icon="SearchSlash" message="回复太多，一部分运行只按名称、错误和链接搜索了。" /> : null,
+    data?.reconstructed ? <Banner key="rebuilt" theme={theme} tone="info" icon="History" message={t("secondaryScheduleBoard.runsCameFromDeletedSchedulesAnd", { count: data.reconstructed })} /> : null,
+    data?.searchLimited && serverSearched ? <Banner key="search" theme={theme} tone="info" icon="SearchSlash" message={t("secondaryScheduleBoard.thereWereTooManyRepliesSome")} /> : null,
   ].filter(Boolean);
   const list = <View style={{ flex: 1, minHeight: 0 }}>
     {banners.length ? <View style={{ gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm }}>{banners}</View> : null}
     <FlatList data={items} keyExtractor={item => item.key} style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingHorizontal: space.xs, paddingBottom: space.xl }}
       initialNumToRender={16} maxToRenderPerBatch={20} windowSize={7} extraData={`${now}:${selectedId}:${window}:${query.isPlaceholderData}`} ListEmptyComponent={<View>{empty}</View>}
-      renderItem={({ item }) => item.kind === "group" ? <GroupHeader theme={theme} label={item.label} count={item.count} failed={item.failed} />
+      renderItem={({ item }) => item.kind === "group" ? <GroupHeader theme={theme} today={item.today} label={item.label} count={item.count} failed={item.failed} />
         : item.kind === "more" ? more
         : <RunRow run={item.run} theme={theme} selected={item.run.id === selectedId} now={now} onSelect={select} />} />
   </View>;
   const detail = selected ? <RunDetail key={selected.id} run={selected} schedule={scheduleOf(selected.scheduleId)} theme={theme} compact={compact} navigation={navigation} onClose={() => setSelectedId(null)} now={now} zone={zone} />
-    : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" tone="violet" title="选择一次运行" message="回复、错误、Agent 和合并请求会显示在这里" /></View>;
+    : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" tone="violet" title={t("secondaryScheduleBoard.selectARun")} message={t("secondaryScheduleBoard.itsReplyErrorAgentAndMerge")} /></View>;
   if (compact && selected) return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>{detail}</View>;
   const searching = compact && (searchOpen || !!searchText);
   const rate = week && week.total ? Math.round(100 * (week.total - week.failed) / week.total) : null;
@@ -389,32 +391,32 @@ export function ScheduleSurface({ theme, layout, host, navigation, params }: Plu
     <Toolbar theme={theme}>
       <View style={{ flexShrink: 1, gap: 1 }}>
         {/* Focused on one schedule (its card, or 查看全部运行): the header names it and sums its own week. */}
-        <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{focused ? focused.name : week ? `近 7 天 ${week.total} 次运行` : "定时运行"}</Text>
+        <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "600" }}>{focused ? focused.name : week ? t("secondaryScheduleBoard.runsInTheLastDays", { count: week.total }) : t("secondaryScheduleBoard.scheduledRuns")}</Text>
         <Text numberOfLines={1} style={{ color: week?.failed ? hueColor(theme, "fail", "text") : colors.foregroundMuted, fontSize: fontSize.meta }}>
-          {!week ? "读取中" : [focused && week.total ? `近 7 天 ${week.total} 次` : null, !week.total ? "这 7 天没有运行" : week.failed ? `失败 ${week.failed} 次 · 成功率 ${rate}%` : "全部成功"].filter(Boolean).join(" · ")}
+          {!week ? t("secondaryScheduleBoard.reading") : [focused && week.total ? t("secondaryScheduleBoard.inTheLastDays", { value1: week.total }) : null, !week.total ? t("secondaryScheduleBoard.noRunsInTheseDays") : week.failed ? t("secondaryScheduleBoard.failedSuccessRate", { value1: week.failed, value2: rate }) : t("secondaryScheduleBoard.allSucceeded")].filter(Boolean).join(" · ")}
         </Text>
       </View>
       <Spacer />
-      {!compact ? <View style={{ width: 260, flexShrink: 1 }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" /></View>
-        : <IconButton theme={theme} icon="Search" label="搜索" active={searching} onPress={() => { if (searching) { setSearchText(""); setSearchOpen(false); } else setSearchOpen(true); }} />}
+      {!compact ? <View style={{ width: 260, flexShrink: 1 }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder={t("secondaryScheduleBoard.searchSchedulesRepliesErrorsOrBranches")} accessibilityLabel={t("secondaryScheduleBoard.searchScheduledRuns")} /></View>
+        : <IconButton theme={theme} icon="Search" label={t("secondaryScheduleBoard.search")} active={searching} onPress={() => { if (searching) { setSearchText(""); setSearchOpen(false); } else setSearchOpen(true); }} />}
       <SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} />
-      <InfoButton theme={theme} title="关于定时运行" lines={["定时运行列出这台主机上所有定时任务的每一次运行：状态、耗时、生成的 Agent 与工作区、最终回复，以及回复里提到的合并请求（GitLab 式合并请求显示为 !编号，GitHub PR 显示为 #编号）。",
-        "数据来自 Paseo 的定时任务记录，只读。删除定时任务会连同它的运行记录一起删除；观测台在后台另存每次运行的时间、状态和链接（不存回复和提示词），所以删除后仍能看到，不需要先打开这个页面。",
-        "默认读取最近 30 天、最多 200 次运行，更早的可以「加载更早」。搜索会查找完整回复。心跳（定时提醒已有 Agent）默认隐藏；这台主机只有心跳时直接显示。",
-        "一次性任务（只运行 1 次）写出它的日期和时间；时区和设备不同时，后面注明这台设备上的时间。",
-        "新建、暂停、修改、立即运行定时任务请用左侧的「计划」。"]} />
-      <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
+      <InfoButton theme={theme} title={t("secondaryScheduleBoard.aboutScheduledRuns")} lines={[t("secondaryScheduleBoard.scheduledRunsListsEveryRunOf"),
+        t("secondaryScheduleBoard.dataComesFromPaseoSSchedule"),
+        t("secondaryScheduleBoard.readsUpToRunsFromThe2"),
+        t("secondaryScheduleBoard.oneTimeSchedulesShowTheirDate"),
+        t("secondaryScheduleBoard.useSchedulesInTheSidebarTo")]} />
+      <IconButton theme={theme} icon="Ellipsis" label={t("secondaryScheduleBoard.moreActions")} onPress={() => setMenuOpen(true)} />
     </Toolbar>
-    {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder="搜索任务、回复、错误或分支" accessibilityLabel="搜索定时运行" autoFocus={!searchText} grow={false} /></View> : null}
+    {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={searchText} onChangeText={setSearchText} placeholder={t("secondaryScheduleBoard.searchSchedulesRepliesErrorsOrBranches")} accessibilityLabel={t("secondaryScheduleBoard.searchScheduledRuns")} autoFocus={!searchText} grow={false} /></View> : null}
     <ChipBar>
-      {view.scheduleId !== "all" ? <Chip theme={theme} label={focused?.name ?? "定时任务"} icon="CalendarClock" tone="violet" selected onRemove={() => setView({ ...view, scheduleId: "all" })} /> : null}
-      <StatusChip theme={theme} label="失败" count={data ? counts.failed : undefined} hue="fail" motion={counts.recentFailed ? "ping" : undefined} selected={view.status === "failed"} onPress={() => toggle("failed")} />
-      <StatusChip theme={theme} label="执行中" count={data ? counts.running : undefined} hue="run" motion="spin" selected={view.status === "running"} onPress={() => toggle("running")} />
-      <StatusChip theme={theme} label="成功" count={data ? counts.succeeded : undefined} hue="ok" selected={view.status === "succeeded"} onPress={() => toggle("succeeded")} />
-      <Chip theme={theme} label="心跳" icon="HeartPulse" tone={heartbeats ? "pink" : undefined} count={heartbeatRuns || undefined} selected={heartbeats} onPress={() => setHeartbeats(!heartbeats)} />
+      {view.scheduleId !== "all" ? <Chip theme={theme} label={focused?.name ?? t("secondaryScheduleBoard.schedules")} icon="CalendarClock" tone="violet" selected onRemove={() => setView({ ...view, scheduleId: "all" })} /> : null}
+      <StatusChip theme={theme} label={t("secondaryScheduleBoard.failed2")} count={data ? counts.failed : undefined} hue="fail" motion={counts.recentFailed ? "ping" : undefined} selected={view.status === "failed"} onPress={() => toggle("failed")} />
+      <StatusChip theme={theme} label={t("secondaryScheduleBoard.running2")} count={data ? counts.running : undefined} hue="run" motion="spin" selected={view.status === "running"} onPress={() => toggle("running")} />
+      <StatusChip theme={theme} label={t("secondaryScheduleBoard.succeeded")} count={data ? counts.succeeded : undefined} hue="ok" selected={view.status === "succeeded"} onPress={() => toggle("succeeded")} />
+      <Chip theme={theme} label={t("secondaryScheduleBoard.heartbeat")} icon="HeartPulse" tone={heartbeats ? "pink" : undefined} count={heartbeatRuns || undefined} selected={heartbeats} onPress={() => setHeartbeats(!heartbeats)} />
     </ChipBar>
     {strip}
     <SplitView theme={theme} compact={compact} showDetail={false} list={list} detail={detail} listWidth={430} />
-    <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
+    <ActionMenu theme={theme} title={t("secondaryScheduleBoard.moreActions")} open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
   </View>;
 }

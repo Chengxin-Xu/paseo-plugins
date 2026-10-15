@@ -1,4 +1,6 @@
+import { t } from "../shared/text";
 import { deferOffer, isOnItsWay, type DeferredView } from "../shared/deferred-rpc";
+import type { ComposerNote } from "../shared/composer";
 import { contentKey, newMessageId, type Consent } from "./send-plan";
 
 /**
@@ -39,6 +41,13 @@ export function visibleDeferred(views: readonly DeferredView[], now = Date.now()
 
 /** The key of a prompt's text (its source line names the note, so another note's prompt differs). */
 export function promptKey(text: string): string { return contentKey(["notes", text]); }
+
+/** Stable identity across display languages, compatible with keys already written by Chinese-only versions. */
+export function notePromptKey(note: Pick<ComposerNote, "id" | "title">, body: string): string {
+  // i18n-ignore: Legacy persisted-key encoding, never displayed or sent; changing it would bypass duplicate protection.
+  const identity = `来源：手记 #${note.id}\n${note.title}${body ? `\n\n${body}` : ""}`;
+  return promptKey(identity);
+}
 
 const UNANSWERED_LIMIT = 200;
 /** Sends and queueings of a prompt whose reply never came back, by agent and prompt key, with their id. */
@@ -88,8 +97,8 @@ export function confirmOffer(consent: Pick<Consent, "approvals">): { label: stri
 
 /** How a copy of this prompt already on its way (or sent moments ago) is named in a toast. */
 export function onItsWayLabel(view: Pick<DeferredView, "state">): string {
-  if (view.state === "held") return "在等你确认";
-  if (view.state === "sending") return "正在发送";
-  if (isOnItsWay(view)) return "已在排队";
-  return view.state === "maybe-sent" ? "刚刚可能已经发出" : "刚刚已经发出";
+  if (view.state === "held") return t("deferred.heldState");
+  if (view.state === "sending") return t("deferred.sendingState");
+  if (isOnItsWay(view)) return t("deferred.queuedState");
+  return view.state === "maybe-sent" ? t("deferred.maybeSentState") : t("deferred.sentState");
 }

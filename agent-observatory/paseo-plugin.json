@@ -1,7 +1,7 @@
 {
   "id": "agent-observatory",
   "name": "Agent Observatory",
-  "description": "Results-first dashboard for every Paseo agent and subagent: unread queue, timelines, usage and token statistics, scheduled runs and optional AI reviews. Chinese UI.",
+  "description": "Results-first dashboard for every Paseo agent and subagent: unread queue, timelines, usage and token statistics, scheduled runs and optional AI reviews. English and Simplified Chinese, plus user languages.",
   "icon": "assets/icon.png",
   "media": [
     "assets/screenshot-sessions.png",

@@ -1,3 +1,5 @@
+import { joinList } from "./i18n";
+import { t } from "./text";
 import type { JsonValue, ToolCallDetail, ToolCallTimelineItem } from "@getpaseo/protocol/agent-types";
 import { getPaseoToolLeafName } from "@getpaseo/protocol/tool-name-normalization";
 import type { ExpansionTarget, PaletteMode } from "./settings";
@@ -43,6 +45,7 @@ export interface DiffLine {
 export interface ToolCallPresentation {
   category: ToolCategory;
   icon: string;
+  /** Stable provider label token, localized by vivid-model.zh() when rendered. */
   label: string;
   summary?: string;
   filePath?: string;
@@ -615,7 +618,7 @@ export function paseoToolSummary(toolName: string, input: unknown): string | und
   const browserId = stringField(input, "browserId");
   const url = stringField(input, "url");
   const prompt = stringField(input, "prompt") ?? stringField(input, "initialPrompt");
-  if (leafName === "create_agent" && title && provider) return `${title} · ${provider}`;
+  if (leafName === "create_agent" && title && provider) return t("sharedPresentation.agentProvider", { title, provider });
   if (leafName === "create_agent" && title) return title;
   if (leafName === "send_agent_prompt" && agentId) return agentId;
   if (leafName.endsWith("_agent") && agentId) return agentId;
@@ -955,13 +958,13 @@ export function formatWaitTimeout(timeoutMs: number | undefined): string | undef
   if (timeoutMs === undefined) return undefined;
   const seconds = Math.round(timeoutMs / 1000);
   // 本地补丁：中文时长。
-  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 60) return t("timing.seconds", { count: seconds });
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
-  if (minutes < 60) return remainder === 0 ? `${minutes} 分` : `${minutes} 分 ${remainder} 秒`;
+  if (minutes < 60) return remainder === 0 ? t("timing.minutes", { count: minutes }) : t("timing.minutesSeconds", { minutes, seconds: remainder });
   const hours = Math.floor(minutes / 60);
   const minuteRemainder = minutes % 60;
-  return minuteRemainder === 0 ? `${hours} 小时` : `${hours} 小时 ${minuteRemainder} 分`;
+  return minuteRemainder === 0 ? t("timing.hours", { count: hours }) : t("timing.hoursMinutes", { hours, minutes: minuteRemainder });
 }
 
 export function subagentSupervisorLabel(input: unknown): string {
@@ -988,13 +991,13 @@ export function subagentSupervisorSummary(input: unknown, output: unknown): stri
     const agent = typeof details?.agent === "string" && details.agent.trim() ? details.agent : undefined;
     const messageSummary = parsed.message ? compactText(parsed.message, 120) : undefined;
     const replyTarget = shortRunId(parsed.replyTo ?? (typeof details?.replyTo === "string" ? details.replyTo : undefined));
-    const parts = [agent, messageSummary ?? (replyTarget ? `→ ${replyTarget}` : undefined)].filter(Boolean);
-    return parts.length > 0 ? parts.join(" · ") : replyTarget ? `→ ${replyTarget}` : undefined;
+    const parts = [agent, messageSummary ?? (replyTarget ? t("sharedPresentation.replyTarget", { target: replyTarget }) : undefined)].filter(Boolean);
+    return parts.length > 0 ? parts.join(t("sharedPresentation.inlineSeparator")) : replyTarget ? t("sharedPresentation.replyTarget", { target: replyTarget }) : undefined;
   }
   if (parsed.action === "pending" || parsed.action === "list" || parsed.action === "status") {
     const envelope = extractPiToolText(output);
     if (envelope?.text) return compactText(envelope.text.split("\n")[0] ?? "", 120);
-    return parsed.to ? `→ ${parsed.to}` : undefined;
+    return parsed.to ? t("sharedPresentation.replyTarget", { target: parsed.to }) : undefined;
   }
   return parsed.message ? compactText(parsed.message, 120) : undefined;
 }
@@ -1061,25 +1064,26 @@ export function bgWaitLabel(input: unknown): string {
 export function bgWaitSummary(input: unknown, output: unknown): string | undefined {
   const parsed = parseBgWaitInput(input);
   const summary = parseBgWaitOutput(output);
-  const target = parsed.id ? shortRunId(parsed.id) : parsed.all === true ? "全部运行" : "下一个运行";
+  const target = parsed.id ? shortRunId(parsed.id) : parsed.all === true ? t("sharedWait.allRuns") : t("sharedWait.nextRun");
   const timeout = formatWaitTimeout(parsed.timeoutMs);
-  const header = [target, timeout ? `最多等 ${timeout}` : undefined].filter(Boolean).join(" · ");
+  const header = [target, timeout ? t("sharedWait.timeout", { duration: timeout }) : undefined].filter(Boolean).join(t("sharedPresentation.inlineSeparator"));
   if (summary && summary.completions.length > 0) {
     const first = summary.completions[0];
-    const completionLabel = first?.agent ?? shortRunId(first?.runId) ?? "运行";
-    const extra = summary.completions.length > 1 ? ` 等 ${summary.completions.length} 个` : "";
-    return `${completionLabel}${extra}已完成${header ? ` · ${header}` : ""}`;
+    const completionLabel = first?.agent ?? shortRunId(first?.runId) ?? t("sharedWait.run");
+    return t(summary.completions.length > 1 ? "sharedWait.completedMany" : "sharedWait.completed", {
+      label: completionLabel, count: summary.completions.length, header: header ? t("sharedWait.headerSuffix", { header }) : "",
+    });
   }
   if (summary?.waitReason === "window_elapsed") {
-    return header ? `${header} · 已超时` : "已超时";
+    return header ? t("sharedWait.timedOutWithHeader", { header }) : t("sharedWait.timedOut");
   }
   if (summary?.waitReason === "supervisor_request") {
-    return header ? `${header} · 子 Agent 请求` : "子 Agent 请求";
+    return header ? t("sharedWait.requestWithHeader", { header }) : t("sharedWait.request");
   }
   if (summary?.headline) {
     const waiting = summary.headline.match(/waiting\s+([\d.]+)s/i)?.[1];
-    if (waiting && header) return `${header} · 已等待 ${waiting} 秒`;
-    if (waiting) return `已等待 ${waiting} 秒`;
+    if (waiting && header) return t("sharedWait.waitedWithHeader", { header, seconds: waiting });
+    if (waiting) return t("sharedWait.waited", { seconds: waiting });
   }
   return header || undefined;
 }
@@ -1149,17 +1153,17 @@ export function ompWaitSummary(input: unknown, output: unknown): string | undefi
   const done = summary.jobs.filter((job) => job.status === "completed" || job.status === "done").length;
   const failed = summary.jobs.filter((job) => job.status === "failed" || job.status === "error").length;
   const state = [
-    running > 0 ? `${running} 个运行中` : undefined,
-    done > 0 ? `${done} 个已完成` : undefined,
-    failed > 0 ? `${failed} 个失败` : undefined,
+    running > 0 ? t("sharedWait.running", { count: running }) : undefined,
+    done > 0 ? t("sharedWait.done", { count: done }) : undefined,
+    failed > 0 ? t("sharedWait.failed", { count: failed }) : undefined,
   ].filter(Boolean);
   // Pending/unknown statuses fall back to a plain count so the header never goes blank.
-  if (state.length === 0) state.push(`等待 ${summary.jobs.length} 个`);
+  if (state.length === 0) state.push(t("sharedWait.waiting", { count: summary.jobs.length }));
   const durations = summary.jobs.flatMap((job) => (job.durationMs !== undefined ? [job.durationMs] : []));
   if (durations.length > 0) state.push(formatWaitTimeout(Math.max(...durations)) ?? "");
   const names = summary.jobs.map((job) => job.label ?? job.id);
-  const shown = names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 个` : "");
-  return [...state, shown].filter(Boolean).join(" · ");
+  const shown = names.length > 3 ? t("sharedWait.namesAndOthers", { names: joinList(names.slice(0, 3)), count: names.length }) : joinList(names.slice(0, 3));
+  return [...state, shown].filter(Boolean).join(t("sharedPresentation.inlineSeparator"));
 }
 
 export type TodoToolStatus = "pending" | "in_progress" | "completed";
@@ -1296,7 +1300,7 @@ export function todoToolSummary(output: unknown): string | undefined {
   if (headline) return headline;
   if (summary.tasks.length === 0) return undefined;
   const done = summary.tasks.filter((entry) => entry.status === "completed").length;
-  return `已完成 ${done}/${summary.tasks.length}`;
+  return t("sharedPresentation.tasksCompleted", { done, total: summary.tasks.length });
 }
 
 /** Task row label shared by the todo list and task tool card: `#id title` for numeric ids. */
@@ -2094,8 +2098,8 @@ function splitDiffLines(text: string): { lines: string[]; hasTrailingNewline: bo
 function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   if (oldText.length + newText.length > MAX_DIFF_CHARS) {
     return [
-      ...(oldText ? [{ kind: "remove" as const, text: `[原内容：${oldText.length.toLocaleString()} 字符]` }] : []),
-      ...(newText ? [{ kind: "add" as const, text: `[新内容：${newText.length.toLocaleString()} 字符]` }] : []),
+      ...(oldText ? [{ kind: "remove" as const, text: t("sharedPresentation.oldContents", { count: oldText.length.toLocaleString() }) }] : []),
+      ...(newText ? [{ kind: "add" as const, text: t("sharedPresentation.newContents", { count: newText.length.toLocaleString() }) }] : []),
     ];
   }
 
@@ -2332,8 +2336,8 @@ export function diffLinesForDetail(detail: Extract<ToolCallDetail, { type: "edit
   const size = unifiedDiff?.length ?? ((detail.oldString?.length ?? 0) + (detail.newString?.length ?? 0));
   if (size > MAX_DIFF_CHARS) {
     return [
-      ...(detail.oldString ? [{ kind: "remove" as const, text: `[原内容：${detail.oldString.length.toLocaleString()} 字符]` }] : []),
-      ...(detail.newString ? [{ kind: "add" as const, text: `[新内容：${detail.newString.length.toLocaleString()} 字符]` }] : []),
+      ...(detail.oldString ? [{ kind: "remove" as const, text: t("sharedPresentation.oldContents", { count: detail.oldString.length.toLocaleString() }) }] : []),
+      ...(detail.newString ? [{ kind: "add" as const, text: t("sharedPresentation.newContents", { count: detail.newString.length.toLocaleString() }) }] : []),
     ];
   }
 
@@ -2426,7 +2430,7 @@ export function resolveCodeModePresentation(input: unknown, output: unknown): To
       category: "search",
       icon: "Search",
       label: "Search Tools",
-      summary: searchQuery ? compactText(searchQuery, 120) : `${catalog.items.length} 个工具`,
+      summary: searchQuery ? compactText(searchQuery, 120) : t("sharedPresentation.toolsCount", { count: catalog.items.length }),
     };
   }
 
@@ -2465,13 +2469,12 @@ export function resolveCodeModePresentation(input: unknown, output: unknown): To
     const shown = parsed.calls
       .slice(0, 2)
       .map((call) => call.tool)
-      .join(", ");
-    const extra = parsed.calls.length > 2 ? ` 等` : "";
+      .join(t("sharedPresentation.callSeparator"));
     return {
       category: "agent",
       icon: "SquareTerminal",
       label: "Code Mode",
-      summary: compactText(`${parsed.calls.length} 次调用 · ${shown}${extra}`, 180),
+      summary: compactText(t(parsed.calls.length > 2 ? "sharedPresentation.callsAndOthers" : "sharedPresentation.calls", { count: parsed.calls.length, names: shown }), 180),
     };
   }
 
@@ -3333,7 +3336,7 @@ export function estimateReasoningTokens(text: string): number {
 /** Quiet header metadata: "2 steps · 116 tokens". Steps are omitted when zero. */
 /** 本地补丁：中文。「约 1,234 token」，多于一步时前面加「N 步 · 」。 */
 export function formatReasoningMeta(stepCount: number, tokenCount: number): string {
-  const tokens = `约 ${tokenCount.toLocaleString("en-US")} token`;
-  if (stepCount <= 1) return tokens;
-  return `${stepCount.toLocaleString("en-US")} 步 · ${tokens}`;
+  return t(stepCount <= 1 ? "sharedPresentation.reasoningTokens" : "sharedPresentation.reasoningStepsTokens", {
+    steps: stepCount.toLocaleString("en-US"), tokens: tokenCount.toLocaleString("en-US"), count: tokenCount,
+  });
 }

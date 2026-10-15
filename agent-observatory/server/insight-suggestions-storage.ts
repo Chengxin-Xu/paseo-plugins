@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,14 +34,14 @@ export class SuggestionStorage {
       for (const value of raw.jobs) {
         const parsed = suggestionJobSchema.safeParse(value);
         if (parsed.success) jobs.push(parsed.data);
-        else this.error = "部分建议记录无法恢复，其余记录已保留。";
+        else this.error = t("serverInsightSuggestionsStorage.m001");
       }
       const retained = retainSuggestionJobs(jobs);
       if (!this.error && retained.length === raw.jobs.length) this.digest = this.hash(JSON.stringify({ version: 1, jobs: retained }));
       return retained;
     } catch (error) {
       if ((error as { code?: string }).code === "ENOENT") return [];
-      this.error = "建议记录无法恢复，原文件已保留，分析报告不受影响。";
+      this.error = t("serverInsightSuggestionsStorage.m002");
       // One backup, replaced by the next, so repeated damage never piles up copies.
       await rename(this.file, `${this.file}.backup`).catch(() => {});
       return [];
@@ -59,7 +60,7 @@ export class SuggestionStorage {
         const handle = await open(temp, "wx", 0o600);
         try { await handle.writeFile(snapshot); await handle.sync(); } finally { await handle.close(); }
         await rename(temp, this.file); this.digest = digest;
-      } catch { this.error = "建议暂时无法保存，已保留内存状态与原有文件。"; }
+      } catch { this.error = t("serverInsightSuggestionsStorage.m003"); }
       finally { await unlink(temp).catch(() => {}); }
     });
     return this.writes;

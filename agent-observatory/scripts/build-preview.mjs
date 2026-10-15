@@ -12,7 +12,7 @@ await build({
   entryPoints: ["preview/index.jsx"], bundle: true, outfile: join(output, "app.js"), platform: "browser",
   format: "iife", target: ["es2020"], sourcemap: true, jsx: "automatic", logLevel: "warning",
   alias: { "react-native": "react-native-web", "@getpaseo/plugin/client": "./preview/sdk-adapter.jsx",
-    "@getpaseo/plugin/client/react-native": "./preview/sdk-adapter.jsx" },
+    "@getpaseo/plugin/client/react-native": "./preview/sdk-adapter.jsx", "@getpaseo/plugin/client/ui": "./preview/sdk-adapter.jsx" },
   define: { "process.env.NODE_ENV": '"development"', __DEV__: "true" },
 });
 await writeFile(join(output, "index.html"), await readFile(join(root, "preview", "index.html")));

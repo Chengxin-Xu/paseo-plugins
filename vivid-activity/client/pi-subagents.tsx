@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Text, View } from "react-native";
 import { parsePiSubagentCall } from "../shared/pi-subagents";
@@ -34,24 +35,24 @@ export function PiSubagentToolDetail({ input, output, theme, palette, styles, ag
   const parsed = parsePiSubagentCall(input, output);
   return (
     <View style={styles.paseoStack}>
-      <FieldsSection title="Agent" fields={[
-        ["Agent ID", parsed.agentId], ["类型", agentType ?? parsed.agentType],
-        ["说明", parsed.description ?? description], ["会话", childSessionId],
-        ["模式", parsed.wait === true ? "阻塞等待" : parsed.wait === false ? "非阻塞查看结果" : undefined],
+      <FieldsSection title={t("ui.agent")} fields={[
+        [t("ui.agentId"), parsed.agentId], [t("ui.type"), agentType ?? parsed.agentType],
+        [t("ui.description"), parsed.description ?? description], [t("ui.session2"), childSessionId],
+        [t("ui.mode"), parsed.wait === true ? t("ui.waitUntilFinished") : parsed.wait === false ? t("ui.checkResultsWithoutWaiting") : undefined],
       ]} palette={palette} styles={styles} />
       {parsed.status ? <StatusPill value={parsed.status} palette={palette} styles={styles} /> : null}
-      <FieldsSection title="用量" fields={[
-        ["工具调用次数", parsed.toolUses], ["Token", parsed.tokens],
-        ["上下文", parsed.context], ["耗时", parsed.duration],
+      <FieldsSection title={t("ui.usage")} fields={[
+        [t("ui.toolCallCount"), parsed.toolUses], [t("ui.token"), parsed.tokens],
+        [t("ui.context2"), parsed.context], [t("ui.duration"), parsed.duration],
       ]} palette={palette} styles={styles} />
-      <FieldsSection title="对话记录" fields={[["输出文件", parsed.outputFile]]} palette={palette} styles={styles} />
-      {parsed.error ? <Section title="错误" styles={styles}>
+      <FieldsSection title={t("ui.transcript")} fields={[[t("ui.outputFile"), parsed.outputFile]]} palette={palette} styles={styles} />
+      {parsed.error ? <Section title={t("ui.error")} styles={styles}>
         <Text selectable style={[styles.detailText, { color: palette.statusColors.failed }]}>{parsed.error}</Text>
       </Section> : null}
       {parsed.notice ? <Text style={styles.mutedText}>{parsed.notice}</Text> : null}
-      {parsed.prompt ? <MessageBlock label="提示词" text={parsed.prompt} styles={styles} /> : null}
-      {parsed.message ? <MessageBlock label="引导消息" text={parsed.message} styles={styles} /> : null}
-      {parsed.body ? <Section title="结果" styles={styles}>
+      {parsed.prompt ? <MessageBlock label={t("ui.prompt")} text={parsed.prompt} styles={styles} /> : null}
+      {parsed.message ? <MessageBlock label={t("ui.steerMessage")} text={parsed.message} styles={styles} /> : null}
+      {parsed.body ? <Section title={t("ui.result")} styles={styles}>
         <ReasoningMarkdown text={parsed.body} theme={theme} styles={styles} />
       </Section> : null}
     </View>
@@ -74,14 +75,14 @@ export function SupervisorToolDetail({ input, output, palette, styles }: DetailP
     <View style={styles.paseoStack}>
       {parsed.action === "reply" ? (
         <>
-          {message ? <MessageBlock label="回复消息" text={message} styles={styles} /> : null}
+          {message ? <MessageBlock label={t("ui.replyMessage")} text={message} styles={styles} /> : null}
           <FieldsSection
-            title="请求"
+            title={t("ui.request")}
             fields={[
-              ["请求 ID", replyTo],
-              ["运行", runId],
-              ["Agent", notInHeader(agent, headerSummary)],
-              ["确认", envelope?.text || undefined],
+              [t("ui.requestID"), replyTo],
+              [t("ui.run"), runId],
+              [t("ui.agent"), notInHeader(agent, headerSummary)],
+              [t("ui.confirmation"), envelope?.text || undefined],
             ]}
             palette={palette}
             styles={styles}
@@ -90,19 +91,19 @@ export function SupervisorToolDetail({ input, output, palette, styles }: DetailP
       ) : (
         <>
           <FieldsSection
-            title="查询"
+            title={t("ui.query2")}
             fields={[
-              ["操作", knownAction ? undefined : parsed.action || undefined],
-              ["发给", notInHeader(parsed.to, headerSummary)],
-              ["消息", message],
+              [t("ui.action"), knownAction ? undefined : parsed.action || undefined],
+              [t("ui.to"), notInHeader(parsed.to, headerSummary)],
+              [t("ui.message"), message],
             ]}
             palette={palette}
             styles={styles}
           />
           {resultText ? (
-            <MessageBlock label="结果" text={resultText} styles={styles} />
+            <MessageBlock label={t("ui.result")} text={resultText} styles={styles} />
           ) : envelope?.text ? null : (
-            <Text style={styles.empty}>没有待处理的子 Agent 请求。</Text>
+            <Text style={styles.empty}>{t("ui.noPendingSubagentRequests")}</Text>
           )}
         </>
       )}
@@ -119,22 +120,22 @@ export function BgWaitToolDetail({ input, output, theme, palette, styles }: Deta
   return (
     <View style={styles.paseoStack}>
       {summary?.headline ? (
-        <Section title="概况" styles={styles}>
+        <Section title={t("ui.overview")} styles={styles}>
           <Text selectable style={styles.detailText}>
             {summary.headline}
           </Text>
         </Section>
       ) : null}
       <FieldsSection
-        title="等待"
+        title={t("ui.wait")}
         fields={[
-          ["运行", parsed.id],
-          ["超时", notInHeader(timeout ? `${timeout} timeout` : undefined, headerSummary)],
-          ["非阻塞", parsed.nonBlocking],
-          ["需要关注时停止", parsed.stopOnAttention],
-          ["进行中的运行", summary && summary.activeRunIds.length > 0 ? summary.activeRunIds.join(", ") : undefined],
+          [t("ui.run"), parsed.id],
+          [t("ui.timeout"), notInHeader(timeout ? t("ui.timeoutValue", { time: timeout }) : undefined, headerSummary)],
+          [t("ui.nonblocking"), parsed.nonBlocking],
+          [t("ui.stopWhenAttentionIsNeeded"), parsed.stopOnAttention],
+          [t("ui.activeRuns"), summary && summary.activeRunIds.length > 0 ? summary.activeRunIds.join(", ") : undefined],
           [
-            "Provider 条目",
+            t("ui.providerEntries"),
             summary && summary.activeProviderItems.length > 0
               ? summary.activeProviderItems.map((item) => `${item.provider}:${item.id}`).join(", ")
               : undefined,
@@ -144,13 +145,13 @@ export function BgWaitToolDetail({ input, output, theme, palette, styles }: Deta
         styles={styles}
       />
       {summary && summary.completions.length > 0 ? (
-        <Section title={`已完成（${summary.completions.length}）`} styles={styles}>
+        <Section title={t("ui.completed2", { count: summary.completions.length })} styles={styles}>
           <View style={styles.paseoList}>
             {summary.completions.map((completion) => (
               <View key={`completion-${completion.runId}-${completion.agent ?? "run"}`} style={styles.paseoListItem}>
                 <View style={styles.paseoListItemHeader}>
                   <Text numberOfLines={1} style={styles.paseoListItemTitle}>
-                    {completion.agent ?? "运行结束"}
+                    {completion.agent ?? t("ui.runFinished")}
                   </Text>
                   {completion.success !== undefined ? (
                     <StatusPill
@@ -169,7 +170,7 @@ export function BgWaitToolDetail({ input, output, theme, palette, styles }: Deta
         </Section>
       ) : null}
       {summary?.body ? (
-        <PaseoCodeBlock code={summary.body} language="text" label="等待日志" theme={theme} styles={styles} />
+        <PaseoCodeBlock code={summary.body} language="text" label={t("ui.waitLog")} theme={theme} styles={styles} />
       ) : null}
     </View>
   );

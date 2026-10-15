@@ -18,7 +18,12 @@
  * - A plugin with a server queue (deferred-send.ts) sends through it instead of calling `send` itself: the server
  *   plans again from the agent as it is at that moment and sends only if the user's consent (`consentFor`) still
  *   covers what the send would do.
+ * Labels, notes and confirmations come from `../shared/i18n` (`kitSend`): the plugin's language, else Chinese.
  */
+import { addDefaults, t } from "../shared/i18n";
+import { kitSend } from "../shared/locales/kit/zh-CN.json";
+
+addDefaults({ kitSend });
 
 export interface SendTarget {
   provider: string;
@@ -54,7 +59,7 @@ export type SendPlan =
   | { kind: "unavailable"; label: string; note: string; confirm: null; options: undefined };
 
 export interface SendPlanOptions {
-  /** Names the message in the confirmations, e.g. "消息", "回答", "命令". */
+  /** Names the message in the confirmations, in the plugin's language: "message", "answer", "command" (default `kitSend.message`). */
   what?: string;
   /** The daemon's custom ids that can steer (`readSteerableProviders()`); the built-ins are always included. */
   steerable?: Steerable;
@@ -136,34 +141,34 @@ export function canSteer(agent: Pick<SendTarget, "provider" | "status"> | null |
 }
 
 export function sendPlan(agent: SendTarget | null | undefined, options: SendPlanOptions = {}): SendPlan {
-  const what = options.what ?? "消息";
-  if (!usableTarget(agent)) return { kind: "unavailable", label: "发送", note: agent ? "这个 Agent 已归档" : "这个 Agent 已不可用", confirm: null, options: undefined };
+  const what = options.what ?? t("kitSend.message");
+  if (!usableTarget(agent)) return { kind: "unavailable", label: t("kitSend.send"), note: t(agent ? "kitSend.archived" : "kitSend.unavailable"), confirm: null, options: undefined };
   const effect = commandEffect(agent.provider, options);
   const waiting = (agent.pendingPermissions ?? 0) > 0 || (agent.requiresAttention && agent.attentionReason === "permission");
   // Paseo runs these beside the turn before any steer or replace: nothing is interrupted and approvals stay.
   if (effect === "out-of-band") {
-    const note = isActive(agent) || waiting ? "这条命令由宿主单独执行，不打断当前回合，也不影响待审批" : null;
-    return { kind: "send", label: "发送", note, confirm: null, options: undefined };
+    const note = isActive(agent) || waiting ? t("kitSend.outOfBandNote") : null;
+    return { kind: "send", label: t("kitSend.send"), note, confirm: null, options: undefined };
   }
   // Codex runs /goal beside the turn only when the session has goals on; say both outcomes instead of promising one.
   if (effect === "maybe-out-of-band" && (isActive(agent) || waiting)) {
-    return { kind: "confirm", label: "仍然发送", note: "这条命令可能单独执行，也可能中断当前回合", confirm: `开启了目标功能的 Codex 会在当前回合旁边单独执行 /goal，不打断也不动审批；没开启时，发送这条${what}会中断它当前的回合${waiting ? "，并取消这次审批请求" : ""}。仍然发送吗？`, options: undefined };
+    return { kind: "confirm", label: t("kitSend.sendAnyway"), note: t("kitSend.maybeOutOfBandNote"), confirm: t(waiting ? "kitSend.maybeOutOfBandConfirmApproval" : "kitSend.maybeOutOfBandConfirm", { what }), options: undefined };
   }
   const steer = canSteer(agent, options.steerable, options);
   // The steering check above only covers steering providers; a slash command into one of them still replaces the turn.
   const slashBlocked = effect === "replace" && isActive(agent) && (has(STEERING_PROVIDERS, agent.provider) || has(options.steerable, agent.provider));
   if (waiting) {
     return steer
-      ? { kind: "confirm", label: "仍然发送", note: "Agent 正在等你审批，发送会取消这次审批", confirm: `Agent 正在等你审批。发送后这条${what}会插进当前回合，同时取消这次审批请求，等待批准的操作不会执行。仍然发送吗？`, options: { activeTurnBehavior: "steer" } }
-      : { kind: "confirm", label: "仍然发送", note: "Agent 正在等你审批，发送会取消这次审批", confirm: `Agent 正在等你审批。发送这条${what}会中断当前回合，并取消这次审批请求，等待批准的操作不会执行。仍然发送吗？`, options: undefined };
+      ? { kind: "confirm", label: t("kitSend.sendAnyway"), note: t("kitSend.waitingNote"), confirm: t("kitSend.waitingSteerConfirm", { what }), options: { activeTurnBehavior: "steer" } }
+      : { kind: "confirm", label: t("kitSend.sendAnyway"), note: t("kitSend.waitingNote"), confirm: t("kitSend.waitingConfirm", { what }), options: undefined };
   }
   if (isActive(agent)) {
-    if (steer) return { kind: "steer", label: "发送", note: "运行中，插进当前回合，不打断", confirm: null, options: { activeTurnBehavior: "steer" } };
-    if (slashBlocked) return { kind: "confirm", label: "中断并发送", note: "运行中，这条命令不能插话", confirm: `这个 Agent 正在运行。这条命令不能插进当前回合，发送${what}会中断它当前的回合。仍然发送吗？`, options: undefined };
-    return { kind: "confirm", label: "中断并发送", note: "运行中，这个 Agent 不支持插话", confirm: `这个 Agent 正在运行且不支持插话，发送${what}会中断它当前的回合。仍然发送吗？`, options: undefined };
+    if (steer) return { kind: "steer", label: t("kitSend.send"), note: t("kitSend.steerNote"), confirm: null, options: { activeTurnBehavior: "steer" } };
+    if (slashBlocked) return { kind: "confirm", label: t("kitSend.interruptAndSend"), note: t("kitSend.slashBlockedNote"), confirm: t("kitSend.slashBlockedConfirm", { what }), options: undefined };
+    return { kind: "confirm", label: t("kitSend.interruptAndSend"), note: t("kitSend.noSteerNote"), confirm: t("kitSend.noSteerConfirm", { what }), options: undefined };
   }
-  const note = agent.status === "error" ? "Agent 上一轮出错了" : agent.status === "closed" ? "会话未载入，发送时会自动载入" : null;
-  return { kind: "send", label: "发送", note, confirm: null, options: undefined };
+  const note = agent.status === "error" ? t("kitSend.errorNote") : agent.status === "closed" ? t("kitSend.closedNote") : null;
+  return { kind: "send", label: t("kitSend.send"), note, confirm: null, options: undefined };
 }
 
 /**
@@ -261,7 +266,7 @@ export function messageIdKey(messageId: string): string | null {
 /** The daemon's answers to a retried `messageId`, in words for the user. */
 export function sendFailure(error: unknown): { kind: "maybe-delivered" | "changed" | "failed"; message: string } {
   const text = error instanceof Error ? error.message : String(error ?? "");
-  if (text.includes("agent_request_outcome_unknown")) return { kind: "maybe-delivered", message: "上一次发送的结果不确定，可能已经送达。请先打开会话看一下，不要直接重发。" };
-  if (text.includes("agent_request_key_conflict")) return { kind: "changed", message: "Agent 的状态变了，这条消息需要重新确认后再发。" };
-  return { kind: "failed", message: text || "发送失败，请重试" };
+  if (text.includes("agent_request_outcome_unknown")) return { kind: "maybe-delivered", message: t("kitSend.maybeDelivered") };
+  if (text.includes("agent_request_key_conflict")) return { kind: "changed", message: t("kitSend.changed") };
+  return { kind: "failed", message: text || t("kitSend.failed") };
 }

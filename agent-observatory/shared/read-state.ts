@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -54,6 +55,6 @@ export type ReadReceiptsResponse = z.infer<typeof getReadReceipts.output>;
 export function mergeReadReceipts(previous: ReadReceiptsState | undefined, response: ReadReceiptsResponse | ReadReceiptsSnapshot): ReadReceiptsState {
   if (!("mode" in response)) return response;
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return snapshot; }
-  if (!previous) throw new Error("本地已读缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedReadState.m001"));
   return previous;
 }

@@ -1,3 +1,5 @@
+import { onTextChange, translator } from "../shared/i18n";
+import { t } from "../shared/text";
 import type { PaseoApi, PaseoAgent, PaseoAgentCreateOptions, PaseoAgentHandle, PaseoAgentRunResult, PaseoProviderSnapshotResult, AgentMode } from "./paseo-types";
 import { z } from "zod";
 import { GROK_DEFAULT_EFFORT, GROK_DEFAULT_MODEL, grokRunnerLabel, type InsightJob, type InsightModelOption, type InsightRunner, type InsightRunnerInfo, type InsightRunnerOption, type InsightRunners } from "../shared/insights";
@@ -11,17 +13,17 @@ export function grokPlan(runner: Extract<InsightRunner, { kind: "grok" }>): Insi
   const model = runner.model ?? GROK_DEFAULT_MODEL, effort = runner.effort ?? GROK_DEFAULT_EFFORT;
   return { info: { ...BUILTIN_INSIGHT_RUNNER, label: grokRunnerLabel({ model, effort }), model, thinkingOptionId: effort }, model, effort, access: "none", featureValues: {} };
 }
-export const AUTO_RUNNER_LABEL = "自动选择";
+export let AUTO_RUNNER_LABEL = t("serverInsightRunner.m001");
 /** What the built-in runner really does (grok-runner.ts): no tools offered and every call refused; its session is deleted when the run ends. */
-export const GROK_RUNNER_DETAIL = "Grok CLI：不提供工具，工具调用一律拒绝；会话和它的会话搜索记录在分析结束后立即删除";
-export const NO_RUNNER_ERROR = "没有可以自动选用的分析执行器：安装并登录 Grok CLI、在 Paseo 里启用 Claude Code 或 Codex，或者在「分析设置」里选一个 Profile 或模型";
-export const INSIGHT_PERMISSION_MESSAGE = "分析会话是只读的：不能使用工具。请直接输出 JSON 报告。";
+export let GROK_RUNNER_DETAIL = t("serverInsightRunner.m002");
+export let NO_RUNNER_ERROR = t("serverInsightRunner.m003");
+export let INSIGHT_PERMISSION_MESSAGE = t("serverInsightRunner.m004");
 /** Shown for `ask` access: only requests that need approval reach the observatory, so say so. */
-const ASK_REASON = "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行";
-const NO_MODES_REASON = "该提供商没有列出权限模式，无法确认分析会话受限，不能用于分析";
-const UNSAFE_REASON = "该提供商没有只读或逐项审批的模式，不能用于分析";
-const UNVERIFIED_MODE_ERROR = "分析执行器没有经过确认的受限模式（只读或逐项审批），已拒绝启动分析会话；可以在「分析设置」里换一个执行器";
-const WORKSPACE_ERROR = "无法在该会话的工作区启动分析（可能已归档），可以在「分析设置」里换一个执行器";
+let ASK_REASON = t("serverInsightRunner.m005");
+let NO_MODES_REASON = t("serverInsightRunner.m006");
+let UNSAFE_REASON = t("serverInsightRunner.m007");
+let UNVERIFIED_MODE_ERROR = t("serverInsightRunner.m008");
+let WORKSPACE_ERROR = t("serverInsightRunner.m009");
 /** What `auto` may run, in order: Claude Code, Codex, then custom providers that extend them (`extends` in the daemon config). */
 const AUTO_BASES = ["claude", "codex"] as const;
 /**
@@ -97,7 +99,7 @@ function normalizeModels(entry: PaseoProviderSnapshotResult["entries"][number], 
 
 async function catalogRequest<T>(request: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try { return await Promise.race([request, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("读取分析执行器配置超时，请稍后重试")), 12_000); timer.unref(); })]); }
+  try { return await Promise.race([request, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(t("serverInsightRunner.m010"))), 12_000); timer.unref(); })]); }
   finally { if (timer) clearTimeout(timer); }
 }
 
@@ -106,13 +108,14 @@ export class InsightRunnerRegistry {
   private readonly now: () => number;
   private readonly cacheMs: number;
   private readonly findBinary: () => Promise<string | null>;
-  private catalogCache: { at: number; promise: Promise<Catalog> } | null = null;
+  private catalogCache: { at: number; promise: Promise<Catalog>; textKey: string } | null = null;
   private binaryCache: { at: number; promise: Promise<boolean> } | null = null;
   constructor(private readonly paseo: PaseoApi, options: InsightRunnerRegistryOptions = {}) {
     this.now = options.now ?? Date.now; this.cacheMs = Math.max(60_000, options.cacheMs ?? 60_000); this.findBinary = options.findBinary ?? findGrokBinary;
   }
   private catalog(): Promise<Catalog> {
-    if (!this.catalogCache || this.now() - this.catalogCache.at >= this.cacheMs) {
+    const textKey = `${translator().language}:${translator().hash}`;
+    if (!this.catalogCache || this.catalogCache.textKey !== textKey || this.now() - this.catalogCache.at >= this.cacheMs) {
       const promise = catalogRequest(Promise.all([this.paseo.config.get(), this.paseo.providers.snapshot()])).then(([{ config }, snapshot]) => {
         const entries = snapshot.entries.length ? snapshot.entries : (snapshot.compactSnapshot?.entries ?? []);
         return { profiles: (config.agentProfiles ?? []).filter(profile => validId(profile.id, 200)), entries: entries.filter(entry => validId(entry.provider, 120)).map(entry => {
@@ -123,8 +126,8 @@ export class InsightRunnerRegistry {
             status: entry.status, error: entry.error ? safeError(entry.error) : null, modes: entry.modes ?? compact?.modes ?? [], models: normalizeModels(full, snapshot),
             extends: validId((config.providers?.[entry.provider] as { extends?: unknown } | undefined)?.extends as string | undefined, 120) ?? null };
         }) };
-      }).catch(error => { throw new Error(`无法读取分析执行器列表：${safeError(error)}`); });
-      this.catalogCache = { at: this.now(), promise };
+      }).catch(error => { throw new Error(t("serverInsightRunner.m011", { value1: safeError(error) })); });
+      this.catalogCache = { at: this.now(), promise, textKey };
     }
     return this.catalogCache.promise;
   }
@@ -133,9 +136,9 @@ export class InsightRunnerRegistry {
     return this.binaryCache.promise;
   }
   private unavailable(entry: CatalogEntry | undefined): string | null {
-    if (!entry) return "未找到该提供商，请检查 Paseo 配置";
-    if (!entry.enabled) return "该提供商已停用";
-    if (entry.status === "unavailable" || entry.status === "error") return clipped(entry.error, 300) ?? "该提供商当前不可用，请检查登录状态";
+    if (!entry) return t("serverInsightRunner.m012");
+    if (!entry.enabled) return t("serverInsightRunner.m013");
+    if (entry.status === "unavailable" || entry.status === "error") return clipped(entry.error, 300) ?? t("serverInsightRunner.m014");
     if (!entry.modes.length) return NO_MODES_REASON;
     if (analysisModeOf(entry).unsafe) return UNSAFE_REASON;
     return null;
@@ -167,10 +170,10 @@ export class InsightRunnerRegistry {
     if (runner.kind === "grok") return grokPlan(runner);
     const catalog = await this.catalog();
     const profile = runner.kind === "profile" ? catalog.profiles.find(candidate => candidate.id === runner.profileId) : undefined;
-    if (runner.kind === "profile" && !profile) throw new Error("找不到所选分析 Profile，请重新选择执行器");
+    if (runner.kind === "profile" && !profile) throw new Error(t("serverInsightRunner.m015"));
     const provider = runner.kind === "provider" ? runner.provider : profile!.provider;
     const entry = catalog.entries.find(candidate => candidate.provider === provider);
-    const reason = this.unavailable(entry); if (reason || !entry) throw new Error(`无法启动分析：${reason}`);
+    const reason = this.unavailable(entry); if (reason || !entry) throw new Error(t("serverInsightRunner.m016", { reason: reason }));
     // No model chosen: the provider's default (or first) one; a provider that lists none runs as "<provider>/default".
     const modelId = (runner.kind === "provider" ? runner.model : profile?.model) ?? defaultModelOf(entry.models);
     const model = entry.models.find(candidate => candidate.id === modelId);
@@ -182,10 +185,10 @@ export class InsightRunnerRegistry {
   }
   async runners(): Promise<InsightRunners> {
     const [catalog, available] = await Promise.all([this.catalog(), this.binaryAvailable()]);
-    const builtin: InsightRunnerOption = { runner: { kind: "grok" }, label: BUILTIN_INSIGHT_RUNNER.label, detail: GROK_RUNNER_DETAIL, providerLabel: "Grok", modelLabel: "Grok 4.7", thinkingLabel: "xhigh", available, reason: available ? null : "未找到本机 Grok CLI", access: "none", modeId: null };
+    const builtin: InsightRunnerOption = { runner: { kind: "grok" }, label: BUILTIN_INSIGHT_RUNNER.label, detail: GROK_RUNNER_DETAIL, providerLabel: "Grok", modelLabel: "Grok 4.7", thinkingLabel: "xhigh", available, reason: available ? null : t("serverInsightRunner.m017"), access: "none", modeId: null };
     const chosen = await this.resolve({ kind: "auto" }).catch(() => null);
-    const auto: InsightRunnerOption = { runner: { kind: "auto" }, label: AUTO_RUNNER_LABEL, detail: "有 Grok CLI 时用它；否则用已启用的 Claude Code 或 Codex（包括 extends 它们的自定义 Provider）和它的默认模型",
-      providerLabel: chosen ? `现在：${chosen.info.label}` : null, modelLabel: null, thinkingLabel: null, available: !!chosen,
+    const auto: InsightRunnerOption = { runner: { kind: "auto" }, label: AUTO_RUNNER_LABEL, detail: t("serverInsightRunner.m018"),
+      providerLabel: chosen ? t("serverInsightRunner.m019", { value1: chosen.info.label }) : null, modelLabel: null, thinkingLabel: null, available: !!chosen,
       reason: chosen ? (chosen.access === "ask" ? ASK_REASON : null) : NO_RUNNER_ERROR, access: chosen?.access ?? "none", modeId: chosen?.info.modeId ?? null };
     const profiles: InsightRunnerOption[] = catalog.profiles.slice(0, 40).map(profile => {
       const entry = catalog.entries.find(candidate => candidate.provider === profile.provider), reason = this.unavailable(entry);
@@ -200,7 +203,7 @@ export class InsightRunnerRegistry {
   }
   async models(provider: string): Promise<{ provider: string; models: InsightModelOption[] }> {
     const entry = (await this.catalog()).entries.find(candidate => candidate.provider === provider), reason = this.unavailable(entry);
-    if (reason || !entry) throw new Error(`无法读取分析模型：${reason}`);
+    if (reason || !entry) throw new Error(t("serverInsightRunner.m020", { reason: reason }));
     return { provider, models: entry.models };
   }
 }
@@ -217,7 +220,7 @@ export interface PaseoStructuredResult<T> { value: T; usage: InsightJob["usage"]
 const defaultTimers: InsightRunnerTimers = { set(callback, delay) { const timer = setTimeout(callback, delay); timer.unref(); return timer; }, clear(timer) { clearTimeout(timer as ReturnType<typeof setTimeout>); } };
 async function boundedCleanup<T>(operation: Promise<T>, timers: InsightRunnerTimers, timeoutMs = 5000): Promise<T> {
   let timer: unknown;
-  try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = timers.set(() => reject(new Error("清理分析会话超时，下次加载时将再次尝试")), timeoutMs); })]); }
+  try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = timers.set(() => reject(new Error(t("serverInsightRunner.m021"))), timeoutMs); })]); }
   finally { if (timer !== undefined) timers.clear(timer); }
 }
 const usageNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -229,37 +232,37 @@ function snapshotUsage(snapshot: PaseoAgent | null): InsightJob["usage"] {
 /** Owns precisely one temporary handle, including its single structured-output retry. */
 export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T>): Promise<PaseoStructuredResult<T>> {
   const { paseo, plan, parent, signal } = options;
-  if (plan.info.kind === "grok" || plan.info.kind === "auto" || !plan.info.provider) throw new Error("Grok 分析必须使用 Grok CLI 执行");
+  if (plan.info.kind === "grok" || plan.info.kind === "auto" || !plan.info.provider) throw new Error(t("serverInsightRunner.m022"));
   // Never create a helper whose mode is not pinned to a verified restricted one: without a mode it would inherit the analysed Agent's.
   if (!plan.info.modeId || (plan.access !== "read" && plan.access !== "ask")) throw new Error(UNVERIFIED_MODE_ERROR);
-  if (signal.aborted) throw new Error("分析已取消");
+  if (signal.aborted) throw new Error(t("serverInsightRunner.m023"));
   const now = options.now ?? Date.now, timeoutMs = options.timeoutMs ?? 20 * 60_000, deadline = now() + timeoutMs, timers = options.timers ?? defaultTimers;
   let handle: PaseoAgentHandle | undefined, terminated: Error | undefined, denials = 0;
   let rejectStop!: (error: Error) => void;
   const stop = new Promise<never>((_resolve, reject) => { rejectStop = reject; });
   void stop.catch(() => {});
   const terminate = (message: string) => { terminated ??= new Error(message); rejectStop(terminated); };
-  const cancel = () => terminate("分析已取消");
-  const timer = timers.set(() => terminate("Paseo 分析超时（20 分钟），请重试或更换执行器"), timeoutMs);
+  const cancel = () => terminate(t("serverInsightRunner.m024"));
+  const timer = timers.set(() => terminate(t("serverInsightRunner.m025")), timeoutMs);
   signal.addEventListener("abort", cancel, { once: true });
-  const remaining = () => { if (signal.aborted) cancel(); if (now() >= deadline) terminate("Paseo 分析超时（20 分钟），请重试或更换执行器"); if (terminated) throw terminated; return Math.max(1, deadline - now()); };
+  const remaining = () => { if (signal.aborted) cancel(); if (now() >= deadline) terminate(t("serverInsightRunner.m026")); if (terminated) throw terminated; return Math.max(1, deadline - now()); };
   const guarded = async <V>(operation: Promise<V>): Promise<V> => { remaining(); return Promise.race([operation, stop]); };
-  const archive = async (target: PaseoAgentHandle) => { try { await boundedCleanup(target.archive(), timers); } catch (error) { const failure = new Error(`分析会话归档失败：${safeError(error)}`); if (options.onCleanupError) options.onCleanupError(failure); else console.warn(failure.message); } };
+  const archive = async (target: PaseoAgentHandle) => { try { await boundedCleanup(target.archive(), timers); } catch (error) { const failure = new Error(t("serverInsightRunner.m027", { value1: safeError(error) })); if (options.onCleanupError) options.onCleanupError(failure); else console.warn(failure.message); } };
   const wait = async (initial?: PaseoAgentRunResult): Promise<PaseoAgentRunResult> => {
     let result = initial;
     for (;;) {
       result ??= await guarded(handle!.waitForFinish(remaining()));
-      if (result.status === "timeout") throw new Error("Paseo 分析超时（20 分钟），请重试或更换执行器");
-      if (result.status === "error") throw new Error(`Paseo 分析失败：${safeError(result.error ?? result.final?.lastError ?? "提供商未返回有效结果", 1200)}`);
+      if (result.status === "timeout") throw new Error(t("serverInsightRunner.m028"));
+      if (result.status === "error") throw new Error(t("serverInsightRunner.m029", { value1: safeError(result.error ?? result.final?.lastError ?? t("serverInsightRunner.m030"), 1200) }));
       if (result.status === "idle") return result;
       let permissions = result.final?.pendingPermissions ?? handle!.current()?.pendingPermissions ?? [];
       if (!permissions.length) permissions = (await guarded(handle!.refresh()))?.agent.pendingPermissions ?? [];
-      if (!permissions.length) throw new Error("分析会话正在等待权限，但未返回可拒绝的请求，请重试");
+      if (!permissions.length) throw new Error(t("serverInsightRunner.m031"));
       for (const permission of permissions) {
         await guarded(handle!.respondToPermission({ requestId: permission.id, response: { behavior: "deny", message: INSIGHT_PERMISSION_MESSAGE } }));
         denials++;
       }
-      if (denials > 8) throw new Error("分析会话重复请求工具权限超过 8 次，已停止；请更换执行器");
+      if (denials > 8) throw new Error(t("serverInsightRunner.m032"));
       result = undefined;
     }
   };
@@ -268,7 +271,7 @@ export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T
     const config: PaseoAgentCreateOptions["config"] = { provider: providerModelId(plan.info.provider, plan.info.model),
       modeId: plan.info.modeId, ...(plan.info.thinkingOptionId ? { thinkingOptionId: plan.info.thinkingOptionId } : {}), featureValues: filterInsightFeatures(plan.featureValues),
       ...(plan.providerOptions ? { options: plan.providerOptions as NonNullable<PaseoAgentCreateOptions["config"]["options"]> } : {}), systemPrompt: options.systemPrompt };
-    const common = { config, title: (options.title ?? `观测台分析 · ${parent.title}`).slice(0, 60), prompt: options.prompt, outputSchema: z.toJSONSchema(options.schema), labels: { "observatory.role": "insight", "observatory.job": options.jobId } };
+    const common = { config, title: (options.title ?? t("serverInsightRunner.m033", { value1: parent.title })).slice(0, 60), prompt: options.prompt, outputSchema: z.toJSONSchema(options.schema), labels: { "observatory.role": "insight", "observatory.job": options.jobId } };
     let creation: Promise<PaseoAgentHandle>;
     if (parent.archived) {
       if (!parent.workspaceId) throw new Error(WORKSPACE_ERROR);
@@ -288,11 +291,11 @@ export async function runPaseoStructured<T>(options: PaseoStructuredRunOptions<T
       catch (error) {
         if (terminated || signal.aborted || attempt) throw error;
         await options.onRetry?.();
-        const retry = `上一次回复未通过报告校验。请直接使用已经提供的证据，只输出符合 schema 的 JSON，不要使用工具、Markdown 或推迟分析。校验说明：${safeError(error, 600)}。`;
+        const retry = t("serverInsightRunner.m034", { value1: safeError(error, 600) });
         result = await wait(await guarded(handle.run(retry, { timeoutMs: remaining() })));
       }
     }
-    throw new Error("分析报告重试后仍未通过校验");
+    throw new Error(t("serverInsightRunner.m035"));
   } finally {
     timers.clear(timer); signal.removeEventListener("abort", cancel);
     if (handle) await archive(handle);
@@ -306,16 +309,29 @@ export async function cleanupInsightAgents(paseo: PaseoApi, ownedJobIds: Readonl
   // Some embedding tests deliberately supply only the portion of PaseoApi they exercise.
   if (typeof paseo.agents?.list !== "function") return { archived: 0, errors: [] };
   const now = options.now ?? Date.now, deadline = now() + (options.timeoutMs ?? 20_000), timers = options.timers ?? defaultTimers;
-  const remaining = () => { const left = deadline - now(); if (left <= 0) throw new Error("清理旧分析会话超时，下次加载时将再次尝试"); return Math.min(left, 5000); };
+  const remaining = () => { const left = deadline - now(); if (left <= 0) throw new Error(t("serverInsightRunner.m036")); return Math.min(left, 5000); };
   const stale = new Set<string>(), cursors = new Set<string>(); let cursor: string | undefined;
   for (;;) {
     const page = await boundedCleanup(paseo.agents.list({ filter: { includeArchived: false, labels: { "observatory.role": "insight" } }, page: { limit: 100, ...(cursor ? { cursor } : {}) } }), timers, remaining());
     for (const { agent } of page.entries) if (isInsightAgent(agent) && !agent.archivedAt && !ownedJobIds.has(agent.labels["observatory.job"])) stale.add(agent.id);
     if (!page.pageInfo.hasMore || !page.pageInfo.nextCursor) break;
-    if (cursors.has(page.pageInfo.nextCursor)) throw new Error("清理旧分析会话失败：会话列表游标未前进");
+    if (cursors.has(page.pageInfo.nextCursor)) throw new Error(t("serverInsightRunner.m037"));
     cursors.add(page.pageInfo.nextCursor); cursor = page.pageInfo.nextCursor;
   }
   let archived = 0; const errors: string[] = [];
-  for (const id of stale) { try { const timeout = remaining(); await boundedCleanup(paseo.agents.ref(id).archive(), timers, timeout); archived++; } catch (error) { errors.push(`分析会话 ${id} 归档失败：${safeError(error)}`); if (now() >= deadline) break; } }
+  for (const id of stale) { try { const timeout = remaining(); await boundedCleanup(paseo.agents.ref(id).archive(), timers, timeout); archived++; } catch (error) { errors.push(t("serverInsightRunner.m038", { id: id, value2: safeError(error) })); if (now() >= deadline) break; } }
   return { archived, errors };
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  AUTO_RUNNER_LABEL = t("serverInsightRunner.m001");
+  GROK_RUNNER_DETAIL = t("serverInsightRunner.m002");
+  NO_RUNNER_ERROR = t("serverInsightRunner.m003");
+  INSIGHT_PERMISSION_MESSAGE = t("serverInsightRunner.m004");
+  ASK_REASON = t("serverInsightRunner.m005");
+  NO_MODES_REASON = t("serverInsightRunner.m006");
+  UNSAFE_REASON = t("serverInsightRunner.m007");
+  UNVERIFIED_MODE_ERROR = t("serverInsightRunner.m008");
+  WORKSPACE_ERROR = t("serverInsightRunner.m009");
+});

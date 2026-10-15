@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { confirmFingerprint, consentFor, coversConsent, newMessageId, permissionIds, sendPlan, usableTarget, type Consent, type SendPlan } from "./send-plan";
 import { deferOffer, type DeferredSendResult } from "../shared/deferred-rpc";
 import type { SendCapabilities } from "../shared/steer";
@@ -47,8 +48,10 @@ export interface OutgoingMessage {
   tried?: boolean;
 }
 export function outgoingMessage(agentId: string, text: string, options: { what?: string; source?: string; key?: string; messageId?: string; group?: string; guard?: Readonly<Record<string, string | null>> } = {}): OutgoingMessage {
-  const source = options.source ?? "观测台";
-  return { agentId, text, what: options.what ?? "消息", source, key: options.key ?? messageKey(source, text), messageId: options.messageId ?? newMessageId(),
+  const source = options.source ?? t("secondarySendCheck.observatory");
+  // i18n-ignore: the default source forms a persisted deduplication key; keep its original identity across languages.
+  const keySource = options.source ?? "观测台";
+  return { agentId, text, what: options.what ?? t("secondarySendCheck.message"), source, key: options.key ?? messageKey(keySource, text), messageId: options.messageId ?? newMessageId(),
     ...(options.group ? { group: options.group } : {}), ...(options.guard ? { guard: options.guard } : {}) };
 }
 /** What the ledger is given for a message: its words, id, key and name, and a quick reply's group and turn. */
@@ -228,8 +231,8 @@ export function answering(prompt: string | null | undefined, title: string) {
   return (agent: AgentState, retry: boolean): string | null => {
     const moved = instant(agent.lastUserMessageAt) !== instant(prompt) || !!agent.activeTurn || agent.status === "running";
     if (!moved && (agent.status === "idle" || agent.status === "closed")) return null;
-    if (!moved) return `「${title}」的状态变了，这条快捷回复不再适用。`;
-    return retry ? `「${title}」已经开始新的一轮，可能就是刚才这条回复；为免发进别的一轮，没有重发，请打开会话确认。` : `「${title}」已经开始新的一轮，这条快捷回复不再适用。`;
+    if (!moved) return t("secondarySendCheck.changedStateThisQuickReplyNo", { value1: title });
+    return retry ? t("secondarySendCheck.hasStartedANewTurnPossibly", { value1: title }) : t("secondarySendCheck.hasStartedANewTurnThis", { value1: title });
   };
 }
 /**
@@ -247,9 +250,9 @@ export function sameRound(latest: () => Promise<string | null | undefined>, roun
     if (expected === null) return null;
     let read: string | null | undefined;
     try { read = await latest(); }
-    catch { throw new Error(`读不到「${title}」最新的轮次，为免答到别的一轮，这次没有发送。请刷新后再试。`); }
+    catch { throw new Error(t("secondarySendCheck.couldNotReadTheLatestTurn", { value1: title })); }
     const seen = instant(read);
     if (seen === null || seen <= expected) return null;
-    return retry ? `「${title}」已经开始新的一轮，可能就是刚才这条回复；为免发进别的一轮，没有重发，请打开会话确认。` : `「${title}」已经开始新的一轮，这条快捷回复不再适用。`;
+    return retry ? t("secondarySendCheck.hasStartedANewTurnPossibly", { value1: title }) : t("secondarySendCheck.hasStartedANewTurnThis", { value1: title });
   };
 }

@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -27,7 +28,7 @@ function choicesOf(profiles: readonly ProfileEntry[], providers: readonly Provid
     const provider = providers?.find(entry => entry.provider === profile.provider), base = quotaBaseOf(profile.provider, bases);
     // Without the host's provider list the profile is offered as configured; a disabled or failing provider is not.
     const ready = !provider || provider.enabled !== false && provider.status !== "error" && provider.status !== "unavailable";
-    const note = !ready ? provider?.enabled === false ? "Provider 已停用" : "Provider 暂时不可用" : provider?.status === "loading" ? "Provider 还在启动" : null;
+    const note = !ready ? provider?.enabled === false ? t("coreHandoverSheet.providerDisabled") : t("coreHandoverSheet.providerTemporarilyUnavailable") : provider?.status === "loading" ? t("coreHandoverSheet.providerStillStarting") : null;
     return { profile, base, sameQuota: base === own, ready, note, provider };
   }).sort((a, b) => Number(!a.ready) - Number(!b.ready) || Number(a.sameQuota) - Number(b.sameQuota));
 }
@@ -73,62 +74,62 @@ export function HandoverSheet({ theme, open, onClose, agent, stopAt, bases, resu
       let note = "";
       if (resume && stopResume) {
         const result = await cancel({ agentId: agent.id, ...(resume.scheduleId ? { scheduleId: resume.scheduleId } : {}) }).catch(() => null);
-        note = result?.status === "canceled" ? "，原会话的续跑已取消" : "；原会话的续跑没能取消，请在停下卡片上再取消一次";
+        note = result?.status === "canceled" ? t("coreHandoverSheet.theOriginalSessionSContinuationWasCanceled") : t("coreHandoverSheet.couldNotCancelTheOriginalSessionS");
         if (result?.status === "canceled") onResumeCanceled?.();
       }
-      toast.show(`已交给「${profile.name}」接着做${note}`, { variant: note.startsWith("；") ? "warning" : "success" });
+      toast.show(t("coreHandoverSheet.handedOverToToContinue", { value1: profile.name, value2: note }), { variant: note.startsWith(t("coreHandoverSheet.message")) ? "warning" : "success" });
       onHandedOver?.(handle.id); onClose();
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason ?? "");
-      setError(message.includes("agent_request_key_conflict") ? "这次停下已经用不同的内容交给过这个 Profile。为免重复新建，先在会话列表里看看交接出去的 Agent。"
-        : message.includes("agent_request_outcome_unknown") ? "宿主没有确认新建的结果，可能已经建好了。先在会话列表里看看，再决定要不要重试。"
-        : message || "新建失败，请重试");
+      setError(message.includes("agent_request_key_conflict") ? t("coreHandoverSheet.thisStopHasAlreadyBeenHandedTo")
+        : message.includes("agent_request_outcome_unknown") ? t("coreHandoverSheet.paseoDidNotConfirmCreationTheAgent")
+        : message || t("coreHandoverSheet.couldNotCreateTryAgain"));
     } finally { setBusy(false); }
   };
   const violet = hue(theme, "violet");
-  return <Sheet title="交给另一个 Provider" open={open} onClose={onClose}>
-    <MetaLine theme={theme} numberOfLines={3} parts={[`在同一工作区新建一个 Agent，接着做「${agent.title || "这个 Agent"}」没做完的事；原会话不会再收到消息`]} />
-    {!workspace ? <Banner theme={theme} tone="warning" message="这个 Agent 没有工作区，没法在同一工作区新建；可以在 Paseo 里手动开一个会话接着做。" /> : null}
+  return <Sheet title={t("coreHandoverSheet.handOverToAnotherProvider")} open={open} onClose={onClose}>
+    <MetaLine theme={theme} numberOfLines={3} parts={[t("coreHandoverSheet.createAnAgentInTheSameWorkspace", { value1: agent.title || t("coreHandoverSheet.thisAgent") })]} />
+    {!workspace ? <Banner theme={theme} tone="warning" message={t("coreHandoverSheet.thisAgentHasNoWorkspaceSoA")} /> : null}
     <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme} icon="UserRoundCog" tone="violet">用哪个 Profile</PaneLabel>
+      <PaneLabel theme={theme} icon="UserRoundCog" tone="violet">{t("coreHandoverSheet.whichProfile")}</PaneLabel>
       {profiles.isPending ? <Skeleton theme={theme} rows={2} /> : null}
-      {profiles.error ? <Banner theme={theme} tone="danger" message={`Profile 读取失败：${profiles.error.message}`} /> : null}
-      {profiles.data && !profiles.data.length ? <Banner theme={theme} tone="warning" message="主机上还没有 Profile；在 Paseo 设置里添加后再交接。" /> : null}
+      {profiles.error ? <Banner theme={theme} tone="danger" message={t("coreHandoverSheet.couldNotLoadProfiles", { value1: profiles.error.message })} /> : null}
+      {profiles.data && !profiles.data.length ? <Banner theme={theme} tone="warning" message={t("coreHandoverSheet.noProfilesOnThisHostYetAdd")} /> : null}
       <View accessibilityRole="radiogroup" style={{ gap: space.xs }}>
         {choices.map(item => {
           const selected = item.profile.id === profileId;
-          return <Pressable key={item.profile.id} accessibilityRole="radio" accessibilityLabel={`Profile ${item.profile.name}${item.sameQuota ? "，同一额度来源" : ""}${item.note ? `，${item.note}` : ""}`}
+          return <Pressable key={item.profile.id} accessibilityRole="radio" accessibilityLabel={t("coreHandoverSheet.profileDescription", { name: item.profile.name, quota: item.sameQuota ? t("coreHandoverSheet.sameQuotaSource") : "", note: item.note ? t("coreHandoverSheet.message2", { value1: item.note }) : "" })}
             {...aria({ checked: selected, disabled: !item.ready || undefined })} disabled={!item.ready} onPress={() => setProfileId(item.profile.id)}
             style={state => ({ flexDirection: "row", alignItems: "center", gap: space.sm, padding: space.sm, borderRadius: radius.md, borderWidth: selected ? 1.5 : hairline,
               borderColor: selected ? violet : colors.border, backgroundColor: selected ? withAlpha(violet, 0.1) : state.pressed ? colors.surface1 : "transparent", opacity: !item.ready ? 0.45 : item.sameQuota && !selected ? 0.6 : 1 })}>
             <Icon name={selected ? "CircleCheck" : "Circle"} size={16} color={selected ? violet : colors.foregroundMuted} />
             <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, gap: 2 }}>
               <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: fontSize.small, fontWeight: selected ? "700" : "500" }}>{item.profile.name}</Text>
-              <MetaLine theme={theme} parts={[item.profile.provider, item.profile.model, item.profile.modeId ? `模式 ${item.profile.modeId}` : null]} />
+              <MetaLine theme={theme} parts={[item.profile.provider, item.profile.model, item.profile.modeId ? t("coreHandoverSheet.mode", { value1: item.profile.modeId }) : null]} />
             </View>
-            {item.sameQuota ? <Badge theme={theme} label="同一额度来源" tone="amber" icon="BatteryWarning" /> : null}
+            {item.sameQuota ? <Badge theme={theme} label={t("coreHandoverSheet.sameQuotaSource2")} tone="amber" icon="BatteryWarning" /> : null}
             {item.note ? <Badge theme={theme} label={item.note} tone={item.ready ? "info" : "danger"} /> : null}
           </Pressable>;
         })}
       </View>
-      {choice?.sameQuota ? <Banner theme={theme} tone="warning" message={`它和原会话都基于 ${choice.base}：如果用的是同一个账号，额度很可能也已经用完。`} /> : null}
+      {choice?.sameQuota ? <Banner theme={theme} tone="warning" message={t("coreHandoverSheet.bothThisProfileAndTheOriginalSession", { value1: choice.base })} /> : null}
     </View>
-    <TextField theme={theme} label="第一条消息（可以改）" value={text} onChangeText={setText} multiline minHeight={200} />
+    <TextField theme={theme} label={t("coreHandoverSheet.firstMessageEditable")} value={text} onChangeText={setText} multiline minHeight={200} />
     {resume ? <View style={{ gap: space.xs }}>
-      <Banner theme={theme} tone="warning" icon="AlarmClock" message={`原会话还安排着 ${resume.wakeLabel} 的恢复后续跑；交接后两边会同时改同一个工作区。`} />
+      <Banner theme={theme} tone="warning" icon="AlarmClock" message={t("coreHandoverSheet.theOriginalSessionStillHasAContinuation", { value1: resume.wakeLabel })} />
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-        <Text style={{ flexGrow: 1, flexShrink: 1, color: colors.foreground, fontSize: fontSize.small }}>交接后取消原会话的续跑</Text>
-        <Switch theme={theme} label="交接后取消原会话的续跑" value={stopResume} onChange={setStopResume} />
+        <Text style={{ flexGrow: 1, flexShrink: 1, color: colors.foreground, fontSize: fontSize.small }}>{t("coreHandoverSheet.cancelTheOriginalSessionSContinuationAfter")}</Text>
+        <Switch theme={theme} label={t("coreHandoverSheet.cancelTheOriginalSessionSContinuationAfter")} value={stopResume} onChange={setStopResume} />
       </View>
     </View> : null}
     {choice && workspace ? <View style={{ gap: 4, padding: space.sm, borderRadius: radius.md, backgroundColor: colors.surface1 }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>确认后会</Text>
-      <Text style={{ color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>{`在工作区「${place}」用 Profile「${choice.profile.name}」（${providerModelId(choice.profile.provider, choice.profile.model || defaultModelOf(choice.provider?.models))}）新建「${handoverTitle(agent.title, agent.provider)}」，并把上面这条消息作为它的第一条消息发出。`}</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("coreHandoverSheet.afterConfirmation")}</Text>
+      <Text style={{ color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>{t("coreHandoverSheet.createInWorkspaceWithProfileAndSend", { value1: place, value2: choice.profile.name, value3: providerModelId(choice.profile.provider, choice.profile.model || defaultModelOf(choice.provider?.models)), value4: handoverTitle(agent.title, agent.provider) })}</Text>
     </View> : null}
     {error ? <Banner theme={theme} tone="danger" message={error} /> : null}
     <View style={{ flexDirection: "row", gap: space.sm, justifyContent: "flex-end" }}>
-      <Button theme={theme} label="取消" onPress={onClose} />
-      <Button theme={theme} variant="primary" icon="ArrowRightLeft" label="新建并交接" busy={busy} disabled={busy || !choice?.ready || !workspace || !text.trim()} onPress={() => void start()} />
+      <Button theme={theme} label={t("coreHandoverSheet.cancel")} onPress={onClose} />
+      <Button theme={theme} variant="primary" icon="ArrowRightLeft" label={t("coreHandoverSheet.createAndHandOver")} busy={busy} disabled={busy || !choice?.ready || !workspace || !text.trim()} onPress={() => void start()} />
     </View>
   </Sheet>;
 }

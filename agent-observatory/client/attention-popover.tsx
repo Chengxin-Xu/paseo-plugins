@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginPopoverProps } from "@getpaseo/plugin/client";
@@ -32,22 +33,22 @@ export function AttentionPopover({ theme, layout, close, openScreen, store }: Pl
   const listHeight = layout.compact ? 420 : 300 - notes * 25;
   return <View testID="attention-popover" style={{ width: "100%", maxWidth: 380, gap: space.sm }}>
     <View style={{ flexDirection: "row", alignItems: "baseline", gap: space.sm }}>
-      <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: fontSize.title, fontWeight: "700" }}>需要处理</Text>
+      <Text accessibilityRole="header" style={{ color: colors.foreground, fontSize: fontSize.title, fontWeight: "700" }}>{t("coreAttentionPopover.needsAttention")}</Text>
       {count ? <Text style={{ color: hueColor(theme, "amber", "text"), fontSize: fontSize.title, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{count.label}</Text> : null}
       <View style={{ flex: 1 }} />
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>等得最久的在前</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("coreAttentionPopover.longestWaitingFirst")}</Text>
     </View>
-    {!state ? view.error ? <EmptyState theme={theme} icon="WifiOff" title="暂时读不到" message="恢复连接后会自动重试" tone="warning" /> : <Skeleton theme={theme} rows={3} />
-      : !count ? attentionUnreliable(view, now) ? <EmptyState theme={theme} icon="WifiOff" title="暂时读不到" message="会话列表读取失败或已过时，恢复后会自动重试" tone="warning" />
-        : <EmptyState theme={theme} icon="Hourglass" title="正在读取会话" message="稍等片刻再看" />
+    {!state ? view.error ? <EmptyState theme={theme} icon="WifiOff" title={t("coreAttentionPopover.temporarilyUnavailable")} message={t("coreAttentionPopover.willRetryAutomaticallyWhenTheConnectionReturns")} tone="warning" /> : <Skeleton theme={theme} rows={3} />
+      : !count ? attentionUnreliable(view, now) ? <EmptyState theme={theme} icon="WifiOff" title={t("coreAttentionPopover.temporarilyUnavailable")} message={t("coreAttentionPopover.theSessionListFailedToLoadOr")} tone="warning" />
+        : <EmptyState theme={theme} icon="Hourglass" title={t("coreAttentionPopover.loadingSessions")} message={t("coreAttentionPopover.checkAgainInAMoment")} />
       // The list scrolls inside a bounded height, so the way to the full page always stays in view (room for an opened approval).
       : state.entries.length ? <ScrollView style={{ flexGrow: 0, maxHeight: listHeight }} contentContainerStyle={{ gap: 2 }} keyboardShouldPersistTaps="handled">
         {state.entries.map(entry => <EntryBlock key={entry.agentId} theme={theme} entry={entry} now={now} compact={layout.compact} onOpen={() => open({ agent: entry.agentId })} onChanged={changed} />)}
       </ScrollView>
-      : <EmptyState theme={theme} icon="CircleCheck" title="没有需要处理的会话" message="审批、提问、异常和未读结果会出现在这里" tone="success" />}
-    {state?.truncated ? <MetaLine theme={theme} numberOfLines={2} parts={["会话很多，只统计了已读取的部分"]} /> : null}
-    {count && count.value > state!.entries.length ? <MetaLine theme={theme} parts={[`还有 ${count.value - state!.entries.length} 个在观测台里`]} /> : null}
-    <Button theme={theme} variant="primary" icon="Orbit" label="在观测台中查看全部" onPress={() => open({ focus: "attention" })} />
+      : <EmptyState theme={theme} icon="CircleCheck" title={t("coreAttentionPopover.noSessionsNeedAttention")} message={t("coreAttentionPopover.approvalsQuestionsIssuesAndUnreadResultsAppear")} tone="success" />}
+    {state?.truncated ? <MetaLine theme={theme} numberOfLines={2} parts={[t("coreAttentionPopover.thereAreManySessionsCountsCoverOnly")]} /> : null}
+    {count && count.value > state!.entries.length ? <MetaLine theme={theme} parts={[t("coreAttentionPopover.moreInObservatory", { value1: count.value - state!.entries.length })]} /> : null}
+    <Button theme={theme} variant="primary" icon="Orbit" label={t("coreAttentionPopover.viewAllInObservatory")} onPress={() => open({ focus: "attention" })} />
   </View>;
 }
 
@@ -59,18 +60,18 @@ export function AttentionPopover({ theme, layout, close, openScreen, store }: Pl
  */
 function EntryBlock({ theme, entry, now, compact, onOpen, onChanged }: { theme: PluginTheme; entry: AttentionEntry; now: number; compact: boolean; onOpen: () => void; onChanged: () => void }) {
   const [approving, setApproving] = useState(false), { colors } = theme;
-  const nudge = popoverReplies(entry), title = entry.title || "未命名 Agent";
+  const nudge = popoverReplies(entry), title = entry.title || t("coreAttentionPopover.untitledAgent");
   // Under the row's text on wide layouts; nearly full width on phones, so a request's choices fit on one line.
   const amber = hue(theme, "amber", "text"), indent = compact ? space.sm : 32;
   return <View style={{ gap: space.xs }}>
     <EntryRow theme={theme} entry={entry} now={now} onPress={onOpen} />
     {entry.phase === "approval" ? <View style={{ gap: space.sm, paddingLeft: indent, paddingRight: space.sm, paddingBottom: approving ? space.sm : 0 }}>
-      <Pressable accessibilityRole="button" accessibilityLabel={approving ? `收起「${title}」的审批` : `在这里审批「${title}」的请求`} accessibilityState={{ expanded: approving }} {...aria({ expanded: approving })}
+      <Pressable accessibilityRole="button" accessibilityLabel={approving ? t("coreAttentionPopover.collapseApprovalsFor", { value1: title }) : t("coreAttentionPopover.reviewRequestsForHere", { value1: title })} accessibilityState={{ expanded: approving }} {...aria({ expanded: approving })}
         onPress={() => setApproving(!approving)} hitSlop={{ top: 6, bottom: 6 }}
         style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, alignSelf: "flex-start", minHeight: 28, paddingHorizontal: 10, borderRadius: radius.full,
           borderWidth: hairline, borderColor: hue(theme, "amber", "line"), backgroundColor: approving ? hue(theme, "amber", "soft") : "transparent", opacity: state.pressed ? 0.8 : 1 })}>
         <Icon name="Hand" size={13} color={hue(theme, "amber")} />
-        <Text style={{ color: amber, fontSize: fontSize.small, fontWeight: "600" }}>{approving ? "收起审批" : "在这里审批"}</Text>
+        <Text style={{ color: amber, fontSize: fontSize.small, fontWeight: "600" }}>{approving ? t("coreAttentionPopover.collapseApprovals") : t("coreAttentionPopover.reviewHere")}</Text>
         <Icon name={approving ? "ChevronUp" : "ChevronDown"} size={13} color={colors.foregroundMuted} />
       </Pressable>
       {approving ? <AgentApprovals theme={theme} agentId={entry.agentId} compact={compact} onOpen={onOpen} onSettled={onChanged} /> : null}
@@ -85,13 +86,13 @@ function EntryBlock({ theme, entry, now, compact, onOpen, onChanged }: { theme: 
 function EntryRow({ theme, entry, now, onPress }: { theme: PluginTheme; entry: AttentionEntry; now: number; onPress: () => void }) {
   const { colors } = theme;
   const reason = reasonText({ phase: entry.phase, pending: entry.pending, pendingCount: entry.pendingCount, stop: entry.stop, lastError: entry.lastError, note: entry.note }, now);
-  return <Pressable accessibilityRole="button" accessibilityLabel={`打开 ${entry.title || "未命名 Agent"}，${reason.text}`} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={t("coreAttentionPopover.open", { value1: entry.title || t("coreAttentionPopover.untitledAgent"), value2: reason.text })} onPress={onPress}
     style={state => ({ flexDirection: "row", alignItems: "flex-start", gap: space.sm, padding: space.sm, borderRadius: radius.md,
       backgroundColor: state.pressed || (state as { hovered?: boolean }).hovered ? colors.surface1 : "transparent" })}>
     <View style={{ paddingTop: 2 }}><StatusGlyph theme={theme} phase={entry.phase as Phase} size={16} /></View>
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-        <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "600" }}>{entry.title || "未命名 Agent"}</Text>
+        <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "600" }}>{entry.title || t("coreAttentionPopover.untitledAgent")}</Text>
         {entry.since ? <Text style={{ color: colors.foregroundMuted, fontSize: 11, fontVariant: ["tabular-nums"] }}>{relativeTime(entry.since, now)}</Text> : null}
       </View>
       <Text numberOfLines={2} style={{ color: hueColor(theme, reason.hue, "text"), fontSize: fontSize.meta, lineHeight: 17, fontWeight: "600" }}>{reason.text}</Text>

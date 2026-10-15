@@ -1,3 +1,4 @@
+import { t, type MessageId } from "../shared/text";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -615,10 +616,13 @@ test("a backfilled stop of the open turn survives the close, and a tail read can
 });
 
 test("storage notices are whole Chinese sentences: saving failed, or what was saved could not be read (opus-F74)", async () => {
-  // Every notice the store can set, from its source: none is English.
+  // Every notice the store can set, resolving catalog IDs from its source: none is English.
   const source = await readFile(new URL("../server/telemetry.ts", import.meta.url), "utf8");
   const notices = [...source.matchAll(/(?:setError\(|persistenceError = )(?:quarantine \? )?(["`])((?:(?!\1).)+)\1(?: : (["`])((?:(?!\3).)+)\3)?/g)]
     .flatMap(match => [match[2], match[4]]).filter((text): text is string => !!text);
+  for (const line of source.split("\n").filter(line => /setError\(|persistenceError =/.test(line))) {
+    for (const match of line.matchAll(/\bt\("([^"\n]+)"/g)) notices.push(t(match[1] as MessageId, { value1: "EACCES", error: "EACCES" }));
+  }
   assert.ok(notices.length >= 8, `found ${notices.length}`);
   for (const notice of notices) chineseNotice(notice.replace(/\$\{errorCode\(error\)\}/g, "EACCES"));
   // Saved analytics that cannot be restored: a notice of its own, the lifecycle history stays.

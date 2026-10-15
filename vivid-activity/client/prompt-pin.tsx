@@ -1,3 +1,5 @@
+import { useI18n } from "./i18n-client";
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
@@ -133,6 +135,7 @@ function pinColors(theme: Theme, mode: string): { mark: string; text: string; gr
  * on its own, a history that no longer has it).
  */
 export function PinnedPrompt({ agentId, pin, theme, mode, metrics }: { agentId: string; pin: PromptPin; theme: Theme; mode: string; metrics: DensityMetrics }) {
+  useI18n();
   const answer = usePromptText(agentId, pin);
   // Entrance once when the pin moves down to a new stretch of activity while you watch; not when the chat opens.
   const [fresh] = useState(() => {
@@ -153,6 +156,7 @@ export function PinnedPromptView({ title, text: raw, truncated, theme, mode, met
   metrics: DensityMetrics;
   fresh?: boolean;
 }) {
+  useI18n();
   const [expanded, setExpanded] = useState(false);
   const [width, setWidth] = useState(0);
   const colors = useMemo(() => pinColors(theme, mode), [mode, theme]);
@@ -199,22 +203,22 @@ export function PinnedPromptView({ title, text: raw, truncated, theme, mode, met
           <Icon name="Pin" size={12} color={colors.mark} />
           <Text numberOfLines={1} style={styles.title}>{title}</Text>
           <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 4 }} />
-          <CopyButton value={raw} label={truncated ? `复制${title}（前 ${MAX_PROMPT_CHARS} 字）` : `复制${title}`} theme={theme} styles={styles.copy} />
+          <CopyButton value={raw} label={truncated ? t("ui.copyFirstCharacters", { title: title, count: MAX_PROMPT_CHARS }) : t("ui.copy", { label: title })} theme={theme} styles={styles.copy} />
         </View>
         {open ? (
           <>
             <ScrollView style={{ maxHeight: EXPANDED_MAX_HEIGHT }} nestedScrollEnabled showsVerticalScrollIndicator>
               <Text selectable style={styles.body}>{text}</Text>
-              {truncated ? <Text style={styles.note}>{`提问太长，这里只显示前 ${MAX_PROMPT_CHARS} 字。`}</Text> : null}
+              {truncated ? <Text style={styles.note}>{t("ui.thisPromptIsLongOnly", { count: MAX_PROMPT_CHARS })}</Text> : null}
             </ScrollView>
-            <Pressable accessibilityRole="button" accessibilityLabel={`收起${title}`} {...aria({ expanded: true })} onPress={toggle} hitSlop={8} style={{ alignSelf: "flex-start" }}>
-              <Text style={styles.toggle}>收起</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel={t("ui.collapse2", { title: title })} {...aria({ expanded: true })} onPress={toggle} hitSlop={8} style={{ alignSelf: "flex-start" }}>
+              <Text style={styles.toggle}>{t("ui.collapse")}</Text>
             </Pressable>
           </>
         ) : longer ? (
-          <Pressable accessibilityRole="button" accessibilityHint="展开全文" {...aria({ expanded: false })} onPress={toggle} style={{ gap: 1 }}>
+          <Pressable accessibilityRole="button" accessibilityHint={t("ui.expandFullText")} {...aria({ expanded: false })} onPress={toggle} style={{ gap: 1 }}>
             <Text numberOfLines={PIN_COLLAPSED_LINES} style={styles.body}>{text}</Text>
-            <Text style={styles.toggle}>展开全部</Text>
+            <Text style={styles.toggle}>{t("ui.expandAll")}</Text>
           </Pressable>
         ) : (
           <Text selectable style={styles.body}>{text}</Text>

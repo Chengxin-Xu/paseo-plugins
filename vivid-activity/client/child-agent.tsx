@@ -1,3 +1,6 @@
+import { translator } from "../shared/i18n";
+import { useI18n } from "./i18n-client";
+import { t } from "../shared/text";
 import { useAgent, useRpc } from "@getpaseo/plugin/client";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
@@ -50,11 +53,11 @@ const EMPTY_STATE: ChildTimelineState = {
 
 /** 0.5.0: what the card says while it does not read on its own (shared/child-agent.ts childFeedHold). */
 const ASLEEP_NOTES: Partial<Record<NonNullable<ChildFeedHold>, string>> = {
-  closed: "子 Agent 已关闭（没有加载），不自动读取它的动态：读取会让 Paseo 重新加载它。",
-  unknown: "Agent 列表里没有这个子 Agent（可能已归档或删除），不自动读取它的动态。",
+  get closed() { return t("ui.thisSubagentIsClosedUnloaded"); },
+  get unknown() { return t("ui.thisSubagentIsMissingFrom"); },
 };
 /** 0.6.0: the status check failed (connection, timeout), so the card could not tell whether reading would load the child. */
-const UNCONFIRMED_NOTE = "暂时确认不了子 Agent 是否还加载着，先不自动读取它的动态；有新动静时会再确认。";
+const unconfirmedNote = () => t("ui.theSubagentSLoadedState");
 
 export function ChildAgentTimeline({
   agentId,
@@ -74,12 +77,12 @@ export function ChildAgentTimeline({
   const entries = feed.view.entries;
   const status = feed.status;
   const statusColor = status ? childStatusColor(status, palette) : palette.categoryColors.agent;
-  const note = feed.hold ? ASLEEP_NOTES[feed.hold] : feed.view.unconfirmed ? UNCONFIRMED_NOTE : undefined;
+  const note = feed.hold ? ASLEEP_NOTES[feed.hold] : feed.view.unconfirmed ? unconfirmedNote() : undefined;
 
   return (
     <View ref={rootRef} style={styles.childTimelineSection}>
       <View style={styles.childTimelineHeader}>
-        <Text style={styles.detailLabel}>子 Agent 实时动态</Text>
+        <Text style={styles.detailLabel}>{t("ui.liveSubagentActivity")}</Text>
         {status ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             {status === "running" || status === "initializing" ? (
@@ -101,19 +104,19 @@ export function ChildAgentTimeline({
             size="sm"
             tone="fuchsia"
             icon="Eye"
-            label={entries.length > 0 ? "再读一次" : "查看动态"}
-            accessibilityLabel={entries.length > 0 ? "再读一次子 Agent 动态" : "查看子 Agent 动态"}
+            label={entries.length > 0 ? t("ui.readOnceMore") : t("ui.viewActivity")}
+            accessibilityLabel={entries.length > 0 ? t("ui.readSubagentActivityOnceMore") : t("ui.viewSubagentActivity")}
             busy={feed.view.loading}
             onPress={feed.readNow}
           />
         </View>
       ) : null}
       {feed.view.error ? (
-        <Text style={styles.empty}>读取子 Agent 动态失败：{feed.view.error}</Text>
+        <Text style={styles.empty}>{t("ui.childReadFailed", { error: feed.view.error })}</Text>
       ) : feed.view.loading && entries.length === 0 ? (
-        <Text style={styles.empty}>正在读取子 Agent 动态…</Text>
+        <Text style={styles.empty}>{t("ui.readingSubagentActivity")}</Text>
       ) : entries.length === 0 ? (
-        note ? null : <Text style={styles.empty}>{feed.hold ? "正在读取子 Agent 动态…" : "子 Agent 还没有动态。"}</Text>
+        note ? null : <Text style={styles.empty}>{feed.hold ? t("ui.readingSubagentActivity") : t("ui.noSubagentActivityYet")}</Text>
       ) : (
         <View style={styles.childTimelineList}>
           {entries.map((entry) => (
@@ -132,6 +135,8 @@ export function ChildAgentTimeline({
 
 /** Reads compact summaries, driven by the host's Agent updates; never subscribes to a child timeline. */
 export function useChildFeed(agentId: string, foreground: boolean, visibility: CardVisibility) {
+  useI18n();
+  const catalog = translator();
   const rpc = useRpc(childSummaryRpc);
   const rpcRef = useRef(rpc);
   rpcRef.current = rpc;
@@ -146,12 +151,19 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
   const runningRef = useRef(false);
   const dispatchRef = useRef<((event: ChildFeedEvent) => void) | null>(null);
   const previousSignal = useRef({ agentId, listed, stamp });
+  const previousAgent = useRef(agentId);
 
   useEffect(() => {
     let disposed = false;
     const start = childFeedStart(holdRef.current);
     let state: ChildFeedState = start.state;
-    setView(EMPTY_STATE);
+    // A catalog change drops translated summaries, but must retain a confirmed closed/missing state.
+    // The host list may still say running; forgetting that state could wake an unloaded child.
+    const sameAgent = previousAgent.current === agentId;
+    previousAgent.current = agentId;
+    setView((current) => sameAgent
+      ? { ...EMPTY_STATE, agent: current.agent, heard: current.heard, unconfirmed: current.unconfirmed }
+      : EMPTY_STATE);
     const refresh = createChildRefresh({
       allowed: () => holdRef.current === null,
       async read(manual, statusOnly) {
@@ -201,7 +213,7 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
     dispatchRef.current = dispatch;
     if (start.read) refresh.request({ immediate: true });
     return () => { disposed = true; dispatchRef.current = null; refresh.dispose(); };
-  }, [agentId]);
+  }, [agentId, catalog.language, catalog.hash]);
 
   useEffect(() => {
     dispatchRef.current?.({ type: "hold", hold, running: runningRef.current });

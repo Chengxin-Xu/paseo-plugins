@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { PluginSurfaceProps } from '@getpaseo/plugin/client';
 import { Icon } from '@getpaseo/plugin/client/react-native';
 import { Pressable, Text, View, type ViewStyle } from 'react-native';
@@ -63,7 +64,7 @@ export function StateChip({ theme, label, count, tone, motion, selected, onPress
   const { colors } = theme, lit = !!tone && (count ?? 0) > 0;
   const color = tone && (lit || selected) ? toneColor(theme, tone, 'mark') : colors.foregroundMuted;
   const mark = !tone ? null : motion === 'spin' ? <Spinner size={12} color={color} active={lit} /> : <LiveDot color={color} size={7} live={lit && motion === 'ping'} />;
-  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={count === undefined ? label : `${label} ${count}`} accessibilityState={{ selected }} {...webPressed(selected)} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }}
+  return <Pressable testID={testID} accessibilityRole="button" accessibilityLabel={count === undefined ? label : t("browserLooks.labelWithCount", { label, count })} accessibilityState={{ selected }} {...webPressed(selected)} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }}
     style={(state) => ({ flexDirection: 'row', alignItems: 'center', gap: space.xs + 2, minHeight: control.sm, paddingHorizontal: 10, borderRadius: radius.full, borderWidth: hairline,
       borderColor: selected ? tone ? toneColor(theme, tone, 'mark') : colors.foregroundMuted : lit ? toneColor(theme, tone!, 'line') : colors.border,
       backgroundColor: selected ? tone ? toneColor(theme, tone, 'soft') : colors.surface2 : (state as Interaction).hovered ? colors.surface1 : 'transparent', opacity: state.pressed ? 0.8 : 1 })}>

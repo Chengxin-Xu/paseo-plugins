@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { REPLY_NUDGES } from "./reply";
@@ -50,6 +51,9 @@ export const telemetryEventSchema = z.object({
     "archived",
   ]),
   label: z.string().max(160),
+  /** Generated lifecycle text is rendered by stable type; old freeform labels remain untouched. */
+  localized: z.boolean().optional(),
+  permissionAllowed: z.boolean().optional(),
   durationMs: z.number().nonnegative().optional(),
 });
 
@@ -89,25 +93,26 @@ export type TurnOutcome = NonNullable<AgentTelemetry["outcome"]>;
  * The Chinese name of a lifecycle event. Events stored by 2.12 and earlier carry English labels; the type decides, so
  * old and new events read the same.
  */
-export function eventLabel(event: Pick<TelemetryEvent, "type" | "label">): string {
-  // Labels written since 2.13 are Chinese already and shown as they are.
-  if (/[\u3400-\u9fff]/.test(event.label)) return event.label;
+export function eventLabel(event: Pick<TelemetryEvent, "type" | "label" | "localized" | "permissionAllowed">): string {
+  // i18n-ignore: Exact historical lifecycle labels distinguish generated text from freeform stored content.
+  const historical = new Set(["新建 Agent", "开始一轮", "完成一轮", "一轮失败", "一轮被取消", "等你审批或回答", "请求已批准", "请求被拒绝或撤销", "已归档"]);
+  if (!event.localized && /[\u3400-\u9fff]/.test(event.label) && !historical.has(event.label)) return event.label;
   switch (event.type) {
-    case "created": return "新建 Agent";
-    case "turn_started": return "开始一轮";
-    case "turn_completed": return "完成一轮";
-    case "turn_failed": return "一轮失败";
-    case "turn_canceled": return "一轮被取消";
-    case "permission_requested": return "等你审批或回答";
-    case "permission_resolved": return /declined|cleared|拒绝|取消/i.test(event.label) ? "请求被拒绝或撤销" : "请求已批准";
-    case "archived": return "已归档";
+    case "created": return t("sharedTelemetry.m001");
+    case "turn_started": return t("sharedTelemetry.m002");
+    case "turn_completed": return t("sharedTelemetry.m003");
+    case "turn_failed": return t("sharedTelemetry.m004");
+    case "turn_canceled": return t("sharedTelemetry.m005");
+    case "permission_requested": return t("sharedTelemetry.m006");
+    case "permission_resolved": return (event.permissionAllowed === false || (event.permissionAllowed === undefined && /declined|denied|cleared|拒绝|取消|撤销/i.test(event.label))) ? t("sharedTelemetry.m007") : t("sharedTelemetry.m008"); // i18n-ignore: Match original Chinese provider/user text; this is parser data.
+    case "archived": return t("sharedTelemetry.m009");
   }
 }
 
 /** Client cache update: deltas replace changed summaries and prepend new events, trimmed to the server's retained count. */
 export function mergeTelemetry(previous: TelemetryState | undefined, response: TelemetryResponse | TelemetrySnapshot): TelemetryState {
   if (!("mode" in response)) return response;
-  if (response.mode !== "full" && !previous) throw new Error("本地观测缓存已失效，正在重新读取完整记录。");
+  if (response.mode !== "full" && !previous) throw new Error(t("sharedTelemetry.m010"));
   if (response.mode === "unchanged") return previous!;
   if (response.mode === "full" || !previous) { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return snapshot; }
   const { mode: _mode, unchanged: _unchanged, eventCount, ...snapshot } = response;

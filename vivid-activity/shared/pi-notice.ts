@@ -1,3 +1,5 @@
+import { t, type MessageId } from "./text";
+import { joinList } from "./i18n";
 /**
  * 本地补丁（0.6.0，opus-B30，格式整理借鉴 springkill/paseo-pi-kit 的 Pi 消息对照表）：Pi 扩展发来的通知画成中文卡片。
  *
@@ -24,6 +26,7 @@ import { formatDuration } from "./timing";
 export type PiNoticeState = "done" | "failed" | "stopped" | "running" | "info";
 export type PiNoticeLook = "shell" | "agent" | "web" | "plan" | "other";
 export interface PiNoticeField {
+  readonly id?: string;
   label: string;
   value: string;
   mono?: boolean;
@@ -87,7 +90,7 @@ function lines(text: string): string[] {
 /** What `.` in a regex does not match: a capture made of `.` holds none of these. */
 const LINE_BREAK = /[\n\r\u2028\u2029]/;
 const LINE_ENDS = ["\n", "\r", "\u2028", "\u2029"];
-const quoted = (name: string | undefined) => (name ? `「${name}」` : "");
+const quoted = (name: string | undefined) => (name ? t("piNotice.quoted", { name }) : "");
 
 /**
  * Undoes the extensions' XML escaping. Every producer escapes `&` first (pi-background-tasks `escapeXml()`: & < > only;
@@ -228,20 +231,24 @@ function extra(body: string | undefined, header: string): string | undefined {
   return text && text !== header.trim() ? text : undefined;
 }
 
-type FieldSpec = readonly [label: string, value: unknown, mono?: boolean];
+type FieldSpec = readonly [label: string, value: unknown, mono?: boolean, id?: string];
 /** Non-empty fields in order; a repeated label gets a number so labels stay unique (UI keys use them). */
 function fields(...specs: ReadonlyArray<FieldSpec | null | undefined | false>): PiNoticeField[] {
   const out: PiNoticeField[] = [];
   const seen = new Set<string>();
   for (const spec of specs) {
     if (!spec) continue;
-    const [label, raw, mono] = spec;
+    const [label, raw, mono, id] = spec;
     const value = typeof raw === "number" ? (Number.isFinite(raw) ? String(raw) : "") : typeof raw === "string" ? raw.trim() : "";
     if (!value) continue;
     let unique = label;
     for (let n = 2; seen.has(unique); n++) unique = `${label} ${n}`;
     seen.add(unique);
-    out.push(mono ? { label: unique, value, mono: true } : { label: unique, value });
+    const field: PiNoticeField = mono ? { label: unique, value, mono: true } : { label: unique, value };
+    // Presentation identity is metadata: preserve the parser’s enumerable output contract, and let the timeline
+    // projection copy the id explicitly when it serializes the field for a renderer.
+    if (id) Object.defineProperty(field, "id", { value: id });
+    out.push(field);
   }
   return out;
 }
@@ -254,20 +261,20 @@ function duration(ms: number | undefined): string | undefined {
 
 // 0.6.0-local.5: every module-level value here is built without side effects (`@__PURE__`), so a bundle that takes only
 // `isPiNotice` or `piNoticeStatus` (the resident timeline) leaves the parsers out; they ship in pi-chunk.client.tsx.
-const STATUS: ReadonlyMap<string, { state: PiNoticeState; words: string }> = /* @__PURE__ */ statusTable();
-function statusTable(): Map<string, { state: PiNoticeState; words: string }> {
-  const table = new Map<string, { state: PiNoticeState; words: string }>();
-  const define = (state: PiNoticeState, words: string, keys: readonly string[]) => {
-    for (const key of keys) table.set(key, { state, words });
+const STATUS: ReadonlyMap<string, { state: PiNoticeState; words: MessageId; sentence: MessageId }> = /* @__PURE__ */ statusTable();
+function statusTable(): Map<string, { state: PiNoticeState; words: MessageId; sentence: MessageId }> {
+  const table = new Map<string, { state: PiNoticeState; words: MessageId; sentence: MessageId }>();
+  const define = (state: PiNoticeState, words: MessageId, sentence: MessageId, keys: readonly string[]) => {
+    for (const key of keys) table.set(key, { state, words, sentence });
   };
-  define("done", "已完成", ["completed", "complete", "success", "succeeded", "successful", "done", "finished"]);
-  define("failed", "失败", ["failed", "failure", "error", "errored"]);
-  define("stopped", "已停止", ["killed", "stopped", "aborted", "interrupted"]);
-  define("stopped", "已取消", ["cancelled", "canceled"]);
-  define("stopped", "已暂停", ["paused"]);
-  define("stopped", "超时", ["timed out", "timed_out", "timeout"]);
-  define("running", "运行中", ["running", "in_progress", "in-progress", "in progress", "started"]);
-  define("running", "排队中", ["queued", "pending"]);
+  define("done", "piNotice.completed", "piNotice.completedSentence", ["completed", "complete", "success", "succeeded", "successful", "done", "finished"]);
+  define("failed", "piNotice.failed", "piNotice.failedSentence", ["failed", "failure", "error", "errored"]);
+  define("stopped", "piNotice.stopped", "piNotice.stoppedSentence", ["killed", "stopped", "aborted", "interrupted"]);
+  define("stopped", "piNotice.canceled", "piNotice.canceledSentence", ["cancelled", "canceled"]);
+  define("stopped", "piNotice.paused", "piNotice.pausedSentence", ["paused"]);
+  define("stopped", "piNotice.timeout", "piNotice.timeoutSentence", ["timed out", "timed_out", "timeout"]);
+  define("running", "piNotice.running", "piNotice.runningSentence", ["running", "in_progress", "in-progress", "in progress", "started"]);
+  define("running", "piNotice.queued", "piNotice.queuedSentence", ["queued", "pending"]);
   return table;
 }
 
@@ -291,13 +298,15 @@ export function piNoticeState(status: unknown): PiNoticeState {
 }
 /** Chinese words for a status (已完成、失败、已停止、已暂停、运行中…); an unknown one stays as sent. */
 export function piStatusWords(status: unknown): string {
-  return STATUS.get(statusKey(status))?.words ?? (typeof status === "string" ? status.trim() : "");
+  const id = STATUS.get(statusKey(status))?.words;
+  return id ? t(id) : (typeof status === "string" ? status.trim() : "");
 }
 /** 已完成（退出码 0）; an unknown status reads 状态：<raw>. */
-function outcome(status: string | undefined, extraWords?: string): string {
-  const words = status === undefined ? "" : STATUS.has(statusKey(status)) ? piStatusWords(status) : `状态：${status}`;
+function outcome(status: string | undefined, extraWords?: string, sentence = true): string {
+  const known = STATUS.get(statusKey(status));
+  const words = status === undefined ? "" : known ? t(sentence ? known.sentence : known.words) : t("piNotice.rawStatus", { status });
   if (!extraWords) return words;
-  return words ? `${words}（${extraWords}）` : extraWords;
+  return words ? t("piNotice.outcomeDetail", { words, detail: extraWords }) : extraWords;
 }
 /** The state of several runs together: any failure is red, then any stop, then anything still running; all done is done. */
 function overall(states: readonly PiNoticeState[]): PiNoticeState {
@@ -311,7 +320,7 @@ function overall(states: readonly PiNoticeState[]): PiNoticeState {
 function tally(words: readonly string[]): string {
   const counts = new Map<string, number>();
   for (const word of words) counts.set(word, (counts.get(word) ?? 0) + 1);
-  return Array.from(counts, ([word, count]) => `${count} 个${word}`).join("、");
+  return joinList(Array.from(counts, ([word, count]) => t("piNotice.tallyCount", { count, word })));
 }
 
 // ── 后台任务：pi-background-tasks 的 background-task-notification ─────────────
@@ -334,24 +343,24 @@ function backgroundTask({ text, details }: Input): Draft | null {
   const outputFile = str(d.outputPath) ?? tag(xml, "output-file");
   const id = str(d.id) ?? tag(xml, "task-id");
   if (!name && !status && exit === undefined && !error && !outputFile && !id) return null;
-  const result = outcome(status, exit !== undefined ? `退出码 ${exit}` : signal ? `信号 ${signal}` : undefined);
+  const result = outcome(status, exit !== undefined ? t("piNotice.exitCode", { code: exit }) : signal ? t("piNotice.signalCode", { signal }) : undefined);
   return {
     look: "shell",
-    title: "后台任务",
-    summary: name ? `${quoted(name)}${result}` : result || "后台任务通知",
+    title: t("piNotice.backgroundTask"),
+    summary: name ? t("piNotice.namedOutcome", { name: quoted(name), outcome: result }) : result || t("piNotice.backgroundNotice"),
     state: piNoticeState(status),
     fields: fields(
-      ["任务", name],
-      ["状态", status ? piStatusWords(status) : undefined],
-      ["退出码", exit],
-      ["信号", signal, true],
-      ["错误", error],
-      ["命令", str(d.command), true],
-      ["类型", d.isAgent === true ? "后台 Agent" : undefined],
-      ["模型", str(d.model), true],
-      ["输出文件", outputFile, true],
-      ["耗时", start !== undefined && end !== undefined ? duration(end - start) : undefined],
-      ["任务 ID", id, true],
+      [t("piNotice.task"), name],
+      [t("piNotice.status"), status ? piStatusWords(status) : undefined, false, "status"],
+      [t("piNotice.exitCodeLabel"), exit],
+      [t("piNotice.signal"), signal, true],
+      [t("piNotice.error"), error],
+      [t("piNotice.command"), str(d.command), true],
+      [t("piNotice.type"), d.isAgent === true ? t("piNotice.backgroundAgent") : undefined],
+      [t("piNotice.model"), str(d.model), true],
+      [t("piNotice.outputFile"), outputFile, true],
+      [t("piNotice.duration"), start !== undefined && end !== undefined ? duration(end - start) : undefined],
+      [t("piNotice.taskId"), id, true],
     ),
   };
 }
@@ -375,8 +384,8 @@ const GROUP_HEADER = /^Background tasks completed \((\d+)\):(.*)$/;
 const RUN_META = /^(Session|Session file|Session share error|Retention-managed async directory|Workflow run|Child runs|Reconciled detached child|Parallel handoff): (.*)$/;
 const SAVED_OUTPUT = /^(?:Output saved to: (.+) \([^()\n]*\)\. Read this file if needed\.|Full output: (.+) \([^()\n]*\)\. Read it if needed\.)$/;
 const ERROR_LINE = /^Error(?: \(([^)]*)\))?: (.+)$/;
-const SESSION_ZH: Readonly<Record<string, string>> = { session: "会话", "session file": "会话文件", "session share error": "会话分享失败" };
-const BLOCKER_ZH: Readonly<Record<string, string>> = { addressed: "已处理", unaddressed: "未处理", stalemate: "僵持" };
+const SESSION_ZH: Readonly<Record<string, MessageId>> = { session: "piNotice.session", "session file": "piNotice.sessionFile", "session share error": "piNotice.sessionShareFailed" };
+const BLOCKER_ZH: Readonly<Record<string, MessageId>> = { addressed: "piNotice.addressed", unaddressed: "piNotice.unaddressed", stalemate: "piNotice.stalemate" };
 
 // 0.6.0-local.2（codex-vivid-F1）：下面几段原来是正则，懒惰的名字遇到行里的换行符（`.` 不匹配它）会越过后面每个 `**`、
 // ` (schedule ` 重试到行尾，平方级。现在按下标找，结果与原正则相同（shared/backtracking.test.ts 用随机输入对照）。
@@ -458,6 +467,7 @@ interface Run {
   errors?: string[];
   outputFile?: string;
   body?: string;
+  hasChildOutputs?: boolean;
 }
 
 /** Later sources win, but only with values they actually have. */
@@ -473,7 +483,7 @@ function merged<T extends object>(...parts: ReadonlyArray<Partial<T> | undefined
 
 function scheduleText(name: string | undefined, id: string | undefined): string | undefined {
   if (!id) return name;
-  return name && name !== id ? `${name}（${id}）` : id;
+  return name && name !== id ? t("piNotice.scheduleName", { name, id }) : id;
 }
 
 /**
@@ -499,13 +509,13 @@ function childRunsText(value: string): string | undefined {
     const at = raw.indexOf("=");
     const key = at >= 0 ? raw.slice(0, at) : undefined;
     const run = real(at >= 0 ? raw.slice(at + 1) : raw);
-    return [key, run, match?.[1] ? piStatusWords(match[1]) : undefined].filter(Boolean).join(" · ");
+    return [key, run, match?.[1] ? piStatusWords(match[1]) : undefined].filter(Boolean).join(t("piNotice.factSeparator"));
   });
   return str(rows.filter(Boolean).join("\n"));
 }
 function childRunsFromDetails(value: unknown): string | undefined {
   const rows = records(value).map((child) =>
-    [str(child.workflowKey) ?? str(child.agent), real(str(child.runId)), str(child.status) ? piStatusWords(child.status) : undefined].filter(Boolean).join(" · "),
+    [str(child.workflowKey) ?? str(child.agent), real(str(child.runId)), str(child.status) ? piStatusWords(child.status) : undefined].filter(Boolean).join(t("piNotice.factSeparator")),
   );
   return str(rows.filter(Boolean).join("\n"));
 }
@@ -515,26 +525,26 @@ function childOutputLine(line: string): string | null {
   const head = /^- key=(\S*) run=(\S*) status=(\S*)$/.exec(line);
   if (head) {
     const status = real(head[3]);
-    return `• ${[real(head[1]) ?? "子任务", status ? piStatusWords(status) : undefined, real(head[2]) ? `运行 ${head[2]}` : undefined].filter(Boolean).join(" · ")}`;
+    return `• ${[real(head[1]) ?? t("piNotice.childTask"), status ? piStatusWords(status) : undefined, real(head[2]) ? t("piNotice.runReference", { id: head[2] }) : undefined].filter(Boolean).join(t("piNotice.factSeparator"))}`;
   }
   const omitted = /^- (\d+) additional child preview\(s\) omitted by notice budget/.exec(line);
-  if (omitted) return `另有 ${omitted[1]} 个子任务的预览因篇幅省略。`;
+  if (omitted) return t("piNotice.omittedPreviews", { count: omitted[1] });
   const preview = /^ {4}\| ?(.*)$/.exec(line);
   if (preview) return `  ${preview[1]}`;
   if (line === "  Preview:") return null;
   const unavailable = /^ {2}Preview: unavailable \((.+)\)$/.exec(line);
-  if (unavailable) return `  预览不可用（${unavailable[1]}）`;
+  if (unavailable) return t("piNotice.unavailablePreview", { reason: unavailable[1] });
   const saved = /^ {2}Saved output: (.+)$/.exec(line);
-  if (saved) return real(saved[1]) ? `  保存的输出：${saved[1]}` : null;
+  if (saved) return real(saved[1]) ? t("piNotice.savedOutput", { path: saved[1] }) : null;
   const artifact = /^ {2}Output artifact \(retention-managed\): (.+)$/.exec(line);
-  if (artifact) return `  输出存档：${artifact[1]}`;
+  if (artifact) return t("piNotice.outputArtifact", { path: artifact[1] });
   const structured = /^ {2}Structured output \(retention-managed\): (.+)$/.exec(line);
-  if (structured) return `  结构化输出：${structured[1]}`;
+  if (structured) return t("piNotice.structuredOutput", { path: structured[1] });
   const failed = /^ {2}(Output artifact|Structured output) verification failed: (.+)$/.exec(line);
-  if (failed) return `  ${failed[1] === "Output artifact" ? "输出存档" : "结构化输出"}校验失败：${failed[2]}`;
+  if (failed) return t(failed[1] === "Output artifact" ? "piNotice.outputVerificationFailed" : "piNotice.structuredVerificationFailed", { error: failed[2] });
   const error = /^ {2}Error: (.+)$/.exec(line);
-  if (error) return `  错误：${error[1]}`;
-  if (line === "  Full output unavailable") return "  完整输出不可用";
+  if (error) return t("piNotice.indentedError", { error: error[1] });
+  if (line === "  Full output unavailable") return t("piNotice.fullOutputUnavailable");
   return line;
 }
 
@@ -545,17 +555,17 @@ function previewText(rows: readonly string[]): string {
   for (const line of rows) {
     if (line === "Child outputs:") {
       section = "children";
-      out.push("子任务输出：");
+      out.push(t("piNotice.childOutputs"));
       continue;
     }
     if (line === "Watchdog blockers:") {
       section = "blockers";
-      out.push("监督阻断：");
+      out.push(t("piNotice.watchdogBlockers"));
       continue;
     }
     if (line === "High-importance watchdog concerns:") {
       section = "concerns";
-      out.push("重要的监督疑虑：");
+      out.push(t("piNotice.watchdogConcerns"));
       continue;
     }
     if (section === "children") {
@@ -566,13 +576,13 @@ function previewText(rows: readonly string[]): string {
     if (section === "blockers") {
       const blocker = blockerParts(line);
       if (blocker) {
-        out.push(`- ${blocker[0]}：${blocker[1]}（${BLOCKER_ZH[blocker[2]]}）`);
+        out.push(t("piNotice.blockerDetails", { name: blocker[0], detail: blocker[1], status: t(BLOCKER_ZH[blocker[2]]!) }));
         continue;
       }
       section = "text";
     }
     if (section === "concerns") {
-      out.push(line.replace(/^Evidence: /, "依据：").replace(/^Recommended action: /, "给 Agent 的建议："));
+      out.push(line.replace(/^Evidence: /, t("piNotice.evidencePrefix")).replace(/^Recommended action: /, t("piNotice.recommendationPrefix")));
       continue;
     }
     out.push(line);
@@ -625,7 +635,7 @@ function runFromLines(source: readonly string[], agent: string | undefined, stat
   while (failed && start < end) {
     const error = ERROR_LINE.exec(source[start]!);
     if (!error) break;
-    errors.push(error[1] ? `${error[1]}：${error[2]}` : error[2]!);
+    errors.push(error[1] ? t("piNotice.errorDetail", { kind: error[1], error: error[2] }) : error[2]!);
     start++;
   }
   if (errors.length) run.errors = errors;
@@ -639,6 +649,7 @@ function runFromLines(source: readonly string[], agent: string | undefined, stat
     else kept.push(row);
   }
   run.body = previewText(kept);
+  run.hasChildOutputs = kept.includes("Child outputs:");
   return run;
 }
 
@@ -668,34 +679,41 @@ function taskInfoZh(raw: string | undefined): { text: string; dispatching: boole
   if (!info) return undefined;
   const inner = /^\((.*)\)$/.exec(info)?.[1]?.trim() ?? info;
   const running = /^(dispatch complete; )?(\d+) (?:child|children) running or uncollected$/.exec(inner);
-  if (running) return { text: `${running[1] ? "已派发完，" : ""}${running[2]} 个子任务仍在运行或未收取`, dispatching: true };
+  if (running) return { text: t(running[1] ? "piNotice.dispatchedChildren" : "piNotice.runningChildren", { count: running[2] }), dispatching: true };
   return { text: inner, dispatching: false };
+}
+
+function namedOutcome(name: string | undefined, words: string): string {
+  return name ? t("piNotice.namedOutcome", { name: quoted(name), outcome: words }) : words;
+}
+function runOutcome(name: string | undefined, info: string | undefined, words: string): string {
+  return info ? t("piNotice.withInfo", { name: quoted(name), info, outcome: words }) : namedOutcome(name, words);
 }
 
 function runSummary(run: Run): { summary: string; state: PiNoticeState } {
   const info = taskInfoZh(run.taskInfo);
   // A workflow whose dispatch finished while children still run is not done yet: say so, without a green check.
-  if (info?.dispatching && piNoticeState(run.status) === "done") return { summary: `${quoted(run.agent)}${info.text}`, state: "info" };
-  return { summary: `${quoted(run.agent)}${info ? `（${info.text}）` : ""}${outcome(run.status)}`, state: piNoticeState(run.status) };
+  if (info?.dispatching && piNoticeState(run.status) === "done") return { summary: namedOutcome(run.agent, info.text), state: "info" };
+  return { summary: runOutcome(run.agent, info?.text, outcome(run.status)), state: piNoticeState(run.status) };
 }
 
 function runFields(run: Run): PiNoticeField[] {
   const session = run.session;
   return fields(
-    ["状态", run.status ? piStatusWords(run.status) : undefined],
-    ["错误", run.errors?.join("\n")],
-    ["来源", run.foreground ? "前台运行转到后台" : undefined],
-    ["定时任务", run.schedule],
-    ["耗时", duration(run.durationMs)],
-    ["输出文件", run.outputFile, true],
+    [t("piNotice.status"), run.status ? piStatusWords(run.status) : undefined, false, "status"],
+    [t("piNotice.error"), run.errors?.join("\n")],
+    [t("piNotice.source"), run.foreground ? t("piNotice.detached") : undefined],
+    [t("piNotice.schedule"), run.schedule],
+    [t("piNotice.duration"), duration(run.durationMs)],
+    [t("piNotice.outputFile"), run.outputFile, true],
     // The child outputs in the body already name every child run.
-    ["子运行", run.body?.includes("子任务输出：") ? undefined : run.childRuns],
-    ["工作流", run.workflowRunId, true],
-    ["工作流回执", run.receipt, true],
-    ["并行交接", run.handoff, true],
-    ["接上的运行", run.reconciled, true],
-    session ? [SESSION_ZH[session.label] ?? "会话", session.value, session.label !== "session share error"] : null,
-    ["运行 ID", run.runId !== run.workflowRunId ? run.runId : undefined, true],
+    [t("piNotice.childRun"), run.hasChildOutputs ? undefined : run.childRuns],
+    [t("piNotice.workflow"), run.workflowRunId, true],
+    [t("piNotice.workflowReceipt"), run.receipt, true],
+    [t("piNotice.parallelHandoff"), run.handoff, true],
+    [t("piNotice.reconciledRun"), run.reconciled, true],
+    session ? [SESSION_ZH[session.label] ? t(SESSION_ZH[session.label]!) : t("piNotice.session"), session.value, session.label !== "session share error"] : null,
+    [t("piNotice.runId"), run.runId !== run.workflowRunId ? run.runId : undefined, true],
   );
 }
 
@@ -713,7 +731,7 @@ function subagentNotify({ text, details }: Input): Draft | null {
   const agent = fromDetails.agent ?? head.agent;
   const run = merged<Run>(head, single ? runFromLines(rows.slice(1), agent, fromDetails.status ?? head.status) : {}, fromDetails) as Run;
   const { summary, state } = runSummary(run);
-  return { look: "agent", title: "子 Agent", summary: summary || "子 Agent 通知", state, fields: runFields(run), ...(run.body ? { body: run.body } : {}) };
+  return { look: "agent", title: t("piNotice.subagent"), summary: summary || t("piNotice.subagentNotice"), state, fields: runFields(run), ...(run.body ? { body: run.body } : {}) };
 }
 
 /** A grouped completion: the numbered sections, matched to the agents the header (or details) lists, in order. */
@@ -757,30 +775,30 @@ function groupedRuns(rows: readonly string[], group: RegExpExecArray | null, run
   const state = overall(states);
   const allDone = states.length > 0 && states.every((each) => each === "done");
   const summary = allDone
-    ? `${n} 个子 Agent 已完成${headerAgents.length && headerAgents.length <= 3 ? `：${headerAgents.map(quoted).join("")}` : ""}`
-    : `${n} 个子 Agent 已结束：${tally(words)}`;
+    ? headerAgents.length && headerAgents.length <= 3 ? t("piNotice.groupCompletedNamed", { count: n, names: headerAgents.map(quoted).reduce((names, name) => names ? t("piNotice.nameList", { names, name }) : name, "") }) : t("piNotice.groupCompleted", { count: n })
+    : t("piNotice.groupEnded", { count: n, outcomes: tally(words) });
   const body = sections
     .map((run) => {
       const info = taskInfoZh(run.taskInfo);
       // Not `1. scout`: previews are often numbered lists themselves.
-      const head = `${quoted(run.agent ?? "子 Agent")}${info ? `（${info.text}）` : ""}${outcome(run.status) || "状态未知"}`;
+      const head = runOutcome(run.agent ?? t("piNotice.subagent"), info?.text, outcome(run.status) || t("piNotice.unknownStatus"));
       const session = run.session;
       return tidy([
         head,
-        ...(run.errors ?? []).map((error) => `错误：${error}`),
-        run.schedule ? `定时任务：${run.schedule}` : "",
+        ...(run.errors ?? []).map((error) => t("piNotice.errorText", { error })),
+        run.schedule ? t("piNotice.scheduleText", { schedule: run.schedule }) : "",
         run.body ?? "",
-        run.outputFile ? `输出文件：${run.outputFile}` : "",
-        session ? `${SESSION_ZH[session.label] ?? "会话"}：${session.value}` : "",
+        run.outputFile ? t("piNotice.outputFileText", { path: run.outputFile }) : "",
+        session ? t("piNotice.fieldValue", { label: SESSION_ZH[session.label] ? t(SESSION_ZH[session.label]!) : t("piNotice.session"), value: session.value }) : "",
       ].filter((row, at) => at === 0 || row !== ""));
     })
     .join("\n\n");
   return {
     look: "agent",
-    title: "子 Agent",
+    title: t("piNotice.subagent"),
     summary,
     state,
-    fields: fields(["各子 Agent", sections.map((run) => `${run.agent ?? "子 Agent"}：${outcome(run.status) || "状态未知"}`).join("\n")]),
+    fields: fields([t("piNotice.eachSubagent"), sections.map((run) => t("piNotice.fieldValue", { label: run.agent ?? t("piNotice.subagent"), value: outcome(run.status) || t("piNotice.unknownStatus") })).join("\n")]),
     ...(body ? { body } : {}),
   };
 }
@@ -848,24 +866,24 @@ function agentRunFromXml(block: string): AgentRun {
   };
 }
 
-function agentRunOutcome(run: AgentRun): { state: PiNoticeState; words: string } {
-  if (run.neverStarted) return { state: "stopped", words: "排队时被停止，没有运行" };
+function agentRunOutcome(run: AgentRun, sentence = true): { state: PiNoticeState; words: string } {
+  if (run.neverStarted) return { state: "stopped", words: t(sentence ? "piNotice.neverStartedSentence" : "piNotice.neverStarted") };
   const key = statusKey(run.status);
-  if (key === "steered") return { state: "done", words: "已完成（到了轮数上限，被引导收尾）" };
-  if (key === "aborted") return { state: "stopped", words: "已停止（超出轮数上限）" };
-  return { state: piNoticeState(run.status), words: outcome(run.status) };
+  if (key === "steered") return { state: "done", words: t(sentence ? "piNotice.steeredSentence" : "piNotice.steered") };
+  if (key === "aborted") return { state: "stopped", words: t(sentence ? "piNotice.turnLimitStoppedSentence" : "piNotice.turnLimitStopped") };
+  return { state: piNoticeState(run.status), words: outcome(run.status, undefined, sentence) };
 }
 
 function agentRunFields(run: AgentRun, words: string): PiNoticeField[] {
   return fields(
-    ["状态", words],
-    ["错误", run.error],
-    ["工具调用次数", run.toolUses],
-    ["Token", run.totalTokens],
-    ["轮数", run.turnCount ? (run.maxTurns ? `${run.turnCount}/${run.maxTurns}` : run.turnCount) : undefined],
-    ["耗时", duration(run.durationMs)],
-    ["输出文件", run.outputFile, true],
-    ["Agent ID", run.id, true],
+    [t("piNotice.status"), words, false, "status"],
+    [t("piNotice.error"), run.error],
+    [t("piNotice.toolCalls"), run.toolUses],
+    [t("piNotice.tokens"), run.totalTokens],
+    [t("piNotice.turnsLabel"), run.turnCount ? (run.maxTurns ? `${run.turnCount}/${run.maxTurns}` : run.turnCount) : undefined],
+    [t("piNotice.duration"), duration(run.durationMs)],
+    [t("piNotice.outputFile"), run.outputFile, true],
+    [t("piNotice.agentId"), run.id, true],
   );
 }
 
@@ -888,29 +906,29 @@ function subagentNotification({ text, details }: Input): Draft | null {
     const result = run.result && !NO_RESULT.has(run.result) ? run.result : undefined;
     return {
       look: "agent",
-      title: "子 Agent",
-      summary: `${quoted(run.description)}${words}` || "子 Agent 通知",
+      title: t("piNotice.subagent"),
+      summary: namedOutcome(run.description, words) || t("piNotice.subagentNotice"),
       state,
-      fields: agentRunFields(run, words),
+      fields: agentRunFields(run, agentRunOutcome(run, false).words),
       ...(result ? { body: result } : {}),
     };
   }
-  const outcomes = runs.map(agentRunOutcome);
+  const outcomes = runs.map((run) => agentRunOutcome(run));
   const partial = /^Background agent group completed: .*\bpartial\b/m.test(text);
   const allDone = outcomes.every((each) => each.state === "done");
-  const tail = partial ? "，其余仍在运行" : "";
+
   const body = runs
     .map((run, index) => {
       const result = run.result && !NO_RESULT.has(run.result) ? run.result : "";
-      return tidy([`${quoted(run.description ?? run.id ?? "子 Agent")}${outcomes[index]!.words}`, run.error ? `错误：${run.error}` : "", result].filter((row, at) => at === 0 || row !== ""));
+      return tidy([namedOutcome(run.description ?? run.id ?? t("piNotice.subagent"), outcomes[index]!.words), run.error ? t("piNotice.errorText", { error: run.error }) : "", result].filter((row, at) => at === 0 || row !== ""));
     })
     .join("\n\n");
   return {
     look: "agent",
-    title: "子 Agent",
-    summary: allDone ? `${runs.length} 个子 Agent 已完成${tail}` : `${runs.length} 个子 Agent 已结束：${tally(outcomes.map((each) => each.words))}${tail}`,
+    title: t("piNotice.subagent"),
+    summary: allDone ? t(partial ? "piNotice.groupCompletedPartial" : "piNotice.groupCompleted", { count: runs.length }) : t(partial ? "piNotice.groupEndedPartial" : "piNotice.groupEnded", { count: runs.length, outcomes: tally(outcomes.map((each) => each.words)) }),
     state: overall(outcomes.map((each) => each.state)),
-    fields: fields(["各子 Agent", runs.map((run, index) => `${run.description ?? run.id ?? "子 Agent"}：${outcomes[index]!.words}`).join("\n")]),
+    fields: fields([t("piNotice.eachSubagent"), runs.map((run, index) => t("piNotice.fieldValue", { label: run.description ?? run.id ?? t("piNotice.subagent"), value: outcomes[index]!.words })).join("\n")]),
     ...(body ? { body } : {}),
   };
 }
@@ -926,13 +944,13 @@ function subagentUpdate({ text, details }: Input): Draft | null {
   const message = str(d.message) ?? tag(xml, "message") ?? (xml ? undefined : str(text));
   if (!description && !message) return null;
   const gist = clip(headline(message), 120);
-  const summary = `${description ? `${quoted(description)}发来进展` : "发来进展"}${gist ? `：${gist}` : ""}（仍在运行）`;
+  const summary = t(description ? (gist ? "piNotice.progressNamedDetail" : "piNotice.progressNamed") : (gist ? "piNotice.progressDetail" : "piNotice.progress"), { name: quoted(description), detail: gist });
   return {
     look: "agent",
-    title: "子 Agent",
+    title: t("piNotice.subagent"),
     summary,
     state: "info",
-    fields: fields(["Agent ID", str(d.id) ?? tag(xml, "task-id"), true]),
+    fields: fields([t("piNotice.agentId"), str(d.id) ?? tag(xml, "task-id"), true]),
     ...(extra(message, gist) ? { body: message } : {}),
   };
 }
@@ -946,10 +964,10 @@ function workspaceNotice({ text, details }: Input): Draft | null {
   const gist = clip(headline(notice), 120);
   return {
     look: "agent",
-    title: "子 Agent",
-    summary: `${description ? `${quoted(description)}的` : ""}隔离工作区已拆除，留下了改动${gist ? `：${gist}` : ""}`,
+    title: t("piNotice.subagent"),
+    summary: t(description ? (gist ? "piNotice.workspaceNamedDetail" : "piNotice.workspaceNamed") : (gist ? "piNotice.workspaceDetail" : "piNotice.workspace"), { name: quoted(description), detail: gist }),
     state: "info",
-    fields: fields(["Agent ID", str(d.id) ?? tag(xml, "task-id"), true]),
+    fields: fields([t("piNotice.agentId"), str(d.id) ?? tag(xml, "task-id"), true]),
     ...(extra(notice, gist) ? { body: notice } : {}),
   };
 }
@@ -988,14 +1006,14 @@ function supervisorRequest({ text, details }: Input): Draft | null {
   const agent = str(d.agent) ?? lineValue(text, "Agent");
   const message = str(d.requestBody) ?? supervisorMessage(rows);
   if (!reason && !agent && !message) return null;
-  const asks = reason === "progress_update" ? "发来进展" : reason === "interview_request" ? "请父 Agent 回答一组问题" : "请父 Agent 做决定";
   const gist = clip(headline(message), 120);
+  const messageId = reason === "progress_update" ? (gist ? "piNotice.requestProgressDetail" : "piNotice.requestProgress") : reason === "interview_request" ? (gist ? "piNotice.requestInterviewDetail" : "piNotice.requestInterview") : (gist ? "piNotice.requestDecisionDetail" : "piNotice.requestDecision");
   return {
     look: "agent",
-    title: "子 Agent 请求",
-    summary: `${agent ? quoted(agent) : "子 Agent "}${asks}${gist ? `：${gist}` : ""}`,
+    title: t("piNotice.subagentRequest"),
+    summary: t(messageId, { name: agent ? quoted(agent) : t("piNotice.subagentLead"), detail: gist }),
     state: "info",
-    fields: fields(["运行 ID", str(d.runId) ?? lineValue(text, "Run"), true], ["请求 ID", str(d.requestId) ?? str(d.id) ?? /replyTo: "([^"]+)"/.exec(text)?.[1], true]),
+    fields: fields([t("piNotice.runId"), str(d.runId) ?? lineValue(text, "Run"), true], [t("piNotice.requestId"), str(d.requestId) ?? str(d.id) ?? /replyTo: "([^"]+)"/.exec(text)?.[1], true]),
     ...(extra(message, gist) ? { body: message } : {}),
   };
 }
@@ -1010,20 +1028,20 @@ function supervisorReminder({ customType, text, details }: Input): Draft {
   const n = ids.length;
   return {
     look: "agent",
-    title: "子 Agent 请求",
+    title: t("piNotice.subagentRequest"),
     summary: blocked
-      ? `${n ? `${n} 个子 Agent 请求` : "子 Agent 的请求"}一直没有回复（提醒次数已用完）`
-      : `提醒父 Agent 回复${n ? ` ${n} 个子 Agent 请求` : "子 Agent 的请求"}`,
+      ? t(n ? "piNotice.requestsUnansweredCount" : "piNotice.requestsUnanswered", { count: n })
+      : t(n ? "piNotice.requestReminderCount" : "piNotice.requestReminder", { count: n }),
     state: "info",
-    fields: fields(["请求 ID", ids.join("\n"), true]),
+    fields: fields([t("piNotice.requestId"), ids.join("\n"), true]),
   };
 }
 
 /** Fixed sentences pi-subagents sends the parent (no details): completion reminders and the compaction resume. */
-const PARENT_SENTENCES: ReadonlyMap<string, string> = /* @__PURE__ */ new Map([
-  ["subagent-completion-unanswered", "提醒父 Agent 处理子 Agent 的完成结果"],
-  ["subagent-completion-unhandled", "父 Agent 没有处理子 Agent 的完成结果（提醒次数已用完，结果已保存）"],
-  ["subagent-compaction-resume", "上下文压缩完成，父 Agent 继续原来的任务；后台子 Agent 的结果稍后单独送达"],
+const PARENT_SENTENCES: ReadonlyMap<string, MessageId> = /* @__PURE__ */ new Map([
+  ["subagent-completion-unanswered", "piNotice.completionReminder"],
+  ["subagent-completion-unhandled", "piNotice.completionUnhandled"],
+  ["subagent-compaction-resume", "piNotice.compactionResume"],
 ]);
 
 // 0.77 `src/runs/shared/subagent-control.js` formatControlNoticeMessage()：首行 `Subagent needs attention: {agent}` 或
@@ -1039,29 +1057,29 @@ function factsFromEvent(event: Rec): string | undefined {
   const toolMs = num(event.currentToolDurationMs);
   const tool = str(event.currentTool);
   const facts = [
-    elapsed !== undefined ? `已过 ${duration(elapsed) ?? "不到 1 秒"}` : undefined,
-    num(event.turns) !== undefined ? `${event.turns} 轮` : undefined,
-    num(event.tokens) !== undefined ? `${event.tokens} token` : undefined,
-    num(event.toolCount) !== undefined ? `${event.toolCount} 次工具调用` : undefined,
-    tool ? `工具 ${tool}${toolMs !== undefined && duration(toolMs) ? ` 已运行 ${duration(toolMs)}` : ""}` : undefined,
-    str(event.currentPath) ? `路径 ${event.currentPath}` : undefined,
+    elapsed !== undefined ? t("piNotice.elapsed", { duration: duration(elapsed) ?? t("piNotice.underSecond") }) : undefined,
+    num(event.turns) !== undefined ? t("piNotice.turnCount", { count: num(event.turns) }) : undefined,
+    num(event.tokens) !== undefined ? t("piNotice.tokenCount", { count: num(event.tokens) }) : undefined,
+    num(event.toolCount) !== undefined ? t("piNotice.toolCount", { count: num(event.toolCount) }) : undefined,
+    tool ? t(toolMs !== undefined && duration(toolMs) ? "piNotice.toolElapsed" : "piNotice.toolName", { tool, duration: duration(toolMs) }) : undefined,
+    str(event.currentPath) ? t("piNotice.path", { path: str(event.currentPath) }) : undefined,
   ].filter(Boolean);
-  return facts.length ? facts.join(" · ") : undefined;
+  return facts.length ? facts.join(t("piNotice.factSeparator")) : undefined;
 }
 function factsFromText(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const facts = value.split(" | ").map((fact) => {
     const part = fact.trim();
     const elapsed = /^elapsed (\d+)s$/.exec(part);
-    if (elapsed) return `已过 ${duration(Number(elapsed[1]) * 1000) ?? "不到 1 秒"}`;
+    if (elapsed) return t("piNotice.elapsed", { duration: duration(Number(elapsed[1]) * 1000) ?? t("piNotice.underSecond") });
     const counted = /^(\d+) (turns|tokens|tools)$/.exec(part);
-    if (counted) return `${counted[1]} ${counted[2] === "turns" ? "轮" : counted[2] === "tokens" ? "token" : "次工具调用"}`;
+    if (counted) return t(counted[2] === "turns" ? "piNotice.turnCount" : counted[2] === "tokens" ? "piNotice.tokenCount" : "piNotice.toolCount", { count: counted[1] });
     const tool = /^tool (\S+)(?: (\d+)s)?$/.exec(part);
-    if (tool) return `工具 ${tool[1]}${tool[2] ? ` 已运行 ${duration(Number(tool[2]) * 1000) ?? `${tool[2]} 秒`}` : ""}`;
+    if (tool) return t(tool[2] ? "piNotice.toolElapsed" : "piNotice.toolName", { tool: tool[1], duration: duration(Number(tool[2]) * 1000) ?? t("piNotice.seconds", { count: tool[2] }) });
     const path = /^path (.+)$/.exec(part);
-    return path ? `路径 ${path[1]}` : part;
+    return path ? t("piNotice.path", { path: path[1] }) : part;
   });
-  return str(facts.filter(Boolean).join(" · "));
+  return str(facts.filter(Boolean).join(t("piNotice.factSeparator")));
 }
 
 function controlNotice({ text, details }: Input): Draft | null {
@@ -1075,38 +1093,38 @@ function controlNotice({ text, details }: Input): Draft | null {
   const runLine = lineValue(text, "Run");
   const index = int(event.index);
   const step = index !== undefined ? index + 1 : int(/\sstep (\d+)$/.exec(runLine ?? "")?.[1]);
-  const name = agent ? quoted(agent) : "子 Agent ";
+  const name = agent ? quoted(agent) : t("piNotice.subagentLead");
   let summary: string;
   let state: PiNoticeState = "info";
   if (type === "failed" || reason === "completion_guard") {
-    summary = `${name}失败`;
+    summary = t("piNotice.subagentFailed", { name });
     state = "failed";
   } else if (type === "active_long_running") {
     const elapsed = duration(num(event.elapsedMs));
-    summary = `${name}仍在运行，已经跑了${elapsed ? ` ${elapsed}` : "很久"}`;
+    summary = t(elapsed ? "piNotice.longRunningDuration" : "piNotice.longRunning", { name, duration: elapsed });
   } else {
     const elapsed = duration(num(event.elapsedMs));
     const tool = str(event.currentTool);
     const toolTime = duration(num(event.currentToolDurationMs));
     const why =
-      reason === "idle" && elapsed ? `${elapsed}没有动静`
-      : reason === "tool_open_threshold" ? `${tool ? `工具 ${tool}` : "一个工具"}${toolTime ? ` 已运行 ${toolTime}` : "运行很久了"}`
-      : reason === "supervisor_request" ? "在等父 Agent 回复它的请求"
-      : reason === "tool_failures" ? "改动类工具接连失败"
+      reason === "idle" && elapsed ? t("piNotice.idleDuration", { duration: elapsed })
+      : reason === "tool_open_threshold" ? t(tool ? (toolTime ? "piNotice.toolElapsed" : "piNotice.toolLongRunning") : (toolTime ? "piNotice.unnamedToolElapsed" : "piNotice.unnamedToolLongRunning"), { tool, duration: toolTime })
+      : reason === "supervisor_request" ? t("piNotice.waitingParent")
+      : reason === "tool_failures" ? t("piNotice.toolFailures")
       : undefined;
-    summary = `${name}需要父 Agent 关注${why ? `（${why}）` : ""}`;
+    summary = t(why ? "piNotice.needsAttentionReason" : "piNotice.needsAttention", { name, reason: why });
   }
   return {
     look: "agent",
-    title: "子 Agent",
+    title: t("piNotice.subagent"),
     summary,
     state,
     fields: fields(
-      ["信号", str(event.message) ?? lineValue(text, "Signal")],
-      ["运行情况", factsFromEvent(event) ?? factsFromText(lineValue(text, "Facts"))],
-      ["最近的失败", str(event.recentFailureSummary) ?? lineValue(text, "Recent failures")],
-      ["步骤", step],
-      ["运行 ID", str(event.runId) ?? runLine?.split(/\s+/)[0], true],
+      [t("piNotice.signal"), str(event.message) ?? lineValue(text, "Signal")],
+      [t("piNotice.runFacts"), factsFromEvent(event) ?? factsFromText(lineValue(text, "Facts"))],
+      [t("piNotice.recentFailures"), str(event.recentFailureSummary) ?? lineValue(text, "Recent failures")],
+      [t("piNotice.step"), step],
+      [t("piNotice.runId"), str(event.runId) ?? runLine?.split(/\s+/)[0], true],
     ),
   };
 }
@@ -1124,16 +1142,16 @@ function steeringNotice({ text, details }: Input): Draft | null {
   if (!state) return null;
   const message = str(d.message) ?? str(tidy(rows.slice(1).filter((row) => !/^Request:\s/.test(row) && row.trim() !== "Inspect the run status before sending another correction.")));
   const summary =
-    state === "failed" ? "给子 Agent 的引导消息没有送达"
-    : state === "partial" ? "给子 Agent 的引导消息只送达了一部分"
-    : state === "recovered" ? "给子 Agent 的引导消息在恢复运行后送达"
-    : `给子 Agent 的引导消息：${state}`;
+    state === "failed" ? t("piNotice.steeringFailed")
+    : state === "partial" ? t("piNotice.steeringPartial")
+    : state === "recovered" ? t("piNotice.steeringRecovered")
+    : t("piNotice.steeringState", { state });
   return {
     look: "agent",
-    title: "子 Agent",
+    title: t("piNotice.subagent"),
     summary,
     state: state === "failed" || state === "partial" ? "failed" : "info",
-    fields: fields(["说明", message], ["运行 ID", str(d.runId) ?? real(str(header?.[2])), true], ["请求 ID", str(d.requestId) ?? lineValue(text, "Request"), true]),
+    fields: fields([t("piNotice.description"), message], [t("piNotice.runId"), str(d.runId) ?? real(str(header?.[2])), true], [t("piNotice.requestId"), str(d.requestId) ?? lineValue(text, "Request"), true]),
   };
 }
 
@@ -1143,20 +1161,20 @@ function steeringNotice({ text, details }: Input): Draft | null {
 //   [<blocker_guidance>]（写死的模型指令）</subagent_watchdog>
 // 文本过了 escapeXml，属性还多转 `&quot;`。details 是同一份 warning（多 error、stalemateRepeats 等）。Pi 自己说
 // 「斟酌，别盲从」，所以这是提醒，不是结论：info，阻断级也一样。
-const SEVERITY_ZH: Readonly<Record<string, string>> = { concern: "疑虑", blocker: "阻断" };
-const IMPORTANCE_ZH: Readonly<Record<string, string>> = { low: "低", medium: "中", high: "高" };
-const CATEGORY_ZH: Readonly<Record<string, string>> = {
-  correctness: "正确性",
-  "missed-constraint": "漏掉约束",
-  "test-gap": "测试缺口",
-  "unsafe-change": "不安全的改动",
-  "scope-drift": "偏离范围",
-  "stale-fact": "过时的事实",
-  "loop-risk": "可能陷入循环",
-  other: "其他",
+const SEVERITY_ZH: Readonly<Record<string, MessageId>> = { concern: "piNotice.concern", blocker: "piNotice.blocker" };
+const IMPORTANCE_ZH: Readonly<Record<string, MessageId>> = { low: "piNotice.low", medium: "piNotice.medium", high: "piNotice.high" };
+const CATEGORY_ZH: Readonly<Record<string, MessageId>> = {
+  correctness: "piNotice.correctness",
+  "missed-constraint": "piNotice.missedConstraint",
+  "test-gap": "piNotice.testGap",
+  "unsafe-change": "piNotice.unsafeChange",
+  "scope-drift": "piNotice.scopeDrift",
+  "stale-fact": "piNotice.staleFact",
+  "loop-risk": "piNotice.loopRisk",
+  other: "piNotice.other",
 };
-const WATCHER_ZH: Readonly<Record<string, string>> = { main: "主 Agent", child: "子 Agent", lsp: "LSP" };
-const WARNING_STATE_ZH: Readonly<Record<string, string>> = { stale: "已过时", failed: "审查失败", stalemate: "僵持，已停止继续运行", resolved: "已解决", suppressed: "已压下" };
+const WATCHER_ZH: Readonly<Record<string, MessageId>> = { main: "piNotice.mainAgent", child: "piNotice.subagent", lsp: "piNotice.lsp" };
+const WARNING_STATE_ZH: Readonly<Record<string, MessageId>> = { stale: "piNotice.stale", failed: "piNotice.reviewFailed", stalemate: "piNotice.stalemateStopped", resolved: "piNotice.resolved", suppressed: "piNotice.suppressed" };
 
 function watchdogWarning({ text, details }: Input): Draft | null {
   const d = rec(details) ?? {};
@@ -1171,23 +1189,23 @@ function watchdogWarning({ text, details }: Input): Draft | null {
   const category = str(d.category) ?? attr(xml, "category");
   const importance = str(d.importance) ?? attr(xml, "importance");
   const source = str(d.source) ?? attr(xml, "source");
-  const states = [warningState && warningState !== "displayed" && warningState !== "confirmed" && warningState !== "candidate" ? (WARNING_STATE_ZH[warningState] ?? warningState) : undefined, stale && warningState !== "stale" ? "已过时" : undefined];
+  const states = [warningState && warningState !== "displayed" && warningState !== "confirmed" && warningState !== "candidate" ? (WARNING_STATE_ZH[warningState] ? t(WARNING_STATE_ZH[warningState]!) : warningState) : undefined, stale && warningState !== "stale" ? t("piNotice.stale") : undefined];
   return {
     look: "agent",
-    title: "监督提醒",
-    summary: `${agent ? quoted(agent) : ""}${severity === "blocker" ? "有阻断问题" : "有疑虑"}${shownPoint ? `：${shownPoint}` : ""}`,
+    title: t("piNotice.watchdog"),
+    summary: t(agent ? (severity === "blocker" ? (shownPoint ? "piNotice.watchdogBlockerDetail" : "piNotice.watchdogBlocker") : (shownPoint ? "piNotice.watchdogConcernDetail" : "piNotice.watchdogConcern")) : (severity === "blocker" ? (shownPoint ? "piNotice.watchdogBlockerUnnamedDetail" : "piNotice.watchdogBlockerUnnamed") : (shownPoint ? "piNotice.watchdogConcernUnnamedDetail" : "piNotice.watchdogConcernUnnamed")), { name: quoted(agent), detail: shownPoint }),
     state: "info",
     fields: fields(
-      ["要点", point && shownPoint !== point ? point : undefined],
-      ["级别", severity ? (SEVERITY_ZH[severity] ?? severity) : undefined],
-      ["重要性", importance ? (IMPORTANCE_ZH[importance] ?? importance) : undefined],
-      ["类别", category ? (CATEGORY_ZH[category] ?? category) : undefined],
-      ["来源", source ? (WATCHER_ZH[source] ?? source) : undefined],
-      ["依据", str(d.evidence) ?? tag(xml, "evidence")],
-      ["给 Agent 的建议", str(d.recommendedAction) ?? tag(xml, "recommended_action")],
-      ["监督状态", states.filter(Boolean).join("，")],
-      ["审查错误", warningState === "failed" ? str(d.error) : undefined],
-      ["运行 ID", str(d.runId) ?? tag(xml, "run_id"), true],
+      [t("piNotice.point"), point && shownPoint !== point ? point : undefined],
+      [t("piNotice.severity"), severity ? (SEVERITY_ZH[severity] ? t(SEVERITY_ZH[severity]!) : severity) : undefined],
+      [t("piNotice.importance"), importance ? (IMPORTANCE_ZH[importance] ? t(IMPORTANCE_ZH[importance]!) : importance) : undefined],
+      [t("piNotice.category"), category ? (CATEGORY_ZH[category] ? t(CATEGORY_ZH[category]!) : category) : undefined],
+      [t("piNotice.source"), source ? (WATCHER_ZH[source] ? t(WATCHER_ZH[source]!) : source) : undefined],
+      [t("piNotice.evidence"), str(d.evidence) ?? tag(xml, "evidence")],
+      [t("piNotice.recommendation"), str(d.recommendedAction) ?? tag(xml, "recommended_action")],
+      [t("piNotice.watchdogStatus"), states.filter(Boolean).join(t("piNotice.commaSeparator"))],
+      [t("piNotice.reviewError"), warningState === "failed" ? str(d.error) : undefined],
+      [t("piNotice.runId"), str(d.runId) ?? tag(xml, "run_id"), true],
     ),
   };
 }
@@ -1198,8 +1216,8 @@ function watchdogClarification({ text }: Input): Draft {
   const gist = clip(headline(body), 160);
   return {
     look: "agent",
-    title: "监督提醒",
-    summary: `请 Agent 澄清${gist ? `：${gist}` : ""}`,
+    title: t("piNotice.watchdog"),
+    summary: t(gist ? "piNotice.clarifyDetail" : "piNotice.clarify", { detail: gist }),
     state: "info",
     fields: [],
     ...(extra(body, gist) ? { body } : {}),
@@ -1241,16 +1259,16 @@ function waitSubscription({ text, details }: Input): Draft | null {
   const key = statusKey(result);
   let summary: string;
   let state: PiNoticeState;
-  if (key === "timed out") [summary, state] = ["等待超时，运行可能还在进行", "info"];
-  else if (key === "needs attention") [summary, state] = ["等待的运行需要父 Agent 关注", "info"];
-  else if (key === "could not be reconciled" || key === "reconciliation failed") [summary, state] = ["等待的运行无法确认结局", "failed"];
-  else [summary, state] = [`等待的运行${outcome(result)}`, piNoticeState(result)];
+  if (key === "timed out") [summary, state] = [t("piNotice.waitTimeout"), "info"];
+  else if (key === "needs attention") [summary, state] = [t("piNotice.waitAttention"), "info"];
+  else if (key === "could not be reconciled" || key === "reconciliation failed") [summary, state] = [t("piNotice.waitUnconfirmed"), "failed"];
+  else [summary, state] = [t("piNotice.waitOutcome", { outcome: outcome(result) }), piNoticeState(result)];
   return {
     look: "agent",
-    title: "子 Agent",
+    title: t("piNotice.subagent"),
     summary,
     state,
-    fields: fields(["运行 ID", str(d.runId) ?? parsed?.[2], true], ["完成归档", completionArchive(parsed?.[4] ?? ""), true]),
+    fields: fields([t("piNotice.runId"), str(d.runId) ?? parsed?.[2], true], [t("piNotice.completionArchive"), completionArchive(parsed?.[4] ?? ""), true]),
   };
 }
 
@@ -1269,22 +1287,22 @@ function workflowChild({ text, details }: Input): Draft | null {
   const running = status === undefined ? undefined : /still running/.test(status);
   return {
     look: "agent",
-    title: "子 Agent",
-    summary: `工作流子任务${quoted(key)}${outcome(result) || "有了结果"}${running === true ? "，工作流仍在运行" : running === false ? "，工作流已结束" : ""}`,
+    title: t("piNotice.subagent"),
+    summary: t(running === true ? "piNotice.workflowChildRunning" : running === false ? "piNotice.workflowChildEnded" : "piNotice.workflowChild", { name: quoted(key), outcome: outcome(result) || t("piNotice.hasResult") }),
     state: piNoticeState(result),
     fields: fields(
-      ["错误", lineValue(text, "Error")],
-      ["输出", real(lineValue(text, "Output")), true],
-      ["工作流状态", running === true ? "仍在运行" : running === false ? "已结束" : undefined],
-      ["工作流", real(lineValue(text, "Workflow run")), true],
-      ["子运行", real(lineValue(text, "Child run")), true],
+      [t("piNotice.error"), lineValue(text, "Error")],
+      [t("piNotice.output"), real(lineValue(text, "Output")), true],
+      [t("piNotice.workflowStatus"), running === true ? t("piNotice.stillRunning") : running === false ? t("piNotice.ended") : undefined],
+      [t("piNotice.workflow"), real(lineValue(text, "Workflow run")), true],
+      [t("piNotice.childRun"), real(lineValue(text, "Child run")), true],
     ),
   };
 }
 
 /** subagent-workflow-result-write-failed：工作流的结果文件没写成，正文就是错误。 */
 function workflowResultWriteFailed({ text }: Input): Draft {
-  return { look: "agent", title: "子 Agent", summary: "工作流的结果没能保存", state: "failed", fields: fields(["错误", str(text)]) };
+  return { look: "agent", title: t("piNotice.subagent"), summary: t("piNotice.workflowSaveFailed"), state: "failed", fields: fields([t("piNotice.error"), str(text)]) };
 }
 
 // ── 联网：pi-web-access ─────────────────────────────────────────────────
@@ -1321,20 +1339,20 @@ function webContentReady({ text }: Input): Draft | null {
   const total = int(match?.[1]);
   if (ok === undefined || total === undefined) return null;
   const [summary, state]: [string, PiNoticeState] =
-    ok === 0 && total > 0 ? [`${total} 个网页都没抓到内容`, "failed"]
-    : ok < total ? [`抓到了 ${ok}/${total} 个网页的内容（部分网页没抓到）`, "done"]
-    : [`抓到了 ${ok}/${total} 个网页的全文`, "done"];
-  return { look: "web", title: "联网搜索", summary, state, fields: fields(["网页", `${ok}/${total}`], ["抓取 ID", str(match?.[2]), true]) };
+    ok === 0 && total > 0 ? [t("piNotice.fetchNone", { total }), "failed"]
+    : ok < total ? [t("piNotice.fetchPartial", { ok, total }), "done"]
+    : [t("piNotice.fetchComplete", { ok, total }), "done"];
+  return { look: "web", title: t("piNotice.webSearch"), summary, state, fields: fields([t("piNotice.webpage"), `${ok}/${total}`], [t("piNotice.fetchId"), str(match?.[2]), true]) };
 }
 
 function webError({ text }: Input): Draft {
   const match = fetchFailure(text.trim());
   return {
     look: "web",
-    title: "联网搜索",
-    summary: "抓取网页内容失败",
+    title: t("piNotice.webSearch"),
+    summary: t("piNotice.fetchFailed"),
     state: "failed",
-    fields: fields(["错误", match ? match[1] : plainText(text)], ["抓取 ID", str(match?.[0]), true]),
+    fields: fields([t("piNotice.error"), match ? match[1] : plainText(text)], [t("piNotice.fetchId"), str(match?.[0]), true]),
   };
 }
 
@@ -1347,18 +1365,18 @@ function webResults({ text, details }: Input): Draft {
   // The guidance for the model starts at a `---` rule followed by responseId instructions.
   const guide = text.search(/\n---\n(?:Full content for|Content fetching in background|Full search results are stored)/);
   const body = plainText(guide >= 0 ? text.slice(0, guide) : text);
-  const subject = queries.length === 1 ? `“${queries[0]}”` : asked ? `${asked} 个查询` : "";
+  const subject = queries.length === 1 ? t("piNotice.quotedQuery", { query: queries[0] }) : asked ? t("piNotice.queryCount", { count: asked }) : "";
   const failedQueries = asked !== undefined && ok !== undefined ? asked - ok : 0;
   const summary = subject
-    ? `搜索${subject}${total !== undefined ? `，共 ${total} 条结果` : ""}${failedQueries > 0 ? `，${failedQueries} 个查询失败` : ""}`
-    : headline(body) || "联网搜索结果";
+    ? t(total !== undefined ? (failedQueries > 0 ? "piNotice.searchCountFailed" : "piNotice.searchCount") : (failedQueries > 0 ? "piNotice.searchFailed" : "piNotice.search"), { subject, total, failed: failedQueries })
+    : headline(body) || t("piNotice.searchResults");
   const state: PiNoticeState = asked !== undefined && ok !== undefined ? (ok === 0 && asked > 0 ? "failed" : "done") : "info";
   return {
     look: "web",
-    title: "联网搜索",
+    title: t("piNotice.webSearch"),
     summary,
     state,
-    fields: fields(["查询", queries.join("\n")], ["结果数", total]),
+    fields: fields([t("piNotice.query"), queries.join("\n")], [t("piNotice.resultCount"), total]),
     ...(body ? { body } : {}),
   };
 }
@@ -1375,20 +1393,20 @@ function goalContract({ text, details }: Input): Draft {
   const gist = headline(objective);
   return {
     look: "plan",
-    title: "目标",
-    summary: inactive ? "目标模式已关闭" : `目标约定已更新${gist ? `：${clip(gist, 160)}` : ""}`,
+    title: t("piNotice.goal"),
+    summary: inactive ? t("piNotice.goalInactive") : t(gist ? "piNotice.goalUpdatedDetail" : "piNotice.goalUpdated", { detail: clip(gist, 160) }),
     state: "info",
-    fields: fields(["目标", inactive ? undefined : objective], ["目标 ID", str(d.goalId) ?? tag(text, "goal_id"), true]),
+    fields: fields([t("piNotice.goal"), inactive ? undefined : objective], [t("piNotice.goalId"), str(d.goalId) ?? tag(text, "goal_id"), true]),
   };
 }
 
 function goalBudget({ details }: Input): Draft {
   return {
     look: "plan",
-    title: "目标",
-    summary: "目标的 token 预算已用完，Agent 正在收尾",
+    title: t("piNotice.goal"),
+    summary: t("piNotice.goalBudget"),
     state: "info",
-    fields: fields(["目标 ID", str(rec(details)?.goalId), true]),
+    fields: fields([t("piNotice.goalId"), str(rec(details)?.goalId), true]),
   };
 }
 
@@ -1420,11 +1438,11 @@ const PARSERS: ReadonlyMap<string, (input: Input) => Draft | null> = /* @__PURE_
 /** An unknown type keeps its extension's look when the name says which one it is. */
 function family(customType: string): Pick<Draft, "look" | "title"> {
   const type = customType.toLowerCase();
-  if (/^subagents?[-_:]/.test(type)) return { look: "agent", title: "子 Agent" };
-  if (/^(?:web-search|web-fetch|curator-config$|google-account$)/.test(type)) return { look: "web", title: "联网搜索" };
-  if (/^goal[-_]/.test(type)) return { look: "plan", title: "目标" };
-  if (type.startsWith("background-task")) return { look: "shell", title: "后台任务" };
-  return { look: "other", title: "Pi 通知" };
+  if (/^subagents?[-_:]/.test(type)) return { look: "agent", title: t("piNotice.subagent") };
+  if (/^(?:web-search|web-fetch|curator-config$|google-account$)/.test(type)) return { look: "web", title: t("piNotice.webSearch") };
+  if (/^goal[-_]/.test(type)) return { look: "plan", title: t("piNotice.goal") };
+  if (type.startsWith("background-task")) return { look: "shell", title: t("piNotice.backgroundTask") };
+  return { look: "other", title: t("piNotice.piNotice") };
 }
 
 const MAX_LEAVES = 8;
@@ -1444,14 +1462,15 @@ function leaves(text: string): Array<[string, string]> {
  * 0.6.0: an XML notice made of several text elements reads as its first two values, and each element is a field.
  */
 function generic({ customType, text, details }: Input): Draft {
-  const sentence = PARENT_SENTENCES.get(customType);
+  const sentenceId = PARENT_SENTENCES.get(customType);
+  const sentence = sentenceId ? t(sentenceId) : undefined;
   const pairs = sentence ? [] : leaves(text);
   if (pairs.length >= 2) {
     return {
       ...family(customType),
-      summary: clip(pairs.slice(0, 2).map(([, value]) => oneLine(value)).join(" · ")),
+      summary: clip(pairs.slice(0, 2).map(([, value]) => oneLine(value)).join(t("piNotice.factSeparator"))),
       state: "info",
-      fields: fields(["类型", customType, true], ...pairs.map(([label, value]): FieldSpec => [label, value])),
+      fields: fields([t("piNotice.type"), customType, true], ...pairs.map(([label, value]): FieldSpec => [label, value])),
     };
   }
   const body = plainText(text);
@@ -1468,7 +1487,7 @@ function generic({ customType, text, details }: Input): Draft {
     ...family(customType),
     summary,
     state: "info",
-    fields: sentence ? [] : fields(["类型", customType, true]),
+    fields: sentence ? [] : fields([t("piNotice.type"), customType, true]),
     ...(!sentence && extra(shown, summary) ? { body: shown } : {}),
   };
 }

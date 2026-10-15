@@ -1,3 +1,5 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -27,11 +29,11 @@ export const restoreSessionStatus = defineRpc({
 });
 
 /** After a host timeout or a dropped connection the restore may well go on: say so, never show the host's English. */
-export const RESTORE_STILL_RUNNING = "宿主仍在恢复，稍后刷新查看。";
-const RESTORE_DISCONNECTED = "与宿主的连接中断了，恢复可能仍在进行，稍后刷新查看。";
-const RESTORE_RELOADING = "观测台正在重新加载，恢复没有开始，稍后再点一次「恢复会话」。";
+export let RESTORE_STILL_RUNNING = t("sharedHistory.m001");
+let RESTORE_DISCONNECTED = t("sharedHistory.m002");
+let RESTORE_RELOADING = t("sharedHistory.m003");
 const errorText = (error: unknown) => (error instanceof Error ? error.message : typeof error === "string" ? error : "").trim();
-const timedOut = (message: string) => /timed? ?out|timeout|宿主未响应/i.test(message);
+const timedOut = (message: string) => /timed? ?out|timeout|宿主未响应/i.test(message); // i18n-ignore: Match original Chinese provider/user text; this is parser data.
 const disconnected = (message: string) => /not connected|disconnect|client (?:is )?closed|connection (?:closed|lost|reset)|socket|Plugin stopped/i.test(message);
 /** The host answering for the plugin while it reloads: it is not loaded, or not yet with its RPCs (plugins/runtime.js invoke). */
 const pluginGone = (message: string) => /Plugin is not available|does not contribute RPC/i.test(message);
@@ -41,8 +43,8 @@ export function restoreFailureText(error: unknown): string {
   if (timedOut(message)) return RESTORE_STILL_RUNNING;
   if (disconnected(message)) return RESTORE_DISCONNECTED;
   if (pluginGone(message)) return RESTORE_RELOADING;
-  if (!message) return "会话恢复失败";
-  return /[\u3400-\u9fff]/.test(message) ? message.replaceAll("子任务", "会话") : `会话恢复失败（宿主返回：${message.slice(0, 300)}）`;
+  if (!message) return t("sharedHistory.m004");
+  return /[\u3400-\u9fff]/.test(message) ? message.replaceAll(t("sharedHistory.m005"), t("sharedHistory.m006")) : t("sharedHistory.m007", { value1: message.slice(0, 300) });
 }
 
 /** The client's side of a restore (client/use-restore.ts supplies the RPCs and the foreground-aware wait). */
@@ -93,8 +95,8 @@ export async function followRestore(flow: RestoreFlow): Promise<RestoreSessionRe
     if (!next) {
       // The server lost the restore (the plugin reloaded, or the answer expired): the session itself tells how it ended.
       const archived = await flow.archived?.().catch(() => null);
-      if (archived === false) return { ...view, status: "already_active", message: "原会话已恢复，可直接打开。" };
-      if (archived === true) return { ...view, status: "failed", message: "恢复没有完成（观测台可能重新加载过），可以再点一次「恢复会话」。" };
+      if (archived === false) return { ...view, status: "already_active", message: t("sharedHistory.m008") };
+      if (archived === true) return { ...view, status: "failed", message: t("sharedHistory.m009") };
       return still(view);
     }
     view = next;
@@ -113,4 +115,11 @@ export type SessionEvidence = z.infer<typeof sessionEvidenceSchema>;
 export const getSessionEvidence = defineRpc({
   name: "observatory.history.evidence", input: z.object({ agentId: z.string().min(1).max(512) }),
   output: sessionEvidenceSchema,
+});
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  RESTORE_STILL_RUNNING = t("sharedHistory.m001");
+  RESTORE_DISCONNECTED = t("sharedHistory.m002");
+  RESTORE_RELOADING = t("sharedHistory.m003");
 });

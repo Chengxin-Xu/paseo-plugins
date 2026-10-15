@@ -1,3 +1,6 @@
+import { deferredSourceLabel } from "./deferred-state";
+import { TextParts } from "./core-text";
+import { t } from "../shared/text";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -36,6 +39,7 @@ type Problem = { reply: QuickReply; message: string; tone: "danger" | "warning";
  * 「等这一轮结束再发」 beside it; a reply on its way (here, on another screen or device) locks them, its row below has 仍然发送 /
  * 取消排队, and the reply the ledger delivered for this turn shows as sent, whichever device sent it.
  */
+// Catalog migration preserves the original question distinction: nudge === "go-ahead" ? "它问：" : "它说接下来："
 export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, expectRound, ask, compact = false, onSent }: {
   theme: PluginTheme; agentId: string; agentTitle: string; nudge: ReplyNudge;
   /** The prompt of the turn they answer (its `lastUserMessageAt`). */ expectPrompt: string | null;
@@ -91,7 +95,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
     let message = messages.current.get(key);
     const record = message && listed.current.find(view => view.messageId === message!.messageId);
     if (!message || record && NEVER_SENT.has(record.state)) {
-      message = outgoingMessage(agentId, quickReplyText(reply), { what: "回复", source: `快捷回复「${reply.text}」`, key, messageId: requestId(agentId, key, listed.current), group, guard });
+      message = outgoingMessage(agentId, quickReplyText(reply), { what: t("coreQuickReplies.reply"), source: t("coreQuickReplies.quickReply", { value1: reply.text }), key, messageId: requestId(agentId, key, listed.current), group, guard });
       messages.current.set(key, message);
     }
     return message;
@@ -100,16 +104,16 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
     if (message.tried) rememberUnanswered(agentId, message.key, message.messageId);
     const reason = (error instanceof Error ? error.message : String(error)).replace(/[。.]$/, "");
     setProblem({ reply, tone: "danger", retry, message: message.tried
-      ? `没有收到「${reply.text}」的发送结果：${reason}。下方列出这条回复就是已经交给 Agent 了；没有列出可以再点一次，按原来的编号重试，不会发两份。`
-      : `「${reply.text}」没发出去：${reason}` });
+      ? t("coreQuickReplies.noSendResultReceivedForIfThe", { value1: reply.text, value2: reason })
+      : t("coreQuickReplies.wasNotSent", { value1: reply.text, value2: reason }) });
   };
   /**
    * Another message answers this turn (codex-obs-attn-R3): a tap here, on another screen or device, of this button or another.
    * It is named for what it is, and this button is never shown as sent for it: the list shows the reply that went.
    */
   const answeredElsewhere = (view: DeferredView) => {
-    const other = replies.find(item => keyOf(item) === view.key), named = other ? `「${other.text}」` : view.source || "另一条回复";
-    toast.show(view.state === "sent" ? `这一轮已经回复了${named}，没有再发。` : `这一轮的回复${named}${onItsWayLabel(view)}，见下方。`, { variant: view.state === "maybe-sent" ? "warning" : "success" });
+    const other = replies.find(item => keyOf(item) === view.key), named = other ? t("coreQuickReplies.quotedReply", { reply: other.text }) : deferredSourceLabel(view.source) || t("coreQuickReplies.anotherReply");
+    toast.show(view.state === "sent" ? t("coreQuickReplies.thisTurnWasAlreadyAnsweredWithNothing", { value1: named }) : t("coreQuickReplies.theReplyForThisTurnSeeBelow", { value1: named, value2: onItsWayLabel(view) }), { variant: view.state === "maybe-sent" ? "warning" : "success" });
   };
   /** The ledger's answer for this reply's own message, by its state (codex-obs-send-ui-R2): only a queued one waits for the turn. */
   const answeredOwn = (reply: QuickReply, view: DeferredView, sentWords: string) => {
@@ -128,7 +132,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
     if ("message" in answer) { setProblem({ reply, tone: answer.status === "busy" ? "warning" : "danger", message: answer.message, retry: answer.status === "busy" ? consent : false }); return; }
     const { view } = answer;
     if (view.messageId !== message.messageId) { answeredElsewhere(view); return; }
-    answeredOwn(reply, view, plan.kind === "steer" ? `已插进「${agentTitle}」这一轮：${reply.text}` : `已回复「${agentTitle}」：${reply.text}`);
+    answeredOwn(reply, view, plan.kind === "steer" ? t("coreQuickReplies.joinedSCurrentTurn", { value1: agentTitle, value2: reply.text }) : t("coreQuickReplies.repliedTo", { value1: agentTitle, value2: reply.text }));
   };
   const send = async (reply: QuickReply, consent: Consent | null = null) => {
     if (!caps || inFlight.current || refused) return;
@@ -164,7 +168,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
       settleRequest(agentId, message.key);
       if (mounted.current) setConfirming(null);
       if (view.messageId !== message.messageId) answeredElsewhere(view);
-      else answeredOwn(reply, view, `已回复「${agentTitle}」：${reply.text}`);
+      else answeredOwn(reply, view, t("coreQuickReplies.repliedTo", { value1: agentTitle, value2: reply.text }));
     } catch (error) {
       if (!mounted.current) return;
       setConfirming(null);
@@ -174,39 +178,39 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
   };
   if (delivered) return <Enter active><View testID="quick-reply-sent" style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 28 }}>
     <Pop count={1} size={16}><Icon name="CircleCheck" size={16} color={hue(theme, "green")} /></Pop>
-    <Text style={{ flexShrink: 1, color: hue(theme, "green", "text"), fontSize: fontSize.small, fontWeight: "600" }}>{`已发送「${delivered.text}」`}</Text>
+    <Text style={{ flexShrink: 1, color: hue(theme, "green", "text"), fontSize: fontSize.small, fontWeight: "600" }}>{t("coreQuickReplies.sent", { value1: delivered.text })}</Text>
   </View></Enter>;
   if (refused) return <Enter active><View testID="quick-replies-stale"><Banner theme={theme} tone="info" icon="CircleSlash" message={refused} /></View></Enter>;
   const shown = confirming && !locked && !uncertain ? confirming : null, plan = shown?.confirmation.check.plan, offer = shown?.confirmation.offer;
   return <View testID="quick-replies" style={{ gap: space.sm }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
       <Icon name="Zap" size={13} color={hue(theme, "violet")} />
-      <Text numberOfLines={2} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>快捷回复 · 点一下就把按钮上的这句话发给它</Text>
+      <Text numberOfLines={2} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("coreQuickReplies.quickRepliesTapToSendTheWords")}</Text>
     </View>
     {/* What a tap answers, where the reply is not on screen: its closing question or the step it announced. */}
     {ask ? <View testID="quick-reply-ask" style={{ paddingLeft: space.sm + 2, borderLeftWidth: 3, borderLeftColor: hue(theme, "violet") }}>
       <Text numberOfLines={3} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.meta, lineHeight: 18 }}>
-        <Text style={{ color: hue(theme, "violet", "text"), fontWeight: "700" }}>{nudge === "go-ahead" ? "它问：" : "它说接下来："}</Text>{`「${ask}」`}
+        <TextParts id="coreQuickReplies.questionContext" values={{ lead: <Text style={{ color: hue(theme, "violet", "text"), fontWeight: "700" }}>{nudge === "go-ahead" ? t("coreQuickReplies.itAsks") : t("coreQuickReplies.itSaysNext")}</Text>, question: ask }} />
       </Text>
     </View> : null}
     {shown && plan ? <View style={{ gap: space.sm }}>
-      <Banner theme={theme} tone="warning" message={plan.confirm ?? plan.note ?? "Agent 的状态变了，请确认后再发"} />
-      {offer ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{`「${offer.label}」：${offer.note}。`}</Text> : null}
+      <Banner theme={theme} tone="warning" message={plan.confirm ?? plan.note ?? t("coreQuickReplies.theAgentSStateChangedConfirmBefore")} />
+      {offer ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("coreQuickReplies.message", { value1: offer.label, value2: offer.note })}</Text> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
         <Button theme={theme} variant="danger" label={plan.label} grow={compact} busy={busy === shown.reply.key} disabled={!!busy}
-          accessibilityLabel={`${plan.label}：给「${agentTitle}」发送「${shown.reply.text}」`} onPress={() => void send(shown.reply, shown.confirmation.consent)} />
+          accessibilityLabel={t("coreQuickReplies.sendTo", { value1: plan.label, value2: agentTitle, value3: shown.reply.text })} onPress={() => void send(shown.reply, shown.confirmation.consent)} />
         {offer ? <Button theme={theme} tone="info" icon="Clock3" label={offer.label} grow={compact} disabled={!!busy}
-          accessibilityLabel={`${offer.label}：给「${agentTitle}」发送「${shown.reply.text}」`} onPress={() => void defer(shown.reply)} /> : null}
-        <Button theme={theme} variant="ghost" label="不发了" disabled={!!busy} onPress={() => setConfirming(null)} />
+          accessibilityLabel={t("coreQuickReplies.sendTo", { value1: offer.label, value2: agentTitle, value3: shown.reply.text })} onPress={() => void defer(shown.reply)} /> : null}
+        <Button theme={theme} variant="ghost" label={t("coreQuickReplies.doNotSend")} disabled={!!busy} onPress={() => setConfirming(null)} />
       </View>
     </View> : <View style={{ flexDirection: "row", flexWrap: "wrap", gap: compact ? space.md : space.sm }}>
       {replies.map(reply => <Button key={reply.key} theme={theme} label={reply.text} icon={reply.icon} tone={reply.tone} size={compact ? "md" : "sm"} grow={compact}
-        busy={busy === reply.key} disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={`给「${agentTitle}」发送「${reply.text}」`} testID={`quick-reply-${reply.key}`}
+        busy={busy === reply.key} disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={t("coreQuickReplies.sendTo2", { value1: agentTitle, value2: reply.text })} testID={`quick-reply-${reply.key}`}
         onPress={() => void send(reply)} />)}
     </View>}
-    {uncertain ? <Banner theme={theme} tone="warning" message={`「${uncertain.reply.text}」可能已经送达，请先打开会话看一下，不要直接重发。`} /> : null}
+    {uncertain ? <Banner theme={theme} tone="warning" message={t("coreQuickReplies.mayAlreadyHaveArrivedOpenTheSession", { value1: uncertain.reply.text })} /> : null}
     {problem && !uncertain ? <Banner theme={theme} tone={problem.tone} message={problem.message}
-      action={problem.retry !== false && !locked ? { label: "重试", onPress: () => void send(problem.reply, problem.retry || null) } : undefined} /> : null}
+      action={problem.retry !== false && !locked ? { label: t("coreQuickReplies.retry"), onPress: () => void send(problem.reply, problem.retry || null) } : undefined} /> : null}
     <DeferredList theme={theme} queue={deferred} only={view => keys.has(view.key)} compact={compact} />
   </View>;
 }

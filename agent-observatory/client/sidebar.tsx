@@ -1,3 +1,5 @@
+import { useI18n } from "./i18n-client";
+import { t } from "../shared/text";
 import { useMemo, type ComponentType } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type TextStyle } from "react-native";
 import type { PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
@@ -28,30 +30,33 @@ const numberStyle: TextStyle = { fontSize: 11, fontWeight: "800", fontVariant: [
  * a popover (a sheet on phones) of the longest-waiting Agents, each with its one-line reason; a tap opens that Agent.
  */
 export function ObservatorySidebarItem({ theme, host, currentScreen, openScreen, openPopover, stores, AttentionPopover }: PluginSidebarItemProps & { stores: AttentionStores; AttentionPopover: ComponentType<PluginPopoverProps & { store: AttentionStore }> }) {
+  useI18n();
   const store = useAttentionStore(stores, host.id), view = useAttentionView(store);
   // While the page is open its directory observation reports changes; the badge follows them at once.
   useAgentActivity(() => { void store.refresh(); });
   const count = attentionCount(view), state = view.state;
   const Popover = useMemo(() => function AttentionPopoverItem(props: PluginPopoverProps) { return <AttentionPopover {...props} store={store} />; }, [store, AttentionPopover]);
   const color = hueColor(theme, state?.loud ? "red" : "amber");
-  const trailing = count && count.value > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={`需要处理 ${count.label} 个，查看是谁`} onPress={() => openPopover(Popover)} hitSlop={6}
+  const trailing = count && count.value > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={t("boot.secondaryNeedYouViewAgents", { count: count.label })} onPress={() => openPopover(Popover)} hitSlop={6}
     style={pressed => ({ ...badgeStyle, backgroundColor: color, opacity: pressed.pressed ? 0.8 : 1 })}>
     {state?.blocking ? <View style={{ position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" }}><BadgePing size={20} color={color} active={view.foreground !== false} /></View> : null}
     <Text style={{ ...numberStyle, color: "#ffffff" }}>{count.label}</Text>
   </Pressable> : null;
-  return <SidebarRow icon="Orbit" active={currentScreen?.screenId === "observatory"} onPress={() => { void store.refresh(); openScreen({ screenId: "observatory" }); }} trailing={trailing} />;
+  return <SidebarRow label={t("boot.screenTitle")} icon="Orbit" active={currentScreen?.screenId === "observatory"} onPress={() => { void store.refresh(); openScreen({ screenId: "observatory" }); }} trailing={trailing} />;
 }
 
 /** 「定时运行」 with the failed runs of the last 24 hours (heartbeats apart), red; nothing when none or unknown. */
 export function ScheduleSidebarItem({ theme, host, currentScreen, openScreen, stores }: PluginSidebarItemProps & { stores: AttentionStores }) {
+  useI18n();
   const store = useAttentionStore(stores, host.id), view = useAttentionView(store);
   const failures = attentionCount(view) ? view.state?.scheduleFailures ?? 0 : 0, red = hueColor(theme, "red");
-  const trailing = failures > 0 ? <View accessibilityLabel={`近 24 小时 ${failures} 次定时运行失败`} style={{ ...badgeStyle, backgroundColor: red + (darkTheme(theme) ? "47" : "33"), borderWidth: Platform.OS === "web" ? 1 : StyleSheet.hairlineWidth, borderColor: red + "80" }}>
+  const trailing = failures > 0 ? <View accessibilityLabel={t("boot.secondaryScheduledRunsFailedInTheLast", { count: failures })} style={{ ...badgeStyle, backgroundColor: red + (darkTheme(theme) ? "47" : "33"), borderWidth: Platform.OS === "web" ? 1 : StyleSheet.hairlineWidth, borderColor: red + "80" }}>
     <Text style={{ ...numberStyle, color: hueColor(theme, "red", true) }}>{failures}</Text>
   </View> : null;
-  return <SidebarRow icon="CalendarClock" active={currentScreen?.screenId === "schedule-runs"} onPress={() => openScreen({ screenId: "schedule-runs" })} trailing={trailing} />;
+  return <SidebarRow label={t("boot.schedulesTitle")} icon="CalendarClock" active={currentScreen?.screenId === "schedule-runs"} onPress={() => openScreen({ screenId: "schedule-runs" })} trailing={trailing} />;
 }
 
 export function ArchivesSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  return <SidebarRow icon="Archive" active={currentScreen?.screenId === "archives"} onPress={() => openScreen({ screenId: "archives" })} />;
+  useI18n();
+  return <SidebarRow label={t("boot.archivesTitle")} icon="Archive" active={currentScreen?.screenId === "archives"} onPress={() => openScreen({ screenId: "archives" })} />;
 }

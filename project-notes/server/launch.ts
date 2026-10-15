@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +16,7 @@ const journalSchema = launchReceiptSchema.omit({ replayed: true }).extend({
 });
 type Journal = z.infer<typeof journalSchema>;
 type Prepared = { project: LaunchOptions["projects"][number]; attachment: ReturnType<typeof sourceAttachment>; featureValues?: Record<string, unknown> };
-const message = (e: unknown) => e instanceof Error ? e.message : "操作未完成";
+const message = (e: unknown) => e instanceof Error ? e.message : t("serverLaunch.operationFailed");
 /**
  * Provider and launch errors come from the daemon and the providers as they are. The dialog shows them in full and every
  * connected app can read them, so a stack trace or a dumped request stays bounded; 500 characters still fit any diagnosis.
@@ -29,14 +30,14 @@ function clip(text: string, max = MAX_ERROR_CHARS): string {
 function budget(totalMs: number) { const end = Date.now() + totalMs; return (maxMs: number) => Math.max(1, Math.min(maxMs, end - Date.now())); }
 
 function absoluteDirectory(value: string) {
-  if (!path.isAbsolute(value)) throw new Error("项目路径不是此主机的绝对路径，请重新选择项目。");
+  if (!path.isAbsolute(value)) throw new Error(t("serverLaunch.absolutePathRequired"));
   return value;
 }
 
 function sourceAttachment(note: BoardItem, projectName: string) {
   // The task is the user's edited prompt. Source metadata must not reintroduce deleted note content.
-  const text = `来源：手记 #${note.id}\n项目：${projectName}\n标题：${note.title}\n状态：${{ todo: "待办", doing: "进行中", done: "已完成" }[note.status]}\n重点：${note.priority === "high" ? "是" : "否"}`;
-  return { type: "text" as const, mimeType: "text/plain" as const, contextKind: "project-notes", title: `手记 #${note.id.slice(0, 8)} · ${note.title}`, text };
+  const text = t("serverLaunch.sourceText", { id: note.id, project: projectName, title: note.title, status: { todo: t("serverLaunch.todo"), doing: t("serverLaunch.doing"), done: t("serverLaunch.done") }[note.status], priority: note.priority === "high" ? t("serverLaunch.yes") : t("serverLaunch.no") });
+  return { type: "text" as const, mimeType: "text/plain" as const, contextKind: "project-notes", title: t("serverLaunch.sourceTitle", { id: note.id.slice(0, 8), title: note.title }), text };
 }
 
 const launchSuffix = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 12);
@@ -48,7 +49,7 @@ export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listPr
   const project = projects.find(p => p.id === projectId) ?? null;
   if (!project) return { projects, project: null, providers: [], profiles: [] };
   absoluteDirectory(project.path);
-  const timedOut = "读取代理选项超时，请稍后重新读取。";
+  const timedOut = t("serverLaunch.optionsTimeout");
   const [initialCatalog, settings] = await Promise.all([
     withTimeout(paseo.providers.snapshot({ cwd: project.path }), left(9_000), timedOut),
     withTimeout(paseo.config.get(), left(6_000), timedOut),
@@ -68,7 +69,7 @@ export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listPr
         defaultThinkingOptionId: m.defaultThinkingOptionId ?? m.thinkingOptions?.find(o => o.isDefault)?.id ?? null,
       }));
       // The SDK requires provider/model; the daemon normalizes "default" to the provider's configured model.
-      if (p.status === "ready" && !models.length) models.push({ id: "default", label: "默认", isDefault: true, thinkingOptions: [], defaultThinkingOptionId: null });
+      if (p.status === "ready" && !models.length) models.push({ id: "default", label: t("serverLaunch.defaultModel"), isDefault: true, thinkingOptions: [], defaultThinkingOptionId: null });
       return {
         id: p.provider, label: p.label || p.provider, status: p.status, error: p.error ? clip(p.error) : null, models,
         modes: (p.modes ?? []).map(m => ({ id: m.id, label: m.label })), defaultModeId: p.defaultModeId ?? null,
@@ -90,12 +91,12 @@ export class LaunchService {
   constructor(private readonly boards: BoardStore, private readonly projects = new ProjectDirectory(), private readonly root = path.join(defaultStorageRoot(), "..", "launches")) {}
 
   private file(id: string) {
-    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(id)) throw new Error("无效的启动标识");
+    if (!/^[a-zA-Z0-9_-]{8,100}$/.test(id)) throw new Error(t("serverLaunch.invalidId"));
     return path.join(this.root, id + ".json");
   }
   private async read(id: string): Promise<Journal | null> {
     try { return journalSchema.parse(JSON.parse(await readFile(this.file(id), "utf8"))); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw new Error("启动记录读取失败；请检查已有工作区，不要重复创建。"); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw new Error(t("serverLaunch.journalReadFailed")); }
   }
   private async save(record: Journal) {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -115,7 +116,7 @@ export class LaunchService {
     // Room for the capped cause plus the guidance after it; also caps records written before the cap existed.
     return { ...receipt, error: receipt.error === null ? null : clip(receipt.error, MAX_ERROR_CHARS + 100), replayed };
   }
-  private checkAlive() { if (this.stopping) throw new Error("插件正在重载，启动流程已停止；检查现有工作区后再继续。"); }
+  private checkAlive() { if (this.stopping) throw new Error(t("serverLaunch.reloading")); }
 
   async status(id: string, paseo?: Paseo): Promise<LaunchReceipt | null> {
     let record = await this.read(id);
@@ -149,11 +150,11 @@ export class LaunchService {
       const latest = await this.read(id);
       if (latest && (latest.stage !== record.stage || latest.workspaceId !== record.workspaceId || latest.agentId !== record.agentId)) return this.receipt(latest, true);
       if (record.stage === "prepared" && record.projectId && isolation === "worktree" && lookupComplete && !workspaceId && !found && !record.agentId) {
-        const rejected: Journal = { ...record, stage: "rejected", error: "启动在创建前已中断，尚未创建工作区或会话，可以修改选项后重试。" };
+        const rejected: Journal = { ...record, stage: "rejected", error: t("serverLaunch.interruptedBeforeCreate") };
         await this.save(rejected);
         return this.receipt(rejected, true);
       }
-      const recovered: Journal = { ...record, projectId, isolation, workspaceId, agentId: record.agentId ?? found?.agentId ?? null, stage: "uncertain", error: record.stage === "uncertain" ? record.error : "启动流程已中断。已有工作区或会话可能仍在，请先打开检查；不会自动重复创建。" };
+      const recovered: Journal = { ...record, projectId, isolation, workspaceId, agentId: record.agentId ?? found?.agentId ?? null, stage: "uncertain", error: record.stage === "uncertain" ? record.error : t("serverLaunch.interruptedUncertain") };
       // Persist recovered identifiers at every interrupted stage, including a lost workspace.create reply.
       if (found || workspaceId !== record.workspaceId) await this.save(recovered);
       return this.receipt(recovered, true);
@@ -161,7 +162,7 @@ export class LaunchService {
     return this.receipt(record, true);
   }
   private async findAgent(paseo: Paseo, id: string): Promise<{ agentId: string; workspaceId: string | null } | null> {
-    const result = await withTimeout(paseo.agents.list({ filter: { labels: { "project-notes.launch-id": id }, includeArchived: true }, page: { limit: 5 } }), 5_000, "查询已创建会话超时");
+    const result = await withTimeout(paseo.agents.list({ filter: { labels: { "project-notes.launch-id": id }, includeArchived: true }, page: { limit: 5 } }), 5_000, t("serverLaunch.agentLookupTimeout"));
     const agent = result.entries.find(entry => entry.agent.labels?.["project-notes.launch-id"] === id)?.agent;
     return agent ? { agentId: agent.id, workspaceId: agent.workspaceId ?? null } : null;
   }
@@ -173,7 +174,7 @@ export class LaunchService {
     for (let page = 0; page < 100 && Date.now() < end; page++) {
       const result = await withTimeout(paseo.workspaces.list({
         ...(projectId ? { filter: { projectId } } : {}), page: { limit: 100, ...(cursor ? { cursor } : {}) },
-      }), Math.min(5_000, end - Date.now()), "查询已创建工作区超时");
+      }), Math.min(5_000, end - Date.now()), t("serverLaunch.workspaceLookupTimeout"));
       const workspace = result.entries.find(entry => entry.worktreeSlug === slug && (!projectId || entry.projectId === projectId));
       if (workspace) return { workspace, complete: true };
       if (!result.pageInfo.hasMore) return { workspace: null, complete: true };
@@ -190,7 +191,7 @@ export class LaunchService {
     if (ongoing) {
       await ongoing;
       const stored = await this.read(input.launchId);
-      if (!stored || stored.inputHash !== this.hash(input)) throw new Error("该启动标识已经用于不同内容。");
+      if (!stored || stored.inputHash !== this.hash(input)) throw new Error(t("serverLaunch.idReused"));
       return this.receipt(stored, true);
     }
     const operation = this.accept(input, paseo);
@@ -204,7 +205,7 @@ export class LaunchService {
     this.checkAlive();
     const existing = await this.read(input.launchId);
     if (existing) {
-      if (existing.inputHash !== this.hash(input)) throw new Error("该启动标识已经用于不同内容，请先检查已有会话。");
+      if (existing.inputHash !== this.hash(input)) throw new Error(t("serverLaunch.idReusedCheck"));
       return (await this.status(input.launchId, paseo))!;
     }
     const record: Journal = { launchId: input.launchId, inputHash: this.hash(input), projectId: input.projectId, isolation: input.isolation, stage: "prepared", workspaceId: null, agentId: null, error: null };
@@ -218,24 +219,24 @@ export class LaunchService {
   private async validate(input: LaunchInput, paseo: Paseo): Promise<Prepared> {
     const board = await this.boards.read(input.sourceProjectId);
     const note = board.items.find(x => x.id === input.itemId && !x.deletedAt);
-    if (!note) throw new Error("这条手记已删除或不存在，请刷新后重新选择。");
+    if (!note) throw new Error(t("serverLaunch.noteMissing"));
     const options = await loadLaunchOptions(paseo, input.projectId, () => this.projects.list(paseo, true));
-    if (!options.project) throw new Error("目标项目已经不存在，请选择当前主机上的项目。");
-    if (input.isolation === "worktree" && options.project.kind !== "git") throw new Error("这个项目不支持 Git worktree，请选择 Local 工作区。");
-    if (input.baseBranch && (input.baseBranch.startsWith("-") || /[\r\n\0]/.test(input.baseBranch))) throw new Error("起始分支格式无效");
+    if (!options.project) throw new Error(t("serverLaunch.projectMissing"));
+    if (input.isolation === "worktree" && options.project.kind !== "git") throw new Error(t("serverLaunch.worktreeUnsupported"));
+    if (input.baseBranch && (input.baseBranch.startsWith("-") || /[\r\n\0]/.test(input.baseBranch))) throw new Error(t("serverLaunch.invalidBranch"));
     const provider = options.providers.find(p => p.id === input.provider && p.status === "ready");
-    if (!provider) throw new Error("所选 provider 当前不可用，请刷新模型列表。");
+    if (!provider) throw new Error(t("serverLaunch.providerUnavailable"));
     const model = provider.models.find(m => m.id === input.model);
-    if (!model) throw new Error("所选模型当前不可用，请重新选择。");
-    if (input.modeId && !provider.modes.some(m => m.id === input.modeId)) throw new Error("所选权限模式已不可用，请重新选择。");
-    if (input.thinkingOptionId && !model.thinkingOptions.some(m => m.id === input.thinkingOptionId)) throw new Error("所选思考档位已不可用，请重新选择。");
-    const sourceProject = input.sourceProjectId === INBOX_PROJECT_ID ? "随手记" : options.projects.find(project => project.id === input.sourceProjectId)?.name ?? input.sourceProjectId;
+    if (!model) throw new Error(t("serverLaunch.modelUnavailable"));
+    if (input.modeId && !provider.modes.some(m => m.id === input.modeId)) throw new Error(t("serverLaunch.modeUnavailable"));
+    if (input.thinkingOptionId && !model.thinkingOptions.some(m => m.id === input.thinkingOptionId)) throw new Error(t("serverLaunch.thinkingUnavailable"));
+    const sourceProject = input.sourceProjectId === INBOX_PROJECT_ID ? t("serverLaunch.inbox") : options.projects.find(project => project.id === input.sourceProjectId)?.name ?? input.sourceProjectId;
     const prepared: Prepared = { project: options.project, attachment: sourceAttachment(note, sourceProject) };
     if (input.profileId) {
       const { config } = await paseo.config.get();
       const profile = config.agentProfiles?.find(p => p.id === input.profileId);
       if (!profile || profile.provider !== input.provider || (profile.model && profile.model !== input.model) || (profile.modeId ?? null) !== (input.modeId ?? null) || (profile.thinkingOptionId ?? null) !== (input.thinkingOptionId ?? null)) {
-        throw new Error("Profile 已变化，或与所选模型/模式不一致，请重新选择。");
+        throw new Error(t("serverLaunch.profileChanged"));
       }
       prepared.featureValues = profile.featureValues;
     }
@@ -277,8 +278,11 @@ export class LaunchService {
     } catch (e) {
       const noMutation = record.stage === "prepared";
       record.stage = noMutation ? "rejected" : "uncertain";
-      const cause = clip(message(e));
-      record.error = noMutation ? `${cause}。尚未创建工作区或代理，可以修改选项后重试。` : `${cause}。工作区或会话可能已经创建，请先检查，不会自动重复启动。`;
+      const failure = noMutation ? "serverLaunch.failedBeforeCreate" : "serverLaunch.failedUncertain";
+      // The receipt keeps its 600-character bound. Longer translations get room by trimming the cause first.
+      const guidanceLength = Array.from(t(failure, { cause: "" })).length;
+      const cause = clip(message(e), Math.max(1, Math.min(MAX_ERROR_CHARS, MAX_ERROR_CHARS + 100 - guidanceLength)));
+      record.error = t(failure, { cause });
       try { await this.save(record); } catch { /* A prior durable stage still prevents automatic replay after restart. */ }
     }
   }

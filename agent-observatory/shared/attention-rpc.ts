@@ -1,3 +1,4 @@
+import { t } from "./text";
 /**
  * The 需要处理 summary's RPC contract (opus-B1): what the server sends the sidebar badge and its popover. Apart from the rest of
  * shared/attention.ts so the resident badge can share its types without its rules; the server validates with it, and the UI
@@ -59,6 +60,6 @@ export type AttentionResponse = z.infer<typeof getAttention.output>;
 export type AttentionState = AttentionSummary & { revision: string };
 export function mergeAttention(previous: AttentionState | undefined, response: AttentionResponse): AttentionState {
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...summary } = response; return summary; }
-  if (!previous) throw new Error("本地需要处理缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedAttentionRpc.m001"));
   return previous;
 }

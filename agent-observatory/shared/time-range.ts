@@ -1,8 +1,10 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 import type { AgentRecord } from "./model";
 import { isUnreadCompletion, stopUnseen, timestamp } from "./model";
 export type TimeRange = "24h" | "7d" | "30d" | "all";
 export const DEFAULT_TIME_RANGE: TimeRange = "7d";
-export const rangeLabels: Record<TimeRange, string> = { "24h": "24 小时", "7d": "最近 7 天", "30d": "最近 30 天", all: "全部时间" };
+export let rangeLabels: Record<TimeRange, string> = { "24h": t("sharedTimeRange.m001"), "7d": t("sharedTimeRange.m002"), "30d": t("sharedTimeRange.m003"), all: t("sharedTimeRange.m004") };
 /** Best known execution timestamp; archival metadata alone is never execution. */
 export function historyActivityTimestamp(agent: AgentRecord): number | null {
   if (!agent.archivedAt) return timestamp(agent.lastActivityAt) ?? timestamp(agent.updatedAt) ?? timestamp(agent.createdAt);
@@ -54,3 +56,8 @@ export function nextWindowExit(times: readonly number[], range: TimeRange, now: 
   for (const time of times) if (Number.isFinite(time) && time + span + 1 > now) next = Math.min(next, time + span + 1);
   return next;
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  rangeLabels = { "24h": t("sharedTimeRange.m001"), "7d": t("sharedTimeRange.m002"), "30d": t("sharedTimeRange.m003"), all: t("sharedTimeRange.m004") };
+});

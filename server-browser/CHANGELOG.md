@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 - 2026-10-15
+
+- 内置英文和简体中文，默认跟随系统语言；新增「语言」设置，切换后已打开的界面即时更新，重新连接后保留选择。
+- 侧栏、工作区面板、Command Center、斜杠命令、浏览器界面与显示给用户的服务器错误使用共享翻译目录，中文原有措辞保持不变。
+- 支持用户把 `ko.json` 等翻译放在 `~/.paseo/plugin-data/server-browser/locales/`（或 `$PASEO_HOME/plugin-data/server-browser/locales/`）。语言设置显示覆盖率和格式问题，未翻译或无效条目回退英文。
+- 目录中的 `templates/en.json` 和 `templates/zh-CN.json` 提供完整模板。翻译时设置 `$meta.name`，保留消息键和 `{placeholder}`；CLDR 复数形式必须有 `other`。同名文件可覆盖部分内置语言，更新只重写模板。
+- README 与插件介绍补充语言设置和贡献方式：PR 新增 `shared/locales/<code>.json`，并在 `server/locales.ts` 注册一行内置目录。
+
 ## 0.11.2 — 2026-10-14
 
 - 手动接管期间，Agent 读不到页面结构、网络请求和控制台记录，只能用截图看页面：`browser_snapshot`、`browser_find`、`browser_wait_for`、`browser_network_requests`、`browser_network_request`、`browser_console_messages` 和写操作一样被拒绝，拒绝信息提示改用 `browser_take_screenshot`。

@@ -19,7 +19,10 @@ describe("packaging", () => {
 
   it("bundles the CLI from zod and local sources only", async () => {
     const result = await build({ absWorkingDir: root, entryPoints: ["server/cli.ts"], bundle: true, platform: "node", target: "node22", format: "esm", outfile: "bin/notes.mjs", write: false, metafile: true, logLevel: "silent" });
-    const inputs = Object.keys(result.metafile.inputs);
+    const allInputs = Object.keys(result.metafile.inputs);
+    const languageInputs = allInputs.filter(input => /^(server\/locales\.ts|shared\/(i18n\.ts|text\.ts|locales\/))/.test(input));
+    expect(languageInputs.sort()).toEqual(["server/locales.ts", "shared/i18n.ts", "shared/locales/en.json", "shared/locales/kit/en.json", "shared/locales/kit/zh-CN.json", "shared/locales/zh-CN.json", "shared/text.ts"]);
+    const inputs = allInputs.filter(input => !languageInputs.includes(input));
     expect(inputs.filter(input => packageOf(input) === null).sort()).toEqual(["server/cli.ts", "server/store.ts", "shared/schema.ts"]);
     expect([...new Set(inputs.map(packageOf).filter(Boolean))]).toEqual(["zod"]);
   });

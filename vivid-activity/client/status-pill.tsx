@@ -1,3 +1,4 @@
+import { useI18n } from "./i18n-client";
 import { Text, View } from "react-native";
 import type { ActivityStyles } from "./activity";
 import type { ActivityPalette } from "../shared/presentation";
@@ -40,6 +41,7 @@ export function StatusPill({
   palette: ActivityPalette;
   styles: ActivityStyles;
 }) {
+  useI18n();
   const color = statusColor(value, palette);
   return (
     <View style={styles.paseoStatus}>

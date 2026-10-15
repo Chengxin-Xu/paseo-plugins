@@ -87,6 +87,8 @@ beforeAll(async () => {
   dir = mkdtempSync(path.join(os.tmpdir(), "vivid-native-rows-"));
   const entry = path.join(dir, "entry.ts");
   writeFileSync(entry, [
+    // The separately bundled stand-in runtime has its own translator.
+    `import ${JSON.stringify(path.join(here, "../tests/i18n-setup.ts"))};`,
     // 0.6.0-local.5: the reasoning body lives in the lazy details chunk, the styles stay with the resident rows.
     `export { useActivityStyles } from ${JSON.stringify(path.join(here, "activity.tsx"))};`,
     `export { ReasoningMarkdown } from ${JSON.stringify(path.join(here, "activity-details.tsx"))};`,

@@ -1,3 +1,9 @@
+import { bindTranslator, createTranslator } from "../shared/i18n";
+import zh from "../shared/locales/zh-CN.json";
+import en from "../shared/locales/en.json";
+import kitZh from "../shared/locales/kit/zh-CN.json";
+import kitEn from "../shared/locales/kit/en.json";
+import { t } from "../shared/text";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Text, View } from "react-native";
@@ -8,6 +14,8 @@ import { paseoDark, paseoLight } from "./themes.js";
 // ?theme=light|dark  ?scenario=…  ?panel=1 (workspace panel)  ?chrome=0 (hide the host title bar)  ?compact=1|0
 // ?nav=0 (a client without navigation: a started launch stays in the dialog instead of opening the agent)
 const params = new URLSearchParams(location.search);
+const language = params.get("language") === "en" ? "en" : "zh-CN";
+bindTranslator(createTranslator(language, language === "en" ? [en, kitEn] : [zh, kitZh]));
 const light = params.get("theme") === "light";
 const theme = light ? paseoLight : paseoDark;
 globalThis.__previewTheme = theme;
@@ -28,7 +36,7 @@ function HostChrome() {
   const { colors } = theme;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 8, height: 36, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface0 }}>
     <Icon name="NotebookPen" size={14} color={colors.foregroundMuted} />
-    <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: 14 }}>{panel ? "项目手记" : "拾页 · 项目手记"}</Text>
+    <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: 14 }}>{panel ? t("boot.name") : t("boot.screenTitle")}</Text>
     <Icon name="X" size={16} color={colors.foregroundMuted} />
   </View>;
 }

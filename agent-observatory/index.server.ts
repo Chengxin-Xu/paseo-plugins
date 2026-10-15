@@ -1,3 +1,6 @@
+import { createLocaleService } from "./server/i18n-server";
+import { BUILTIN_CATALOGS } from "./server/locales";
+import { t } from "./shared/text";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createProcessBridge, registerProviderSubagents } from "./server/provider-subagents";
 import { TelemetryStore } from "./server/telemetry";
@@ -38,6 +41,7 @@ import { registerProfiles } from "./server/profiles";
 import { registerClientChunks } from "./server/ui-chunk";
 
 export default function contribute(host: PluginServerContext) {
+  const locales = createLocaleService(host, { pluginId: "agent-observatory", builtins: BUILTIN_CATALOGS });
   const telemetry = new TelemetryStore();
   // The ledger every message to an Agent goes through (server/send-ledger.ts); every RPC below hands it the daemon API. A quick
   // reply carries the turn it answers, checked against what the plugin observed right before it goes out (codex-obs-attn-R3).
@@ -70,7 +74,7 @@ export default function contribute(host: PluginServerContext) {
   const removeInsights = registerInsights(server, { zone: () => zones.device() });
   // Grok analyses cut short by a reload or a restart leave their excerpt directory and Grok session behind (opus-F71).
   const stopInsightSweeps = scheduleInsightSweeps(swept => {
-    if (swept.directories || swept.sessions || swept.indexed) console.log(`[agent-observatory] 清理了 ${swept.directories} 个分析临时目录、${swept.sessions} 份 Grok 分析会话和 ${swept.indexed} 条会话搜索索引（${(swept.bytes / 1048576).toFixed(1)} MB）`);
+    if (swept.directories || swept.sessions || swept.indexed) console.log(t("serverLifecycle.cleanup", { directories: swept.directories, sessions: swept.sessions, indexed: swept.indexed, megabytes: (swept.bytes / 1048576).toFixed(1) }));
   });
   const removeHistory = registerHistory(server, bridge);
   // Telemetry checks 知道了 on a stop and the completion a 标记已读 receipt is for (opus-F34, codex-F5).
@@ -163,6 +167,7 @@ export default function contribute(host: PluginServerContext) {
   server.handle(getTelemetry, (input, { paseo }) => { void background.tracker.attach(paseo); tokens.discover(paseo); void replyCheck.refresh(paseo); return telemetry.read(input); });
   server.handle(getAnalytics, (input, { paseo }) => { zones.note(input.timeZone); analytics.refreshRecent(paseo); return telemetry.analyticsRead(input); });
   return async () => {
+    locales.dispose();
     deferred.stop();
     statsClosed = true;
     replyCheck.close();

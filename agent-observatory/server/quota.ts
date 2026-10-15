@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -295,7 +296,7 @@ export class QuotaRecorder {
   /** Keeps every value held; only the error kind is logged (a provider message can name the account). */
   fail(kind: QuotaErrorKind, at: number): void {
     this.error = { kind, at };
-    if (this.reported !== kind) { this.reported = kind; this.log(`[agent-observatory] 额度读取失败（${kind}），保留上次的读数。`); }
+    if (this.reported !== kind) { this.reported = kind; this.log(t("serverQuota.m001", { kind: kind })); }
   }
 
   /** Applies one `listUsage()` reply read at `observedAt`. */
@@ -394,7 +395,7 @@ export class QuotaRecorder {
     const accounts = shown.map((account): QuotaAccount => {
       // An unchanged reading is not stored, but it is just as current.
       const several = (perSource.get(account.provider) ?? 0) > 1, last = account.samples.at(-1), readingAt = last ? Math.max(last.at, account.unrecorded ?? 0) : null;
-      return { key: account.key, provider: account.provider, name: several ? `${account.source} 账号 ${account.ordinal}` : account.source, hint: several ? account.hint : null,
+      return { key: account.key, provider: account.provider, name: several ? t("serverQuota.m002", { value1: account.source, value2: account.ordinal }) : account.source, hint: several ? account.hint : null,
         plan: account.plan, status: account.status, readingAt: readingAt === null ? null : iso(readingAt),
         stale: failed || account.status !== "available" || (latest !== null && account.lastSeenAt < latest) || readingAt === null || now - readingAt > QUOTA_FRESH_MS,
         windows: account.order.flatMap(id => { const window = this.windowView(account, id, now); return window ? [window] : []; }).slice(0, QUOTA_LIMITS.windows) };
@@ -446,7 +447,7 @@ export class QuotaRecorder {
       if (details.size > QUOTA_STORE_LIMITS.bytes) { await this.quarantine(); return; }
       content = await readFile(this.file, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.writable = false; this.log("[agent-observatory] 额度历史读取失败，保留原文件，这次运行不改写它。"); }
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.writable = false; this.log(t("serverQuota.m003")); }
       return;
     }
     let raw: unknown;
@@ -476,7 +477,7 @@ export class QuotaRecorder {
   private async quarantine(): Promise<void> {
     // One backup, replaced by the next, so repeated damage never piles up copies.
     const aside = join(this.directory, "quota-history.corrupt.json");
-    try { await rename(this.file, aside); this.log("[agent-observatory] 额度历史无法解析，已另存后重新记录。"); }
+    try { await rename(this.file, aside); this.log(t("serverQuota.m004")); }
     catch { this.writable = false; }
   }
   /** 40 days of readings; accounts unseen that long go; at most 16 accounts (the most recently seen). */
@@ -527,7 +528,7 @@ export class QuotaRecorder {
         try { await handle.writeFile(payload, "utf8"); if (durable) await handle.sync(); } finally { await handle.close(); }
         await rename(temporary, this.file);
         this.written = payload;
-      } catch { this.dirty = true; this.log("[agent-observatory] 额度历史保存失败，稍后重试。"); }
+      } catch { this.dirty = true; this.log(t("serverQuota.m005")); }
       finally { await unlink(temporary).catch(() => {}); }
     });
     return this.writes;

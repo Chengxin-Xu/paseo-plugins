@@ -1,9 +1,10 @@
+import { t } from './text';
 import type { BrowserDevicePreset } from './browser';
 
 /** `browser`: whose identity the preset presents. Chrome presets carry the running engine's real version; Safari ones send no Client Hints, like Safari. */
 export type DevicePreset={title:string;width:number;height:number;deviceScaleFactor:number;hasTouch:boolean;isMobile:boolean;browser:'chrome-desktop'|'chrome-android'|'safari-iphone'|'safari-ipad'};
 export const DEVICE_PRESETS:Record<BrowserDevicePreset,DevicePreset>={
- desktop:{title:'桌面 Chrome',width:1280,height:800,deviceScaleFactor:1,hasTouch:false,isMobile:false,browser:'chrome-desktop'},
+ desktop:{get title(){return t('serverText.desktopChrome');},width:1280,height:800,deviceScaleFactor:1,hasTouch:false,isMobile:false,browser:'chrome-desktop'},
  iphone:{title:'iPhone 15 Pro',width:393,height:659,deviceScaleFactor:3,hasTouch:true,isMobile:true,browser:'safari-iphone'},
  pixel:{title:'Pixel 7',width:412,height:839,deviceScaleFactor:2.625,hasTouch:true,isMobile:true,browser:'chrome-android'},
  ipad:{title:'iPad Pro 11',width:834,height:1194,deviceScaleFactor:2,hasTouch:true,isMobile:true,browser:'safari-ipad'},

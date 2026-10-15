@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { object, prettyValue, string, timelineSummary, type TimelineItem, type TimelineRow } from "./timeline";
 
 /**
@@ -12,15 +13,15 @@ export function toolDetails(item: TimelineItem): Array<{ label: string; value: u
   const detail = object(item.detail);
   const fields: Array<{ label: string; value: unknown }> = [];
   const append = (label: string, value: unknown) => { if (value !== undefined && value !== null && value !== "") fields.push({ label, value }); };
-  append("命令", detail.command); append("工作目录", detail.cwd); append("文件", detail.filePath);
-  append("搜索内容", detail.query); append("链接", detail.url); append("差异", detail.unifiedDiff);
-  append("修改前", detail.oldString); append("修改后", detail.newString);
-  append("输入参数", detail.input ?? item.input ?? item.arguments);
-  append("执行输出", detail.output ?? detail.result ?? detail.content ?? detail.text);
-  append("子任务日志", detail.log); append("子任务动作", detail.actions);
-  append("子会话", detail.childSessionId); append("退出码", detail.exitCode);
-  if (item.error) append("错误", item.error);
-  if (!fields.length) append("工具数据", detail);
+  append(t("sharedTimelineFind.m001"), detail.command); append(t("sharedTimelineFind.m002"), detail.cwd); append(t("sharedTimelineFind.m003"), detail.filePath);
+  append(t("sharedTimelineFind.m004"), detail.query); append(t("sharedTimelineFind.m005"), detail.url); append(t("sharedTimelineFind.m006"), detail.unifiedDiff);
+  append(t("sharedTimelineFind.m007"), detail.oldString); append(t("sharedTimelineFind.m008"), detail.newString);
+  append(t("sharedTimelineFind.m009"), detail.input ?? item.input ?? item.arguments);
+  append(t("sharedTimelineFind.m010"), detail.output ?? detail.result ?? detail.content ?? detail.text);
+  append(t("sharedTimelineFind.m011"), detail.log); append(t("sharedTimelineFind.m012"), detail.actions);
+  append(t("sharedTimelineFind.m013"), detail.childSessionId); append(t("sharedTimelineFind.m014"), detail.exitCode);
+  if (item.error) append(t("sharedTimelineFind.m015"), item.error);
+  if (!fields.length) append(t("sharedTimelineFind.m016"), detail);
   return fields;
 }
 

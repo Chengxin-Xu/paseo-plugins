@@ -1,3 +1,5 @@
+import { TextParts } from "./core-text";
+import { t } from "../shared/text";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -24,7 +26,7 @@ type Phase =
 /** Approve green, deny red, anything that outlasts this request amber. */
 const toneOf = (choice: PermissionChoice): Tone => choice.lasting ? "amber" : choice.behavior === "allow" ? "green" : "red";
 const iconOf = (choice: PermissionChoice) => choice.interrupt ? "OctagonX" : choice.lasting ? "Infinity" : choice.behavior === "allow" ? "Check" : "X";
-const doneText = (choice: PermissionChoice) => choice.interrupt ? "已拒绝并中断" : choice.behavior === "allow" ? "已批准" : "已拒绝";
+const doneText = (choice: PermissionChoice) => choice.interrupt ? t("corePermissionPanel.deniedAndInterrupted") : choice.behavior === "allow" ? t("corePermissionPanel.approved") : t("corePermissionPanel.denied");
 /** The answered request stays on screen this long before the caller reads the Agent again (and it disappears). */
 const SETTLE_MS = 1200;
 
@@ -53,24 +55,24 @@ export function PermissionPanel({ theme, agentId, agentCwd, request, compact = f
     try {
       const outcome = await answerPermission(paseo.agents.ref(agentId), view.id, choice);
       // The list around it may drop the request (the directory saw it go) before the check here ends: the toast still says so.
-      if (outcome.kind === "answered") toast.show(`${doneText(choice)}${choice.fromProvider ? `（${choice.label}）` : ""}：${view.title}`, { variant: "success" });
-      if (outcome.kind === "elsewhere") toast.show("这条请求已在别处处理");
+      if (outcome.kind === "answered") toast.show(t("corePermissionPanel.message2", { value1: doneText(choice), value2: choice.fromProvider ? t("corePermissionPanel.message", { value1: choice.label }) : "", value3: view.title }), { variant: "success" });
+      if (outcome.kind === "elsewhere") toast.show(t("corePermissionPanel.thisRequestWasAlreadyHandledElsewhere"));
       if (!mounted.current) return;
       if (outcome.kind === "answered") { setPhase({ kind: "done", choice, stillRunning: outcome.stillRunning }); settleLater(); }
       else if (outcome.kind === "elsewhere") { setPhase({ kind: "elsewhere" }); settleLater(); }
       else if (outcome.kind === "unconfirmed") setPhase({ kind: "unconfirmed", choice });
-      else setPhase({ kind: "error", message: "暂时读不到这个 Agent 的状态，这次没有发出处理，请稍后再试。" });
+      else setPhase({ kind: "error", message: t("corePermissionPanel.thisAgentSStateIsTemporarilyUnavailable") });
     } catch (error) {
-      if (mounted.current) setPhase({ kind: "error", message: `处理没有发出：${error instanceof Error ? error.message : "请稍后重试"}` });
+      if (mounted.current) setPhase({ kind: "error", message: t("corePermissionPanel.responseNotSent", { value1: error instanceof Error ? error.message : t("corePermissionPanel.tryAgainLater") }) });
     } finally { inFlight.current = false; }
   };
   const busy = phase.kind === "busy", settled = phase.kind === "done" || phase.kind === "elsewhere";
   const amber = hue(theme, "amber");
-  return <View testID="permission-panel" accessibilityLabel={`审批请求：${view.title}`}
+  return <View testID="permission-panel" accessibilityLabel={t("corePermissionPanel.approvalRequest", { value1: view.title })}
     style={{ borderRadius: radius.lg, borderWidth: hairline, borderColor: settled ? colors.border : hue(theme, "amber", "line"), backgroundColor: colors.surface1, overflow: "hidden" }}>
     {phase.kind === "done" ? <Flash count={1} color={hue(theme, phase.choice.behavior === "allow" ? "green" : "red", "soft")} /> : null}
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm, backgroundColor: settled ? "transparent" : hue(theme, "amber", "soft") }}>
-      <Badge theme={theme} label={view.kind === "mode" ? "切换模式" : "待审批"} tone={view.kind === "mode" ? "sky" : "amber"} icon={view.kind === "mode" ? "ToggleRight" : "Hand"} solid={!settled} />
+      <Badge theme={theme} label={view.kind === "mode" ? t("corePermissionPanel.switchMode") : t("corePermissionPanel.pendingApproval")} tone={view.kind === "mode" ? "sky" : "amber"} icon={view.kind === "mode" ? "ToggleRight" : "Hand"} solid={!settled} />
       <Text selectable numberOfLines={3} style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.small, fontWeight: "600", lineHeight: 19 }}>{view.title}</Text>
     </View>
     <View style={{ gap: space.sm, padding: space.md }}>
@@ -78,24 +80,24 @@ export function PermissionPanel({ theme, agentId, agentCwd, request, compact = f
       {phase.kind === "done" ? <Outcome theme={theme} choice={phase.choice} stillRunning={phase.stillRunning} />
         : phase.kind === "elsewhere" ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
           <Icon name="CircleCheck" size={16} color={colors.foregroundMuted} />
-          <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>这条请求已在别处处理</Text>
+          <Text style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("corePermissionPanel.thisRequestWasAlreadyHandledElsewhere")}</Text>
         </View>
         : <>
-          {phase.kind === "unconfirmed" ? <Banner theme={theme} tone="warning" message={`已发出「${phase.choice.label}」，但宿主还没确认：这条请求仍在等待。可能还在处理，稍后再看，或去会话里处理。`} /> : null}
+          {phase.kind === "unconfirmed" ? <Banner theme={theme} tone="warning" message={t("corePermissionPanel.sentButPaseoHasNotConfirmedIt", { value1: phase.choice.label })} /> : null}
           {phase.kind === "error" ? <Banner theme={theme} tone="danger" message={phase.message} /> : null}
           {phase.kind === "arming" ? <View accessibilityRole="alert" style={{ gap: space.sm, padding: space.md, borderRadius: radius.md, borderWidth: hairline, borderColor: hue(theme, "amber", "line"), backgroundColor: hue(theme, "amber", "soft") }}>
             <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
               <Icon name="TriangleAlert" size={16} color={amber} />
-              <Text style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.small, lineHeight: 19 }}>{`「${phase.choice.label}」不只这一次：之后同类请求可能不再问你，直接执行。确定吗？`}</Text>
+              <Text style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.small, lineHeight: 19 }}>{t("corePermissionPanel.appliesBeyondThisRequestSimilarRequestsMay", { value1: phase.choice.label })}</Text>
             </View>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md }}>
-              <Button theme={theme} tone="amber" icon="Infinity" label={`确定：${phase.choice.label}`} grow={compact} accessibilityLabel={`确定${phase.choice.label}：${view.title}`} onPress={() => void answer(phase.choice)} />
-              <Button theme={theme} variant="ghost" label="再想想" onPress={() => setPhase({ kind: "idle" })} />
+              <Button theme={theme} tone="amber" icon="Infinity" label={t("corePermissionPanel.confirm", { value1: phase.choice.label })} grow={compact} accessibilityLabel={t("corePermissionPanel.confirm2", { value1: phase.choice.label, value2: view.title })} onPress={() => void answer(phase.choice)} />
+              <Button theme={theme} variant="ghost" label={t("corePermissionPanel.goBack")} onPress={() => setPhase({ kind: "idle" })} />
             </View>
           </View>
             : <View style={{ flexDirection: "row", flexWrap: "wrap", gap: compact ? space.md : space.sm, paddingTop: space.xs }}>
               {view.choices.map(choice => <Button key={choice.key} theme={theme} label={choice.label} icon={iconOf(choice)} variant={choice.interrupt ? "danger" : "secondary"} tone={toneOf(choice)} grow={compact}
-                busy={busy && phase.choice.key === choice.key} disabled={busy} accessibilityLabel={`${choice.label}：${view.title}`} testID={`permission-choice-${choice.key}`}
+                busy={busy && phase.choice.key === choice.key} disabled={busy} accessibilityLabel={t("corePermissionPanel.message3", { value1: choice.label, value2: view.title })} testID={`permission-choice-${choice.key}`}
                 onPress={() => choice.lasting ? setPhase({ kind: "arming", choice }) : void answer(choice)} />)}
             </View>}
         </>}
@@ -126,36 +128,36 @@ export function RequestBody({ theme, view, expanded, onToggle }: { theme: Plugin
     const found = view.cut[part];
     if (!found) return null;
     // A list of parameters says how many did not fit whole: approving it approves those too (codex-obs-send-ui-F1).
-    const items = found.items ? `；共 ${found.items.total.toLocaleString()} 项参数，后 ${(found.items.total - found.items.whole).toLocaleString()} 项没有完整显示` : "";
-    return note(`${what}太长，已截断：只保留了前 ${found.kept.toLocaleString()} 字（原文 ${found.total.toLocaleString()} 字）${items}`);
+    const items = found.items ? t("corePermissionPanel.parametersTotalTheLastAreNotShown", { value1: found.items.total.toLocaleString(), value2: (found.items.total - found.items.whole).toLocaleString() }) : "";
+    return note(t("corePermissionPanel.wasTooLongAndWasTruncatedTo", { value1: what, value2: found.kept.toLocaleString(), value3: found.total.toLocaleString(), value4: items }));
   };
   return <View style={{ gap: space.sm }}>
-    {view.tool ? <MetaLine theme={theme} parts={[`工具 ${view.tool}`, view.provider]} /> : view.provider ? <MetaLine theme={theme} parts={[view.provider]} /> : null}
+    {view.tool ? <MetaLine theme={theme} parts={[t("corePermissionPanel.tool", { value1: view.tool }), view.provider]} /> : view.provider ? <MetaLine theme={theme} parts={[view.provider]} /> : null}
     {view.command ? code(view.command, 6, "$ ") : null}
-    {cut("command", "命令")}
+    {cut("command", t("corePermissionPanel.command"))}
     {view.target ? <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
       <Icon name="FileCode" size={14} color={hue(theme, "violet")} />
       <Text selectable numberOfLines={expanded ? undefined : 2} style={{ flexShrink: 1, color: colors.foreground, fontFamily: monoFont, fontSize: fontSize.meta, lineHeight: 17 }}>{shown(view.target)}</Text>
     </View> : null}
-    {cut("target", "目标")}
+    {cut("target", t("corePermissionPanel.target"))}
     {view.description ? <Text selectable numberOfLines={expanded ? undefined : 3} style={{ color: colors.foregroundMuted, fontSize: fontSize.small, lineHeight: 19 }}>{shown(view.description)}</Text> : null}
-    {cut("description", "说明")}
+    {cut("description", t("corePermissionPanel.description"))}
     {view.args ? code(view.args, 4) : null}
-    {cut("args", "内容")}
-    {view.hostCut !== null ? note(`宿主只传来这段差异的开头，另有 ${view.hostCut.toLocaleString()} 字没有传过来${view.params ? "；下面的参数里是完整的修改内容" : ""}`) : null}
+    {cut("args", t("corePermissionPanel.content"))}
+    {view.hostCut !== null ? note(t("corePermissionPanel.paseoSentOnlyTheBeginningOfThis", { value1: view.hostCut.toLocaleString(), value2: view.params ? t("corePermissionPanel.theParametersBelowContainTheCompleteChanges") : "" })) : null}
     {view.params ? code(view.params, 3) : null}
-    {cut("params", "参数")}
+    {cut("params", t("corePermissionPanel.parameters"))}
     {view.cwd ? <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
       <Icon name="FolderOpen" size={14} color={hue(theme, "blue")} />
       <Text numberOfLines={expanded ? undefined : 2} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>
-        <Text>工作目录 </Text><Text selectable style={{ color: colors.foreground, fontFamily: monoFont }}>{shown(view.cwd)}</Text>{view.cwdIsAgent ? <Text>（请求没写目录，这是 Agent 的工作目录）</Text> : null}
+        <TextParts id={view.cwdIsAgent ? "corePermissionPanel.agentWorkingDirectory" : "corePermissionPanel.workingDirectory"} values={{ directory: <Text selectable style={{ color: colors.foreground, fontFamily: monoFont }}>{shown(view.cwd)}</Text> }} />
       </Text>
     </View> : null}
-    {cut("cwd", "工作目录")}
-    {collapsible ? <Pressable accessibilityRole="button" accessibilityLabel={expanded ? "收起请求内容" : "展开完整请求内容"} accessibilityState={{ expanded }} {...aria({ expanded })} onPress={onToggle} hitSlop={8}
+    {cut("cwd", t("corePermissionPanel.workingDirectory3"))}
+    {collapsible ? <Pressable accessibilityRole="button" accessibilityLabel={expanded ? t("corePermissionPanel.collapseRequestContent") : t("corePermissionPanel.expandFullRequestContent")} accessibilityState={{ expanded }} {...aria({ expanded })} onPress={onToggle} hitSlop={8}
       style={state => ({ flexDirection: "row", alignItems: "center", gap: space.xs, alignSelf: "flex-start", minHeight: 24, opacity: state.pressed ? 0.7 : 1 })}>
       <Icon name={expanded ? "ChevronUp" : "ChevronDown"} size={14} color={toneColor(theme, "info")} />
-      <Text style={{ color: toneColor(theme, "info"), fontSize: fontSize.meta, fontWeight: "600" }}>{expanded ? "收起" : "展开完整内容"}</Text>
+      <Text style={{ color: toneColor(theme, "info"), fontSize: fontSize.meta, fontWeight: "600" }}>{expanded ? t("corePermissionPanel.collapse") : t("corePermissionPanel.expandFullContent")}</Text>
     </Pressable> : null}
   </View>;
 }
@@ -165,9 +167,9 @@ function Outcome({ theme, choice, stillRunning }: { theme: PluginTheme; choice: 
   return <View style={{ gap: space.sm }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
       <Pop count={1} size={18}><Icon name={choice.behavior === "allow" ? "CircleCheck" : "CircleX"} size={18} color={color} /></Pop>
-      <Text style={{ flexShrink: 1, color: hue(theme, choice.behavior === "allow" ? "green" : "red", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{`${doneText(choice)}${choice.fromProvider ? ` · ${choice.label}` : ""}`}</Text>
+      <Text style={{ flexShrink: 1, color: hue(theme, choice.behavior === "allow" ? "green" : "red", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{t("corePermissionPanel.decisionSummary", { decision: doneText(choice), detail: choice.fromProvider ? t("corePermissionPanel.decisionDetail", { label: choice.label }) : "" })}</Text>
     </View>
-    {stillRunning ? <Banner theme={theme} tone="warning" message="已拒绝，但 Agent 还在运行：这个 Provider 没有随拒绝中断这一轮。需要的话去会话里停止它。" /> : null}
+    {stillRunning ? <Banner theme={theme} tone="warning" message={t("corePermissionPanel.deniedButTheAgentIsStillRunning")} /> : null}
   </View>;
 }
 
@@ -180,10 +182,10 @@ export function AgentApprovals({ theme, agentId, compact = false, onOpen, onSett
   const query = useQuery({ queryKey: ["observatory-approvals", agentId], queryFn: () => paseo.agents.ref(agentId).refresh(), staleTime: 3000, refetchOnWindowFocus: false,
     refetchInterval: foreground ? 8000 : false, retry: 1 });
   if (query.isPending) return <Skeleton theme={theme} rows={2} />;
-  if (query.error) return <Banner theme={theme} tone="danger" message={`读不到这个 Agent 的请求：${query.error.message}`} action={{ label: "重试", onPress: () => void query.refetch() }} />;
+  if (query.error) return <Banner theme={theme} tone="danger" message={t("corePermissionPanel.cannotReadThisAgentSRequests", { value1: query.error.message })} action={{ label: t("corePermissionPanel.retry"), onPress: () => void query.refetch() }} />;
   const agent = query.data?.agent ?? null;
   const views = (agent?.archivedAt ? [] : agent?.pendingPermissions ?? []).flatMap(request => { const view = permissionView(request, agent?.cwd); return view ? [{ request, view }] : []; });
-  if (!views.length) return <MetaLine theme={theme} parts={["没有等你处理的请求了"]} />;
+  if (!views.length) return <MetaLine theme={theme} parts={[t("corePermissionPanel.noRequestsWaitingForYou")]} />;
   return <View style={{ gap: space.sm }}>
     {views.map(({ request, view }) => {
       if (view.inline) return <PermissionPanel key={view.id} theme={theme} agentId={agentId} agentCwd={agent?.cwd} request={request} compact={compact} onSettled={() => { void query.refetch(); onSettled?.(); }} />;
@@ -191,8 +193,8 @@ export function AgentApprovals({ theme, agentId, compact = false, onOpen, onSett
       const title = summarizeRequest(request).title ?? view.title;
       return <View key={view.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm, padding: space.sm, borderRadius: radius.md, borderWidth: hairline, borderColor: colors.border }}>
         <Icon name={view.kind === "question" ? "MessageCircleQuestion" : view.kind === "plan" ? "ClipboardList" : "CircleHelp"} size={16} color={hue(theme, view.kind === "question" ? "violet" : "amber")} />
-        <Text numberOfLines={2} style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.small }}>{view.kind === "question" ? `提问：${title}` : view.kind === "plan" ? `计划待批：${title}` : title}</Text>
-        <Button theme={theme} size="sm" variant="ghost" icon="ArrowUpRight" label={view.kind === "question" ? "去回答" : view.kind === "plan" ? "查看计划" : "去处理"} accessibilityLabel={`${view.kind === "question" ? "去回答" : view.kind === "plan" ? "查看计划" : "去处理"}：${title}`} onPress={onOpen} />
+        <Text numberOfLines={2} style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.small }}>{view.kind === "question" ? t("corePermissionPanel.question", { value1: title }) : view.kind === "plan" ? t("corePermissionPanel.planAwaitingApproval", { value1: title }) : title}</Text>
+        <Button theme={theme} size="sm" variant="ghost" icon="ArrowUpRight" label={view.kind === "question" ? t("corePermissionPanel.answer") : view.kind === "plan" ? t("corePermissionPanel.viewPlan") : t("corePermissionPanel.handle")} accessibilityLabel={t("corePermissionPanel.message3", { value1: view.kind === "question" ? t("corePermissionPanel.answer") : view.kind === "plan" ? t("corePermissionPanel.viewPlan") : t("corePermissionPanel.handle"), value2: title })} onPress={onOpen} />
       </View>;
     })}
   </View>;

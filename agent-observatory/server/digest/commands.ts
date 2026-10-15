@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import type { CheckKind } from "../../shared/digest";
 
 type CommandAnalysis = { program: string; check: CheckKind | null; git: string | null };
@@ -361,17 +362,17 @@ function gitMilestone(words: string[]): string | null {
       : ["-m", "--message", "-F", "--file", "-s", "--strategy", "-X", "--strategy-option", "--into-name"];
     const flags = optionFlags(words.slice(index + 1), new Set(valueOptions));
     if (flags.has("--dry-run") || flags.has("--help") || flags.has("-h")) return null;
-    if (words[index] === "commit") return "已提交代码";
-    if (words[index] === "push" && !flags.has("-n")) return "已推送代码";
-    if (words[index] === "merge" && !flags.has("--abort") && !flags.has("--quit")) return "已合并代码";
+    if (words[index] === "commit") return t("serverDigestCommands.m001");
+    if (words[index] === "push" && !flags.has("-n")) return t("serverDigestCommands.m002");
+    if (words[index] === "merge" && !flags.has("--abort") && !flags.has("--quit")) return t("serverDigestCommands.m003");
   }
   if (program === "gh") {
     const index = skipOptions(words, 1, new Set(["-R", "--repo", "--hostname"]));
     const flags = optionFlags(words.slice(index + 2), new Set(["-t", "--title", "-b", "--body", "-F", "--body-file", "-a", "--assignee", "-B", "--base",
       "-H", "--head", "-l", "--label", "-m", "--milestone", "-p", "--project", "-r", "--reviewer", "-T", "--template", "--subject", "--author-email", "--match-head-commit"]));
     if (flags.has("--dry-run") || flags.has("--help") || flags.has("-h")) return null;
-    if (words[index] === "pr" && words[index + 1] === "create") return "已创建 PR";
-    if (words[index] === "pr" && words[index + 1] === "merge") return "已合并 PR";
+    if (words[index] === "pr" && words[index + 1] === "create") return t("serverDigestCommands.m004");
+    if (words[index] === "pr" && words[index + 1] === "merge") return t("serverDigestCommands.m005");
   }
   return null;
 }

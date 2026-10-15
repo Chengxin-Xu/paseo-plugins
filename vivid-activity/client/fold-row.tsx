@@ -1,3 +1,5 @@
+import { useI18n } from "./i18n-client";
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useMemo } from "react";
@@ -67,6 +69,7 @@ function LookBar({ theme, mode, parts }: { theme: Theme; mode: string; parts: Re
  * 运行中的段：「前面 7 步 …」。点一下展开整段（Paseo 重新投影，被折叠的行回来），再点收起；选择在本次会话里记住。
  */
 export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimelineItemProps<FoldItemData>) {
+  useI18n();
   const data = item.data;
   useFoldRow(agentId, undefined, undefined, timestamp);
   const palette = usePalette(theme);
@@ -76,7 +79,7 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
   const tone = !done ? "blue" : status === "failed" ? "red" : status === "canceled" ? "muted" : "green";
   // A live run that just finished folds into this row: flash once, pop the tile.
   const changes = useChangeCount(data.mode);
-  const parts = useMemo(() => foldCountParts(data.counts), [data.counts]);
+  const parts = foldCountParts(data.counts);
   const bar = useMemo(() => parts.map((part) => [part.look, data.counts.find(([look]) => look === part.look)?.[1] ?? 0] as const), [data.counts, parts]);
   const duration = done ? formatFoldDuration(data.durationMs) : null;
   const toggle = useCallback(() => foldRuntime.toggle(agentId, data.segment, !data.expanded), [agentId, data.expanded, data.segment]);
@@ -118,13 +121,13 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
         <Text {...cuiTextEscape} numberOfLines={1} style={text.counts}>
           {parts.map((part, index) => (
             <Text key={part.look}>
-              {index > 0 ? " · " : ""}
+              {index > 0 ? t("ui.metaSeparator") : ""}
               <Text style={{ color: countColor(theme, palette.mode, part.look), fontWeight: "600" }}>{part.text}</Text>
             </Text>
           ))}
         </Text>
         <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 2 }} />
-        {data.failed > 0 ? <StatusPill theme={theme} status="failed" text={`失败 ${data.failed}`} /> : null}
+        {data.failed > 0 ? <StatusPill theme={theme} status="failed" text={t("ui.failed2", { count: data.failed })} /> : null}
         {duration ? <Text {...cuiTextEscape} numberOfLines={1} style={text.meta}>{duration}</Text> : null}
         {done ? <StatusMark theme={theme} status={status} size={14} /> : null}
         <Icon name={data.expanded ? "ChevronDown" : "ChevronRight"} size={12} color={theme.colors.foregroundMuted} />

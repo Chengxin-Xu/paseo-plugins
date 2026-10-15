@@ -1,3 +1,4 @@
+import { t } from "./text";
 /**
  * 本地补丁：计时。纯函数，客户端、服务端、单元测试共用。
  *
@@ -125,13 +126,13 @@ export function rowTimeText(times: RowTimes | null, running: boolean, liveNow: n
  */
 export function formatDuration(ms: number | null | undefined, options: { live?: boolean } = {}): string | null {
   if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < (options.live ? 0 : 100)) return null;
-  if (!options.live && ms < 9_950) return `${(ms / 1000).toFixed(1)} 秒`;
+  if (!options.live && ms < 9_950) return t("timing.seconds", { count: (ms / 1000).toFixed(1) });
   const seconds = options.live ? Math.floor(ms / 1000) : Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 60) return t("timing.seconds", { count: seconds });
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
-  if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+  if (minutes < 60) return rest ? t("timing.minutesSeconds", { minutes, seconds: rest }) : t("timing.minutes", { count: minutes });
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
-  return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
+  return restMinutes ? t("timing.hoursMinutes", { hours, minutes: restMinutes }) : t("timing.hours", { count: hours });
 }

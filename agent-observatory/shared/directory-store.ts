@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { agentAttentionPriority, compareAgents, normalizeAgent, preserveCompletionEvidence, timestamp, type AgentRecord, type AgentSource, type AgentProjectPlacement } from "./model";
 
 export interface AgentDirectoryPage {
@@ -56,7 +57,7 @@ export const DIRECTORY_RECONCILE_INTERVAL = 10 * 60_000;
 const OBSERVE_RETRY_DELAYS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Agent 列表暂时无法同步";
+  return error instanceof Error ? error.message : t("sharedDirectoryStore.m001");
 }
 
 function normalizeDirectoryAgent(source: AgentSource, project: AgentProjectPlacement | null | undefined, previous?: AgentRecord): AgentRecord {

@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+// Registration tests isolate catalog I/O; the i18n suite exercises the real locale store.
+vi.mock("../client/i18n-client", async importOriginal => {
+  const actual = await importOriginal<typeof import("../client/i18n-client")>();
+  const { translator } = await import("../shared/i18n");
+  return { ...actual, createClientI18n: () => ({
+    ready: async () => {}, isReady: () => true, translator, refresh: async () => {}, subscribe: () => () => {}, dispose() {},
+    localized: (register: () => (() => void) | readonly (() => void)[]) => { const value = register(); return typeof value === "function" ? value : () => value.forEach(remove => remove()); },
+  }) };
+});
 vi.mock("../client/lazy-chunk", () => ({ lazySurfaces: () => () => () => null }));
 vi.mock("../client/board", () => ({ NotesSurface: () => null, NotesWorkspacePanel: () => null }));
 vi.mock("../client/composer", () => ({ PromptScreen: () => null, PromptPopover: () => null }));
@@ -20,7 +29,7 @@ function host() {
   const removal = () => { const remove = vi.fn(); removers.push(remove); return remove; };
   const client = {
     paseo: { agents: { list } }, rpc: vi.fn(async (..._args: unknown[]) => ({})),
-    addScreen: vi.fn(screen => { screens.push(screen); return removal(); }), addSurface: vi.fn(removal), addSidebarHeaderItem: vi.fn(removal), addSidebarItem: vi.fn(removal),
+    addScreen: vi.fn(screen => { screens.push({ ...screen, title: typeof screen.title === "function" ? screen.title({}) : screen.title }); return removal(); }), addSurface: vi.fn(removal), addSidebarHeaderItem: vi.fn(removal), addSidebarItem: vi.fn(removal),
     addWorkspacePanel: vi.fn(removal), addCommandCenterItem: vi.fn(removal), addAttachmentSource: vi.fn(removal),
     addSlashCommand: vi.fn(command => { slashes.push(command); return removal(); }),
     addComposerPill: vi.fn(pill => { const registration = { update: vi.fn(), remove: vi.fn() }; pills.push({ ...pill, registration }); return registration; }),

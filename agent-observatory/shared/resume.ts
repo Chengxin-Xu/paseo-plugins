@@ -1,3 +1,5 @@
+import { onTextChange } from "./i18n";
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { QuotaAccount } from "./quota";
@@ -14,18 +16,22 @@ import type { HeartbeatSummary } from "./schedules";
  * when the prompt surely did not go in and the user has not carried on by hand (F1, F3). Where it cannot tell (a restart cut
  * the run short, codex-obs-resume-F2) it says so and leaves it to the user; a heartbeat the user changed in Paseo is theirs.
  */
-export const RESUME_PROMPT = "额度已经恢复。请先看一下这段对话和工作区的当前状态，再接着完成之前没做完的任务；如果已经做完，就简要汇报结果。";
+// i18n-ignore: Original heartbeat prompt is a persisted ownership guard for pre-i18n schedules.
+export const LEGACY_RESUME_PROMPT = "额度已经恢复。请先看一下这段对话和工作区的当前状态，再接着完成之前没做完的任务；如果已经做完，就简要汇报结果。";
+export let RESUME_PROMPT = t("sharedResume.m001");
 /** How long after the reset the Agent is woken, so the provider's own clock has surely rolled over. */
 export const RESUME_DELAY_MS = 2 * 60_000;
 /**
  * The heartbeats behind 恢复后续跑 are named 「恢复后续跑 · <title>」. Only such a heartbeat that wakes the Agent once (`maxRuns` 1)
  * with RESUME_PROMPT is ever adopted, replaced, deleted or cancelled (F7): the name alone could be a copy the user made recurring.
  */
-export const RESUME_NAME = "恢复后续跑";
+// i18n-ignore: Original heartbeat name prefix identifies pre-i18n schedules.
+export const LEGACY_RESUME_NAME = "恢复后续跑";
+export let RESUME_NAME = t("sharedResume.m002");
 /** Delivery is retried until this long after the wake time first confirmed; past it the resume is 未能续跑 (重新安排 starts over). */
 export const RESUME_WINDOW_MS = 6 * 3_600_000;
 /** The window as the card and the confirmation word it (「6 小时内自动再试」). */
-export const RESUME_WINDOW_TEXT = `${RESUME_WINDOW_MS / 3_600_000} 小时`;
+export let RESUME_WINDOW_TEXT = t("sharedResume.m003", { value1: RESUME_WINDOW_MS / 3_600_000 });
 /** A busy Agent (the host fails a run that finds a turn going), or one the host timed out loading, is tried again this much later. */
 export const RESUME_BUSY_RETRY_MS = 10 * 60_000;
 /** A missed wake (host offline, daemon restarted) is tried again this soon. */
@@ -67,6 +73,8 @@ export const resumeEntrySchema = z.object({
    * one ended so, too: none was found, or it could not be told (more than one, or one not a resume heartbeat).
    */
   scheduleId: z.string().max(80).nullable(),
+  /** Fingerprint of the generated name and prompt; language changes never alter ownership. No text is stored. */
+  identity: z.string().regex(/^[a-f0-9]{64}$/).optional().catch(undefined),
   /** The stop it resumes (`StopReason.at`), when the card said. */
   stopAt: iso.nullable(),
   /** 原定唤醒时刻: the wake time first confirmed; the retry window counts from it. */
@@ -145,7 +153,7 @@ export type ResumesResponse = z.infer<typeof getResumes.output>;
 export type ResumesState = Extract<ResumesResponse, { mode: "full" }>;
 export function mergeResumes(previous: ResumesState | undefined, response: ResumesResponse): ResumesState {
   if (response.mode === "full") return response;
-  if (!previous) throw new Error("本地续跑缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedResume.m004"));
   return previous;
 }
 
@@ -176,10 +184,10 @@ export function resumeCron(at: number): { expression: string; timezone: "UTC" } 
   return { expression: `${date.getUTCMinutes()} ${date.getUTCHours()} ${date.getUTCDate()} * *`, timezone: "UTC" };
 }
 export const sameMinute = (a: number, b: number) => Number.isFinite(a) && Number.isFinite(b) && Math.floor(a / 60_000) === Math.floor(b / 60_000);
-export const isResumeName = (name: string | null | undefined) => typeof name === "string" && name.startsWith(RESUME_NAME);
+export const isResumeName = (name: string | null | undefined) => typeof name === "string" && (name.startsWith(LEGACY_RESUME_NAME) || name.startsWith(RESUME_NAME));
 /** The heartbeat's name: 「恢复后续跑 · <title>」, with 第 N 次 on a retry. */
 export function resumeName(title: string | null | undefined, attempt = 1): string {
-  return `${RESUME_NAME} · ${(title || "Agent").slice(0, 60)}${attempt > 1 ? `（第 ${attempt} 次）` : ""}`;
+  return `${RESUME_NAME} · ${(title || "Agent").slice(0, 60)}${attempt > 1 ? t("sharedResume.m005", { attempt: attempt }) : ""}`;
 }
 
 /**
@@ -223,52 +231,52 @@ export interface ResumeLook {
  * all), 已取消, 你已接着做 and 心跳被改过 (codex-obs-resume-F4) grey. `clock` formats an instant in device time (`clockLabel`).
  */
 export function resumeLook(entry: ResumeEntry, clock: (at: number) => string): ResumeLook {
-  const wake = clock(Date.parse(entry.wakeAt)), nth = `（第 ${entry.attempt} 次）`;
+  const wake = clock(Date.parse(entry.wakeAt)), nth = t("sharedResume.m006", { value1: entry.attempt });
   switch (entry.status) {
     case "scheduled": {
       // Its create's answer was lost: the ledger's checks look for the heartbeat, never make it again (codex-obs-resume-recheck12).
-      if (!entry.scheduleId) return { hue: "amber", icon: "RotateCw", pill: "正在核对", text: `安排续跑时宿主没有回话，正在核对 ${wake} 的续跑建好没有；确认不了时，这里会请你到 Paseo 的「计划」里查看。`,
+      if (!entry.scheduleId) return { hue: "amber", icon: "RotateCw", pill: t("sharedResume.m007"), text: t("sharedResume.m008", { wake: wake }),
         cancellable: true, again: false, pending: true };
-      return { hue: "pink", icon: "AlarmClock", pill: `${wake} 续跑`, text: `已安排 ${wake} 自动续跑一次。`, cancellable: true, again: false, pending: true };
+      return { hue: "pink", icon: "AlarmClock", pill: t("sharedResume.m009", { wake: wake }), text: t("sharedResume.m010", { wake: wake }), cancellable: true, again: false, pending: true };
     }
     // Until the host's run record or the session's log proves the prompt went in (codex-obs-resume-recheck-F1), a whole turn long.
-    case "waking": return { hue: "blue", icon: "BellRing", pill: "正在唤醒", text: `心跳正在唤醒它（${wake}）；确认提示已送进会话后，这里会显示「已续跑」。`, cancellable: false, again: false, pending: true };
+    case "waking": return { hue: "blue", icon: "BellRing", pill: t("sharedResume.m011"), text: t("sharedResume.m012", { wake: wake }), cancellable: false, again: false, pending: true };
     case "retrying": {
-      if (!entry.scheduleId) return { hue: "amber", icon: "RotateCw", pill: "正在重排", text: `上次续跑没送出，正在重新安排第 ${entry.attempt} 次。`, cancellable: true, again: false, pending: true };
-      const why = entry.reason === "busy" ? "到点时它正忙，续跑提示没送出" : entry.reason === "missed" ? "上次唤醒没有执行（宿主重启或不在线）"
-        : entry.reason === "restart" ? "宿主重启打断了上次续跑，提示没送出" : entry.reason === "error" ? "宿主没能载入它，续跑提示没送出" : "上次续跑没送出";
-      return { hue: "amber", icon: entry.reason === "busy" ? "Hourglass" : "RotateCw", pill: entry.reason === "busy" ? `正忙 · ${wake} 再试` : `${wake} 再试`,
-        text: `${why}；${wake} 再试${nth}。`, cancellable: true, again: false, pending: true };
+      if (!entry.scheduleId) return { hue: "amber", icon: "RotateCw", pill: t("sharedResume.m013"), text: t("sharedResume.m014", { value1: entry.attempt }), cancellable: true, again: false, pending: true };
+      const why = entry.reason === "busy" ? t("sharedResume.m015") : entry.reason === "missed" ? t("sharedResume.m016")
+        : entry.reason === "restart" ? t("sharedResume.m017") : entry.reason === "error" ? t("sharedResume.m018") : t("sharedResume.m019");
+      return { hue: "amber", icon: entry.reason === "busy" ? "Hourglass" : "RotateCw", pill: entry.reason === "busy" ? t("sharedResume.m020", { wake: wake }) : t("sharedResume.m021", { wake: wake }),
+        text: t("sharedResume.m022", { why: why, wake: wake, nth: nth }), cancellable: true, again: false, pending: true };
     }
     case "delivered": {
       const at = clock(Date.parse(entry.deliveredAt ?? entry.wakeAt));
-      return { hue: "green", icon: "CircleCheck", pill: `已续跑 · ${at}`, text: `${at} 已把续跑提示送进会话${entry.attempt > 1 ? nth : ""}。`, cancellable: false, again: false, pending: false };
+      return { hue: "green", icon: "CircleCheck", pill: t("sharedResume.m023", { at: at }), text: t("sharedResume.m024", { at: at, value2: entry.attempt > 1 ? nth : "" }), cancellable: false, again: false, pending: false };
     }
     case "failed": {
       // Its create's answer was lost, and none could be told for it: none found, more than one, or one that is not a resume
       // heartbeat (codex-obs-resume-recheck12, recheck13-F2).
-      if (entry.reason === "unsure" && !entry.scheduleId) return { hue: "amber", icon: "CircleHelp", pill: "未能确认续跑",
-        text: "没能确认续跑建好没有（安排时宿主没有回话）。请到 Paseo 的「计划」里查看：没有这条续跑就「重新安排」，有多条就删掉多余的。", cancellable: false, again: true, pending: false };
+      if (entry.reason === "unsure" && !entry.scheduleId) return { hue: "amber", icon: "CircleHelp", pill: t("sharedResume.m025"),
+        text: t("sharedResume.m026"), cancellable: false, again: true, pending: false };
       // The run erred after it may have prompted the Agent: sending again on its own could prompt it twice.
-      if (entry.reason === "unsure") return { hue: "amber", icon: "CircleHelp", pill: "未能确认续跑", text: "宿主报告这次续跑出错，提示可能已经送进会话；先看一下会话，需要时再「重新安排」。",
+      if (entry.reason === "unsure") return { hue: "amber", icon: "CircleHelp", pill: t("sharedResume.m027"), text: t("sharedResume.m028"),
         cancellable: false, again: true, pending: false };
       // A restart cut the run short and nothing shows whether the prompt went in: never sent again on its own.
-      if (entry.reason === "restart-unsure") return { hue: "amber", icon: "CircleHelp", pill: "未能确认续跑",
-        text: "宿主重启打断了这次续跑，没能确认续跑是否送达。为免重复，观测台不会自动重发；先看一下会话，需要时再「重新安排」。", cancellable: false, again: true, pending: false };
+      if (entry.reason === "restart-unsure") return { hue: "amber", icon: "CircleHelp", pill: t("sharedResume.m029"),
+        text: t("sharedResume.m030"), cancellable: false, again: true, pending: false };
       const final = entry.reason === "archived" || entry.reason === "gone" || entry.reason === "error";
-      const text = entry.reason === "archived" ? "这个 Agent 已归档，续跑已停止。" : entry.reason === "gone" ? "宿主里已经找不到这个 Agent，续跑已停止。"
-        : entry.reason === "error" ? "宿主没能载入它（ACP 会话不能重新载入），续跑没送出。"
-        : entry.reason === "expired" ? `从 ${clock(Date.parse(entry.plannedAt))} 起 ${RESUME_WINDOW_TEXT}内一直没能送出（正忙、宿主不在线或没能载入它）。` : "宿主没能建立重试的心跳，续跑没有送出。";
-      return { hue: "red", icon: "AlarmClockOff", pill: "未能续跑", text, cancellable: false, again: !final, pending: false };
+      const text = entry.reason === "archived" ? t("sharedResume.m031") : entry.reason === "gone" ? t("sharedResume.m032")
+        : entry.reason === "error" ? t("sharedResume.m033")
+        : entry.reason === "expired" ? t("sharedResume.m034", { value1: clock(Date.parse(entry.plannedAt)), RESUME_WINDOW_TEXT: RESUME_WINDOW_TEXT }) : t("sharedResume.m035");
+      return { hue: "red", icon: "AlarmClockOff", pill: t("sharedResume.m036"), text, cancellable: false, again: !final, pending: false };
     }
     case "canceled": {
-      if (entry.reason === "resumed") return { hue: "muted", icon: "MessageSquareText", pill: "你已接着做", text: "停下之后你已经给它发过消息，续跑已取消，免得重复。", cancellable: false, again: true, pending: false };
-      if (entry.reason === "edited") return { hue: "muted", icon: "FilePen", pill: "心跳被改过",
-        text: "续跑的心跳在 Paseo 里被改过，观测台不再管理它：不会把它当续跑核对，也不会删除它；它照你改过的样子运行，要停掉请到 Paseo 的「计划」里处理。", cancellable: false, again: true, pending: false };
+      if (entry.reason === "resumed") return { hue: "muted", icon: "MessageSquareText", pill: t("sharedResume.m037"), text: t("sharedResume.m038"), cancellable: false, again: true, pending: false };
+      if (entry.reason === "edited") return { hue: "muted", icon: "FilePen", pill: t("sharedResume.m039"),
+        text: t("sharedResume.m040"), cancellable: false, again: true, pending: false };
       // Cancelled while its create's answer was still to be confirmed and none was found: one the host is still writing may land.
-      const text = entry.reason === "deleted" ? "续跑的心跳已在 Paseo 的「计划」里删除，到点不会唤醒它。" : entry.reason === "paused" ? "续跑的心跳在 Paseo 的「计划」里被暂停，到点不会唤醒它。"
-        : entry.scheduleId ? "续跑已取消。" : "已停止核对和补建。如果之后在 Paseo 的「计划」里出现这条续跑，请删除它。";
-      return { hue: "muted", icon: "AlarmClockOff", pill: "已取消续跑", text, cancellable: false, again: true, pending: false };
+      const text = entry.reason === "deleted" ? t("sharedResume.m041") : entry.reason === "paused" ? t("sharedResume.m042")
+        : entry.scheduleId ? t("sharedResume.m043") : t("sharedResume.m044");
+      return { hue: "muted", icon: "AlarmClockOff", pill: t("sharedResume.m045"), text, cancellable: false, again: true, pending: false };
     }
   }
 }
@@ -305,17 +313,17 @@ export const HANDOVER_LABEL = "observatory.handover-from";
  * at the workspace's changes and carries on; the original must not be resumed as well.
  */
 export function handoverPrompt(source: { id: string; title?: string | null }): string {
-  const title = source.title?.trim() || "未命名会话";
+  const title = source.title?.trim() || t("sharedResume.m046");
   return [
-    `原会话「${title}」（${source.id}）因为用量额度用尽停下了，请你接着把它没做完的任务做完。`,
+    t("sharedResume.m047", { title: title, value2: source.id }),
     "",
-    "1. 先自己补上下文（不用我贴对话）：",
+    t("sharedResume.m048"),
     `   paseo inspect ${source.id}`,
     `   paseo logs ${source.id} --tail 200`,
-    "2. 再看工作区当前的改动（git status、git diff），在这个基础上接着做，不要推倒重来。",
-    "3. 把没做完的部分做完，最后简要说明做了什么、怎么验证的。",
+    t("sharedResume.m049"),
+    t("sharedResume.m050"),
     "",
-    "原会话已经停下，不要给它发消息，也不要让它续跑；如果它还安排着「恢复后续跑」，请提醒我取消，免得两边同时改同一个工作区。",
+    t("sharedResume.m051"),
   ].join("\n");
 }
 /** One stop handed to one profile is one Agent, however often it is tapped or retried (`idempotencyKey`). */
@@ -324,5 +332,12 @@ export function handoverKey(agentId: string, stopAt: string, profileId: string):
 }
 /** 「<原标题>（接手自 <provider>）」. */
 export function handoverTitle(title: string | null | undefined, provider: string): string {
-  return `${(title?.trim() || "未命名会话").slice(0, 50)}（接手自 ${provider.slice(0, 24)}）`;
+  return t("sharedResume.m052", { value1: (title?.trim() || t("sharedResume.m053")).slice(0, 50), value2: provider.slice(0, 24) });
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  RESUME_PROMPT = t("sharedResume.m001");
+  RESUME_NAME = t("sharedResume.m002");
+  RESUME_WINDOW_TEXT = t("sharedResume.m003", { value1: RESUME_WINDOW_MS / 3_600_000 });
+});

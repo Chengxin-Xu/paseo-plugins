@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { BrowserPage } from './browser-types';
 import { BUDGETS, withTimeout } from './budgets';
 import { setVerifiedViewport } from './viewport';
@@ -22,7 +23,7 @@ export async function measurePageWidth(page:BrowserPage,timeoutMs=BUDGETS.measur
       if(excess>8)overflow=Math.max(overflow,excess);
     }
     return {width,height,overflow,requiredWidth:Math.ceil(width+overflow)};
-  })()`),timeoutMs,()=>{throw new Error('网页长时间没有响应，无法测量页面宽度。');});
+  })()`),timeoutMs,()=>{throw new Error(t('serverError.measureTimeout'));});
 }
 
 /** Reflow the live viewport, never replace it with a full-page photograph. No page navigation. */

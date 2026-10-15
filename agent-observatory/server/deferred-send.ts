@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { consentFor, contentKey, coversConsent, messageIdKey, permissionIds, sendPlan, type Consent, type SendTarget } from "./send-plan";
+import { addDefaults, t, type Params } from "../shared/i18n";
+import { kitDeferredServer } from "../shared/locales/kit/zh-CN.json";
+
+addDefaults({ kitDeferredServer });
 
 /**
  * A plugin server's ledger of messages to existing agents: 「等这一轮结束再发」, and sending now.
@@ -262,35 +266,41 @@ const MAX_PRIOR_IDS = 5;
 /** Named values a guard keeps, and how long each name and value may be. */
 const MAX_GUARD = 8;
 
+// Notes are read when written, in the plugin's language then (`kitDeferredServer`); a stored note keeps its language.
+const note = (name: string, params?: Params) => t(`kitDeferredServer.${name}`, params);
 const NOTES = {
-  queued: "已排队，等 Agent 这一轮结束、没有待审批时自动发送",
-  sending: "正在发送",
-  movedOn: "排队之后会话里又有了新消息，还要发吗？",
-  unsure: "排队之后会话有了变化，分不清是不是别人发的消息，还要发吗？",
-  unknown: "没收到发送结果，可能已经送达。点「仍然发送」会先查会话记录：已经有这条就不再发，没有才重发；也可以取消。",
-  failed: (error: string) => `发送失败：${error}。点「仍然发送」会先查会话记录，确认没有这条才重发；也可以取消。`,
-  stopped: "插件重新加载了，这条消息没有发出。点「仍然发送」会在 Agent 空闲时发送，也可以取消。",
-  settling: "上一次发送可能还在进行，会话里暂时还没有这条。过两分钟再点「仍然发送」。",
-  unreadable: "读不到会话记录，没法确认上一次有没有送达，请稍后再点「仍然发送」。",
-  cannotTell: "会话记录太长，没法确认上一次有没有送达。请打开会话看一下：确认没有这条，就取消它再重新发送。",
-  strangers: "会话里有分不清来源的消息（可能是从历史记录重建的），没法确认上一次有没有送达。请打开会话看一下：确认没有这条，就取消它再重新发送。",
-  late: "这次没来得及确认 Agent 的状态，没有发送。请再点一次。",
-  sent: "已送达",
-  found: "已送达（在会话记录里找到了这条消息）",
-  foundSame: "会话里已经有同样内容的消息，没有再发（会话记录不带消息编号，分不清是不是这一次发的）",
-  "maybe-sent": "发送结果不确定，可能已经送达，请打开会话看一下",
-  canceledUnknown: "已取消，没有再发；之前那一次可能已经送达",
-  canceledFailed: "已取消，不再重试",
-  canceled: "已取消，没有发送",
-  discarded: "Agent 已归档或不存在，没有发送",
-  expired: "排队超过一天，已放弃发送",
-  busy: "正在给这个 Agent 发送另一条消息，这条没有发送。请稍后再试。",
-  gone: "这个 Agent 已归档或不存在，没有发送。",
-  refused: (reason: string) => `${reason}，没有发送。`,
-  refusedAfterTry: (reason: string) => `${reason}；之前已经发出过一次，没确认是否送达，不会再发。请打开会话看一下。`,
-  guardUnknown: (error: string) => `没能确认这条消息还适用（${error}），没有发送。`,
-  guardHeld: (error: string) => `没能确认这条消息还适用（${error}），没有发送。点「仍然发送」会再检查一次；也可以取消。`,
-} as const;
+  get queued() { return note("queued"); },
+  get sending() { return note("sending"); },
+  get movedOn() { return note("movedOn"); },
+  get unsure() { return note("unsure"); },
+  get unknown() { return note("unknown"); },
+  failed: (error: string) => note("failed", { error }),
+  failedRepeatedly: (error: string) => note("failedRepeatedly", { error }),
+  get stopped() { return note("stopped"); },
+  get settling() { return note("settling"); },
+  get unreadable() { return note("unreadable"); },
+  get cannotTell() { return note("cannotTell"); },
+  get strangers() { return note("strangers"); },
+  get late() { return note("late"); },
+  get sent() { return note("sent"); },
+  get found() { return note("found"); },
+  get foundSame() { return note("foundSame"); },
+  get "maybe-sent"() { return note("maybeSent"); },
+  get canceledUnknown() { return note("canceledUnknown"); },
+  get canceledFailed() { return note("canceledFailed"); },
+  get canceled() { return note("canceled"); },
+  get discarded() { return note("discarded"); },
+  get expired() { return note("expired"); },
+  get busy() { return note("busy"); },
+  get gone() { return note("gone"); },
+  refused: (reason: string) => note("refused", { reason }),
+  refusedAfterTry: (reason: string) => note("refusedAfterTry", { reason }),
+  guardUnknown: (error: string) => note("guardUnknown", { error }),
+  guardUnknownBusy: (error: string) => note("guardUnknownBusy", { error }),
+  guardHeld: (error: string) => note("guardHeld", { error }),
+  get lockBusy() { return note("lockBusy"); },
+  get lockHeld() { return note("lockHeld"); },
+};
 
 class OutcomeUnknown extends Error {}
 
@@ -312,17 +322,17 @@ const errorText = (error: unknown) => {
   const message = (error as { message?: unknown } | null)?.message;
   return (typeof message === "string" ? message : String(error ?? "")).slice(0, 200);
 };
-/** A send failure for the user: known causes in Chinese, anything else as the host's own words after a Chinese label. */
+/** A send failure for the user: known causes in the plugin's words, anything else as the host's own words after a label. */
 const failureText = (error: unknown): string => {
   const text = errorText(error);
   const start = /did not start within (\d+) seconds/.exec(text);
-  if (start) return `Agent 在 ${start[1]} 秒内没有开始这一轮`;
-  if (/already has an active run/i.test(text)) return "Agent 正在运行另一轮";
-  if (/foreground turn is already active/i.test(text)) return "Agent 还在结束上一轮";
-  if (/not found|unknown agent|no such agent/i.test(text)) return "找不到这个 Agent";
-  if (/timed? ?out/i.test(text)) return "等待宿主回应超时";
-  if (/socket|connection|disconnect|ECONNRESET|EPIPE|closed/i.test(text)) return "和宿主的连接断了";
-  return text ? `宿主返回：${text}` : "未知错误";
+  if (start) return note("noStart", { seconds: start[1] });
+  if (/already has an active run/i.test(text)) return note("otherRun");
+  if (/foreground turn is already active/i.test(text)) return note("finishingTurn");
+  if (/not found|unknown agent|no such agent/i.test(text)) return note("notFound");
+  if (/timed? ?out/i.test(text)) return note("timeout");
+  if (/socket|connection|disconnect|ECONNRESET|EPIPE|closed/i.test(text)) return note("disconnected");
+  return text ? note("hostSaid", { text }) : note("unknownError");
 };
 const requestOutcome = (error: unknown) => {
   if (error instanceof OutcomeUnknown) return true;
@@ -509,9 +519,9 @@ export class DeferredSend {
   async send(input: DeferredSendInput, paseo?: DeferredPaseo | null): Promise<DeferredSendResult> {
     this.use(paseo);
     const api = paseo ?? this.paseo;
-    if (!api) throw new Error("插件还没有连上 daemon，请稍后再试。");
-    if (!input.text.trim()) throw new Error("消息是空的。");
-    if (input.text.length > MAX_DEFERRED_TEXT) throw new Error("消息太长，不能发送。");
+    if (!api) throw new Error(note("notConnected"));
+    if (!input.text.trim()) throw new Error(note("empty"));
+    if (input.text.length > MAX_DEFERRED_TEXT) throw new Error(note("tooLong"));
     const key = keyOf(input.messageId, input.text, input.key), group = groupOf(input.group);
     const deadline = Date.now() + this.rpcBudgetMs;
     for (;;) {
@@ -580,9 +590,9 @@ export class DeferredSend {
   async enqueue(input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "key" | "group" | "guard">, paseo?: DeferredPaseo | null): Promise<DeferredView> {
     this.use(paseo);
     const api = paseo ?? this.paseo;
-    if (!api) throw new Error("插件还没有连上 daemon，请稍后再试。");
-    if (!input.text.trim()) throw new Error("消息是空的。");
-    if (input.text.length > MAX_DEFERRED_TEXT) throw new Error("消息太长，不能排队发送。");
+    if (!api) throw new Error(note("notConnected"));
+    if (!input.text.trim()) throw new Error(note("empty"));
+    if (input.text.length > MAX_DEFERRED_TEXT) throw new Error(note("tooLongToQueue"));
     const key = keyOf(input.messageId, input.text, input.key), group = groupOf(input.group);
     const deadline = Date.now() + this.rpcBudgetMs;
     for (;;) {
@@ -599,7 +609,7 @@ export class DeferredSend {
 
   private async enqueueClaimed(api: DeferredPaseo, input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "guard">, key: string, group: string | null, deadline: number): Promise<DeferredView> {
     const agent = await this.snapshot(api, input.agentId, deadline);
-    if (!agent || agent.archivedAt) throw new Error("这个 Agent 已归档或不存在，不能排队发送。");
+    if (!agent || agent.archivedAt) throw new Error(note("goneCannotQueue"));
     // A guard is asked now as well: a message the agent has already moved past is not queued to go out later, and one the
     // plugin cannot judge waits for the user.
     const guard = guardOf(input.guard);
@@ -656,7 +666,7 @@ export class DeferredSend {
     await this.change((store) => {
       const message = store.messages.find((entry) => entry.messageId === messageId);
       if (!message) return;
-      if (this.sendingIds.has(messageId)) throw new Error("这条消息正在发送，来不及取消了。");
+      if (this.sendingIds.has(messageId)) throw new Error(note("tooLateToCancel"));
       if (message.outcome === "unknown") this.settle(store, message, "maybe-sent", NOTES.canceledUnknown);
       else if (message.outcome === "failed") this.settle(store, message, "canceled", NOTES.canceledFailed);
       else this.settle(store, message, "canceled");
@@ -683,7 +693,7 @@ export class DeferredSend {
       });
       return this.view(messageId);
     }
-    if (!api) throw new Error("插件还没有连上 daemon，请稍后再试。");
+    if (!api) throw new Error(note("notConnected"));
     const deadline = Date.now() + this.rpcBudgetMs;
     const agent = await this.snapshot(api, message.agentId, deadline);
     if (!agent || agent.archivedAt) {
@@ -784,7 +794,7 @@ export class DeferredSend {
     const group = groupOf(input.group), guard = guardOf(input.guard);
     const lock = await this.lockWithin(agentId, Math.min(SEND_QUEUE_WAIT_MS, Math.max(0, deadline - Date.now())));
     if (lock.kind === "busy") return { status: "busy", message: NOTES.busy };
-    if (lock.kind === "error") return { status: "busy", message: "拿不到发送锁（锁文件不能用），没有发送。请稍后再试。" };
+    if (lock.kind === "error") return { status: "busy", message: NOTES.lockBusy };
     let claimed = false;
     try {
       // Another client answered the same question while this request waited for the agent: that answer is this one's too.
@@ -801,7 +811,7 @@ export class DeferredSend {
         try {
           reason = await this.checkGuard(agentId, guard, agent, deadline);
         } catch (error) {
-          return { status: "busy", message: `${NOTES.guardUnknown(errorText(error))}请稍后再试。` };
+          return { status: "busy", message: NOTES.guardUnknownBusy(errorText(error)) };
         }
         if (reason) return { status: "refused", message: NOTES.refused(reason) };
       }
@@ -849,7 +859,7 @@ export class DeferredSend {
       this.sendingIds.add(messageId);
       commit(this.messageView(message));
       // Nothing awaits between these checks and the send.
-      if (this.stopped) throw new Error(NOTES.stopped);
+      if (this.stopped) throw Object.assign(new Error(NOTES.stopped), { pluginStopped: true });
       await within(paseo.agents.ref(agentId).send(input.text, { activeTurnBehavior: behavior, messageId }), SEND_TIMEOUT_MS, () => new OutcomeUnknown("send did not answer in time"));
       this.sendingIds.delete(messageId);
       await this.change((store) => {
@@ -862,7 +872,7 @@ export class DeferredSend {
       if (!claimed) throw error;
       this.sendingIds.delete(messageId);
       const unknown = requestOutcome(error);
-      const stopped = errorText(error) === NOTES.stopped;
+      const stopped = (error as { pluginStopped?: unknown } | null)?.pluginStopped === true;
       this.log(unknown ? "send outcome unknown; held for the user" : "send failed; held for the user", { agentId, messageId, error: errorText(error) });
       await this.change((store) => {
         const entry = store.messages.find((candidate) => candidate.messageId === messageId);
@@ -905,7 +915,7 @@ export class DeferredSend {
         this.lockErrors.delete(agentId);
         await this.change((store) => {
           const message = store.messages.find((entry) => entry.messageId === head.messageId);
-          if (message && !message.held) Object.assign(message, { held: "拿不到发送锁（锁文件不能用），没有发送。可以重试或取消。", heldAt: this.now() });
+          if (message && !message.held) Object.assign(message, { held: NOTES.lockHeld, heldAt: this.now() });
         });
       }
       return;
@@ -1001,7 +1011,7 @@ export class DeferredSend {
         const message = store.messages.find((entry) => entry.messageId === messageId);
         if (!message) return;
         message.attempts += 1;
-        if (message.attempts >= MAX_ATTEMPTS) Object.assign(message, { held: `多次发送失败：${failureText(error)}。点「仍然发送」会先查会话记录，确认没有这条才重发；也可以取消。`, heldAt: this.now(), outcome: "failed" });
+        if (message.attempts >= MAX_ATTEMPTS) Object.assign(message, { held: NOTES.failedRepeatedly(failureText(error)), heldAt: this.now(), outcome: "failed" });
         else message.nextAt = this.now() + Math.min(60_000, 1_000 * 2 ** message.attempts);
       });
       this.log("send failed; will retry", error);
@@ -1113,7 +1123,7 @@ export class DeferredSend {
       const options = cursor === null
         ? { direction: "tail" as const, limit: 100, projection: "projected" as const }
         : { direction: "before" as const, cursor, limit: 100, projection: "projected" as const };
-      const result = (await within(paseo.agents.ref(agentId).timeline.refetch(options), Math.min(READ_TIMEOUT_MS, left), () => new Error("读取会话记录超时"))) as
+      const result = (await within(paseo.agents.ref(agentId).timeline.refetch(options), Math.min(READ_TIMEOUT_MS, left), () => new Error(note("readTimelineTimeout")))) as
         { entries?: unknown; rows?: unknown; startCursor?: { epoch: string; seq: number } | null; hasOlder?: unknown } | null;
       const rows = result?.entries ?? result?.rows;
       if (!Array.isArray(rows)) return { end: "limit" };
@@ -1133,7 +1143,7 @@ export class DeferredSend {
 
   private async snapshot(paseo: DeferredPaseo, agentId: string, deadline = Number.POSITIVE_INFINITY): Promise<DeferredAgentSnapshot | null> {
     const wait = Math.min(READ_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
-    const result = await within(paseo.agents.ref(agentId).refresh(), wait, () => new Error("读取 Agent 超时，请稍后再试。"));
+    const result = await within(paseo.agents.ref(agentId).refresh(), wait, () => new Error(note("readAgentTimeout")));
     return result?.agent ?? null;
   }
 
@@ -1194,9 +1204,9 @@ export class DeferredSend {
   /** The plugin's reason a guarded message no longer fits, or null; throws when it cannot tell (or has no check). */
   private async checkGuard(agentId: string, guard: DeferredGuard, agent: DeferredAgentSnapshot, deadline = Number.POSITIVE_INFINITY): Promise<string | null> {
     const check = this.guardCheck;
-    if (!check) throw new Error("插件没有检查这个条件");
+    if (!check) throw new Error(note("noGuardCheck"));
     const wait = Math.min(READ_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
-    const reason = await within(Promise.resolve().then(() => check({ agentId, guard, agent })), wait, () => new Error("检查超时"));
+    const reason = await within(Promise.resolve().then(() => check({ agentId, guard, agent })), wait, () => new Error(note("checkTimeout")));
     return reason?.trim() || null;
   }
 
@@ -1225,8 +1235,8 @@ export class DeferredSend {
   }
 
   private checkRoom(store: Store, agentId: string): void {
-    if (store.messages.length >= MAX_MESSAGES) throw new Error("排队的消息太多了，请先处理掉一些。");
-    if (store.messages.filter((entry) => entry.agentId === agentId).length >= MAX_PER_AGENT) throw new Error("给这个 Agent 排队的消息太多了，请先处理掉一些。");
+    if (store.messages.length >= MAX_MESSAGES) throw new Error(note("tooManyQueued"));
+    if (store.messages.filter((entry) => entry.agentId === agentId).length >= MAX_PER_AGENT) throw new Error(note("tooManyForAgent"));
   }
 
   /** The agent's lock, trying again for up to `ms` while another ledger holds it. */
@@ -1287,7 +1297,7 @@ export class DeferredSend {
       // A broken connection or file: drop the connection (the next try reopens it), never send without the lock.
       if (db) this.closeLock(name);
       this.log("delivery lock unavailable; the message waits", error);
-      return { kind: "error", message: errorText(error) || "锁文件不可用" };
+      return { kind: "error", message: errorText(error) || note("lockUnusable") };
     }
     const held = db;
     this.lockedNames.add(name);
@@ -1445,7 +1455,7 @@ export class DeferredSend {
       store.receipts = store.receipts.filter((entry) => entry.at >= cutoff).slice(-MAX_RECEIPTS);
       store.sends = store.sends.filter((entry) => entry.recordedAt >= this.now() - DAY).slice(-MAX_RECEIPTS);
       const text = `${JSON.stringify(store)}\n`;
-      if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error("排队的消息太多了，请先处理掉一些。");
+      if (Buffer.byteLength(text) > MAX_FILE_BYTES) throw new Error(note("tooManyQueued"));
       await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
       const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
       try {

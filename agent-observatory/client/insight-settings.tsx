@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -9,13 +10,13 @@ import { useConfigureInsights, useInsightModels, useInsightRunners } from "./use
 
 /** Reports before 2.7 carry no runner info: they were always the Grok CLI. */
 export function runnerLabelOf(job: Pick<InsightJob, "runner" | "model" | "effort">): string {
-  return job.runner?.label ?? (job.model === "grok-4.6" ? "Grok 4.6 · xhigh" : `Grok 4.7 · ${job.effort ?? "xhigh"}`);
+  return job.runner?.label ?? (job.model === "grok-4.6" ? "Grok 4.6 · xhigh" : t("coreInsightSettings.grokLegacyRunner", { effort: job.effort ?? "xhigh" }));
 }
 export const sameRunner = (a: InsightRunner | undefined, b: InsightRunner | undefined) => !!a && !!b && JSON.stringify(a) === JSON.stringify(b);
 const accessLooks: Record<InsightRunnerOption["access"], { label: string; hue: Hue; icon: string; hint: string }> = {
-  none: { label: "不用工具", hue: "green", icon: "ShieldCheck", hint: "不提供工具，调用一律拒绝；Grok 会话和它的会话搜索记录在分析结束后立即删除" },
-  read: { label: "只读", hue: "teal", icon: "Eye", hint: "以只读模式运行，可以查看代码但不能修改" },
-  ask: { label: "需审批时拒绝", hue: "amber", icon: "ShieldAlert", hint: "没有只读模式：需要审批的工具请求会被自动拒绝，不需要审批的操作（例如读取文件）仍可能执行" },
+  none: { get label() { return t("coreInsightSettings.noTools"); }, hue: "green", icon: "ShieldCheck", get hint() { return t("coreInsightSettings.noToolsAreProvidedAndAllCalls"); } },
+  read: { get label() { return t("coreInsightSettings.readOnly"); }, hue: "teal", icon: "Eye", get hint() { return t("coreInsightSettings.runsInReadOnlyModeCanView"); } },
+  ask: { get label() { return t("coreInsightSettings.rejectApprovalRequests"); }, hue: "amber", icon: "ShieldAlert", get hint() { return t("coreInsightSettings.noReadOnlyModeToolRequestsNeeding"); } },
 };
 
 function AccessBadge({ theme, access }: { theme: PluginTheme; access: InsightRunnerOption["access"] }) {
@@ -27,7 +28,7 @@ function AccessBadge({ theme, access }: { theme: PluginTheme; access: InsightRun
 function Choice({ theme, option, selected, badge, onPress }: { theme: PluginTheme; option: InsightRunnerOption; selected: boolean; badge?: string; onPress: () => void }) {
   const { colors } = theme, dark = isDarkTheme(theme), main = hue(theme, "teal");
   const parts = [option.providerLabel, option.modelLabel, option.thinkingLabel].filter(Boolean);
-  return <Pressable accessibilityRole="radio" accessibilityLabel={`${option.label}${option.available ? "" : "（不可用）"}`} accessibilityState={{ checked: selected, disabled: !option.available }} aria-checked={selected}
+  return <Pressable accessibilityRole="radio" accessibilityLabel={t("coreInsightSettings.runnerAvailability", { label: option.label, availability: option.available ? "" : t("coreInsightSettings.unavailable") })} accessibilityState={{ checked: selected, disabled: !option.available }} aria-checked={selected}
     disabled={!option.available} onPress={onPress}
     style={state => [{ flexDirection: "row", alignItems: "flex-start", gap: space.md, padding: space.md, borderRadius: radius.lg, borderWidth: selected ? 1.5 : 1,
       borderColor: selected ? main : colors.border, backgroundColor: selected ? withAlpha(main, dark ? 0.14 : 0.08) : "transparent", opacity: option.available ? state.pressed ? 0.8 : 1 : 0.5 }]}>
@@ -58,17 +59,17 @@ function GrokOptions({ theme, runner, busy, onSave }: { theme: PluginTheme; runn
   const next: GrokRunner = { kind: "grok", ...(id && id !== GROK_DEFAULT_MODEL ? { model: id } : {}), ...(effort !== GROK_DEFAULT_EFFORT ? { effort } : {}) };
   const changed = next.model !== runner.model || next.effort !== runner.effort;
   return <View style={{ gap: space.md, marginLeft: space.md, padding: space.md, borderRadius: radius.lg, borderWidth: 1, borderColor: withAlpha(hue(theme, "teal"), 0.35) }}>
-    <TextField theme={theme} label="Grok 模型" value={model} onChangeText={setModel} placeholder={`${GROK_DEFAULT_MODEL}（默认）`}
-      hint={valid ? "留空用默认模型。可以填 Grok CLI 支持的其他模型 ID（grok models 会列出）。" : "模型 ID 只能包含字母、数字和 . _ : / -，并以字母或数字开头"} />
+    <TextField theme={theme} label={t("coreInsightSettings.grokModel")} value={model} onChangeText={setModel} placeholder={t("coreInsightSettings.default", { value1: GROK_DEFAULT_MODEL })}
+      hint={valid ? t("coreInsightSettings.leaveBlankForTheDefaultModelOther") : t("coreInsightSettings.modelIdsMayContainOnlyLettersNumbers")} />
     <View style={{ gap: space.xs }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>推理档</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>{t("coreInsightSettings.reasoningLevel")}</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-        {GROK_EFFORTS.map(option => <Chip key={option} theme={theme} label={option === GROK_DEFAULT_EFFORT ? `${option}（默认）` : option} tone="violet" selected={effort === option} onPress={() => setEffort(option)} />)}
+        {GROK_EFFORTS.map(option => <Chip key={option} theme={theme} label={option === GROK_DEFAULT_EFFORT ? t("coreInsightSettings.default", { value1: option }) : option} tone="violet" selected={effort === option} onPress={() => setEffort(option)} />)}
       </View>
     </View>
     <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
-      <Button theme={theme} variant="primary" icon="Check" label="保存 Grok 设置" busy={busy} disabled={busy || !valid || !changed} onPress={() => onSave(next)} />
-      {runner.model || runner.effort ? <Button theme={theme} variant="ghost" icon="RotateCcw" label="恢复默认" disabled={busy} onPress={() => onSave({ kind: "grok" })} /> : null}
+      <Button theme={theme} variant="primary" icon="Check" label={t("coreInsightSettings.saveGrokSettings")} busy={busy} disabled={busy || !valid || !changed} onPress={() => onSave(next)} />
+      {runner.model || runner.effort ? <Button theme={theme} variant="ghost" icon="RotateCcw" label={t("coreInsightSettings.restoreDefaults")} disabled={busy} onPress={() => onSave({ kind: "grok" })} /> : null}
     </View>
   </View>;
 }
@@ -95,27 +96,27 @@ function OtherModel({ theme, providers, current, busy, onUse }: { theme: PluginT
     {entry ? <View style={{ gap: space.sm }}>
       <AccessBadge theme={theme} access={entry.access} />
       {models.isPending ? <Skeleton theme={theme} rows={2} /> : null}
-      {models.error ? <Banner theme={theme} tone="danger" message={`模型列表读取失败：${models.error.message}`} /> : null}
+      {models.error ? <Banner theme={theme} tone="danger" message={t("coreInsightSettings.couldNotLoadModelList", { value1: models.error.message })} /> : null}
       {shown.map(item => <Pressable key={item.id} accessibilityRole="radio" accessibilityLabel={item.label} accessibilityState={{ checked: chosen?.id === item.id }} aria-checked={chosen?.id === item.id}
         onPress={() => { setModel(item.id); setThinking(item.defaultThinkingOptionId); }}
         style={state => ({ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 34, paddingHorizontal: space.sm, borderRadius: radius.md, opacity: state.pressed ? 0.75 : 1,
           backgroundColor: chosen?.id === item.id ? withAlpha(hue(theme, "teal"), 0.12) : "transparent" })}>
         <Icon name={chosen?.id === item.id ? "CircleDot" : "Circle"} size={14} color={chosen?.id === item.id ? hue(theme, "teal") : colors.foregroundMuted} />
         <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: chosen?.id === item.id ? "700" : "500" }}>{item.label}</Text>
-        {item.isDefault ? <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>默认</Text> : null}
+        {item.isDefault ? <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>{t("coreInsightSettings.default2")}</Text> : null}
       </Pressable>)}
       {list.length > 8 ? <Pressable accessibilityRole="button" onPress={() => setAll(!all)} style={{ alignSelf: "flex-start", paddingVertical: 4, paddingHorizontal: space.sm }}>
-        <Text style={{ color: hue(theme, "teal", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{all ? "收起" : `显示全部 ${list.length} 个模型`}</Text>
+        <Text style={{ color: hue(theme, "teal", "text"), fontSize: fontSize.small, fontWeight: "700" }}>{all ? t("coreInsightSettings.collapse") : t("coreInsightSettings.showAllModels", { value1: list.length })}</Text>
       </Pressable> : null}
       {chosen?.thinking.length ? <View style={{ gap: space.xs }}>
-        <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "600" }}>思考强度</Text>
+        <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "600" }}>{t("coreInsightSettings.reasoningEffort")}</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
           {chosen.thinking.map(option => <Chip key={option.id} theme={theme} label={option.label} tone="violet" selected={(thinking ?? chosen.defaultThinkingOptionId) === option.id} onPress={() => setThinking(option.id)} />)}
         </View>
       </View> : null}
-      {chosen ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} variant="primary" icon="Check" busy={busy} disabled={busy} label={`使用 ${chosen.label}`}
+      {chosen ? <View style={{ alignItems: "flex-start" }}><Button theme={theme} variant="primary" icon="Check" busy={busy} disabled={busy} label={t("coreInsightSettings.use", { value1: chosen.label })}
         onPress={() => onUse({ kind: "provider", provider: entry.provider, model: chosen.id, thinkingOptionId: thinking ?? chosen.defaultThinkingOptionId })} /></View> : null}
-    </View> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>选一个 Provider，再挑模型和思考强度</Text>}
+    </View> : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("coreInsightSettings.selectAProviderThenChooseAModel")}</Text>}
   </View>;
 }
 
@@ -132,50 +133,50 @@ export function InsightSettingsSheet({ theme, open, onClose, settings, pick }: {
   useEffect(() => { if (open) setOther(current.kind === "provider"); }, [open]);
   const choose = (runner: InsightRunner, label: string) => {
     if (pick) { pick.onPick(runner); onClose(); return; }
-    configure.mutate({ runner }, { onSuccess: () => toast.show(`之后的分析和建议由 ${label} 来写`, { variant: "success" }), onError: error => toast.error(error.message) });
+    configure.mutate({ runner }, { onSuccess: () => toast.show(t("coreInsightSettings.futureAnalysesAndSuggestionsWillBeWritten", { value1: label }), { variant: "success" }), onError: error => toast.error(error.message) });
   };
   const data = runners.data;
-  return <Sheet title={pick?.title ?? "分析设置"} open={open} onClose={onClose}>
+  return <Sheet title={pick?.title ?? t("coreInsightSettings.analysisSettings")} open={open} onClose={onClose}>
     {!pick ? <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme}>自动分析</PaneLabel>
+      <PaneLabel theme={theme}>{t("coreInsightSettings.automaticAnalysis")}</PaneLabel>
       <View style={[{ flexDirection: "row", alignItems: "center", gap: space.md, padding: space.md, borderRadius: radius.lg, overflow: "hidden" },
         settings?.autoEnabled ? gradient(theme, [withAlpha(hue(theme, "teal"), 0.22), withAlpha(hue(theme, "cyan"), 0.06)], { angle: 120 }) : { borderWidth: 1, borderColor: colors.border }]}>
         <Icon name={settings?.autoEnabled ? "Sparkles" : "PauseCircle"} size={18} color={settings?.autoEnabled ? hue(theme, "teal") : colors.foregroundMuted} />
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "700" }}>任务结束后自动分析</Text>
-          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{settings?.autoEnabled ? "已开启" : "已关闭 · 需要时在会话里手动分析"}</Text>
+          <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "700" }}>{t("coreInsightSettings.analyzeAutomaticallyWhenTasksEnd")}</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{settings?.autoEnabled ? t("coreInsightSettings.on") : t("coreInsightSettings.offAnalyzeManuallyInASessionWhen")}</Text>
         </View>
-        <Switch theme={theme} label="任务结束后自动分析" value={settings?.autoEnabled ?? false} disabled={!settings || configure.isPending}
+        <Switch theme={theme} label={t("coreInsightSettings.analyzeAutomaticallyWhenTasksEnd")} value={settings?.autoEnabled ?? false} disabled={!settings || configure.isPending}
           onChange={enabled => configure.mutate({ autoEnabled: enabled }, { onError: error => toast.error(error.message) })} />
       </View>
       <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 18 }}>
-        {`至少 ${settings?.minTurns ?? 3} 轮对话、${settings?.minTools ?? 3} 次工具调用的任务结束后触发，同一会话 ${settings?.cooldownHours ?? 6} 小时内只分析一次。开启后，每积累 3 份新报告（间隔至少 20 小时）会自动更新总览里的建议。`}
+        {t("coreInsightSettings.triggersWhenATaskWithAtLeast", { value1: settings?.minTurns ?? 3, value2: settings?.minTools ?? 3, value3: settings?.cooldownHours ?? 6 })}
       </Text>
     </View> : null}
     <View style={{ gap: space.sm }}>
-      <PaneLabel theme={theme}>{pick ? "这次由谁来分析" : "谁来分析"}</PaneLabel>
+      <PaneLabel theme={theme}>{pick ? t("coreInsightSettings.whoAnalyzesThisTime") : t("coreInsightSettings.whoAnalyzes")}</PaneLabel>
       {runners.isPending ? <Skeleton theme={theme} rows={3} /> : null}
-      {runners.error ? <Banner theme={theme} tone="danger" message={`读取可用模型失败：${runners.error.message}`} action={{ label: "重试", onPress: () => void runners.refetch() }} /> : null}
+      {runners.error ? <Banner theme={theme} tone="danger" message={t("coreInsightSettings.couldNotLoadAvailableModels", { value1: runners.error.message })} action={{ label: t("coreInsightSettings.retry"), onPress: () => void runners.refetch() }} /> : null}
       {data ? <>
-        <Choice theme={theme} option={data.auto} badge="默认" selected={!pick && current.kind === "auto"} onPress={() => choose(data.auto.runner, data.auto.label)} />
+        <Choice theme={theme} option={data.auto} badge={t("coreInsightSettings.default2")} selected={!pick && current.kind === "auto"} onPress={() => choose(data.auto.runner, data.auto.label)} />
         <Choice theme={theme} option={data.builtin} selected={!pick && current.kind === "grok"} onPress={() => choose(data.builtin.runner, data.builtin.label)} />
         {!pick && current.kind === "grok" && data.builtin.available ? <GrokOptions theme={theme} runner={current} busy={configure.isPending} onSave={runner => choose(runner, grokRunnerLabel(runner))} /> : null}
-        {data.profiles.length ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "700", marginTop: space.xs }}>你的 Profile</Text> : null}
+        {data.profiles.length ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "700", marginTop: space.xs }}>{t("coreInsightSettings.yourProfiles")}</Text> : null}
         {data.profiles.map(option => <Choice key={JSON.stringify(option.runner)} theme={theme} option={option} selected={!pick && sameRunner(option.runner, current)} onPress={() => choose(option.runner, option.label)} />)}
         {data.providers.length ? <View style={{ gap: space.sm, marginTop: space.xs }}>
-          <Pressable accessibilityRole="button" accessibilityLabel={other ? "收起其他模型" : "选择其他模型"} aria-expanded={other} onPress={() => setOther(!other)}
+          <Pressable accessibilityRole="button" accessibilityLabel={other ? t("coreInsightSettings.collapseOtherModels") : t("coreInsightSettings.chooseAnotherModel")} aria-expanded={other} onPress={() => setOther(!other)}
             style={state => ({ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 36, opacity: state.pressed ? 0.75 : 1 })}>
             <Icon name={other ? "ChevronDown" : "ChevronRight"} size={14} color={colors.foregroundMuted} />
-            <Text style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "700" }}>其他模型</Text>
-            {!pick && current.kind === "provider" ? <Badge theme={theme} label="当前" tone="teal" /> : null}
+            <Text style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "700" }}>{t("coreInsightSettings.otherModels")}</Text>
+            {!pick && current.kind === "provider" ? <Badge theme={theme} label={t("coreInsightSettings.current")} tone="teal" /> : null}
           </Pressable>
           {other ? <OtherModel theme={theme} providers={data.providers} current={current.kind === "provider" ? current : undefined} busy={configure.isPending}
-            onUse={runner => { const entry = data.providers.find(item => item.provider === runner.provider); choose(runner, `${entry?.label ?? runner.provider} · ${runner.model ?? "默认模型"}`); }} /> : null}
+            onUse={runner => { const entry = data.providers.find(item => item.provider === runner.provider); choose(runner, t("coreInsightSettings.runnerModel", { provider: entry?.label ?? runner.provider, model: runner.model ?? t("coreInsightSettings.defaultModel") })); }} /> : null}
         </View> : null}
       </> : null}
     </View>
-    <MetaLine theme={theme} numberOfLines={4} parts={["分析会把会话摘录（提示词、回复、工具调用和输出）连同项目信息发给所选模型的提供商；常见凭据会先打码，但不保证全部遮住。"]} />
-    <MetaLine theme={theme} numberOfLines={5} parts={["选 Profile 或其他模型时，分析会作为被分析会话的子 Agent 在它的工作区里运行：有只读模式就用只读模式，否则用逐项审批的模式并拒绝每个审批请求；写完报告就自动归档，用量计入对应账号。没有这两种模式的提供商不能用来分析。"]} />
+    <MetaLine theme={theme} numberOfLines={4} parts={[t("coreInsightSettings.analysisSendsSessionExcerptsPromptsRepliesTool")]} />
+    <MetaLine theme={theme} numberOfLines={5} parts={[t("coreInsightSettings.withAProfileOrAnotherModelAnalysis")]} />
     {configure.error ? <Banner theme={theme} tone="danger" message={configure.error.message} /> : null}
   </Sheet>;
 }

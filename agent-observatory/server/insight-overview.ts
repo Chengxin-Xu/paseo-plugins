@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash } from "node:crypto";
 import { FINDING_CATEGORIES, type InsightOverview, type InsightOverviewResponse, type OverviewDays, type SuggestionJob, type SuggestionSummary } from "../shared/insight-overview";
 import type { InsightJob } from "../shared/insights";
@@ -49,7 +50,7 @@ export function localDayStart(day: number, zone: StatsZone): number {
 }
 /** Today and the `days − 1` local days before it, from local midnight to the next one, each day by its own offset. */
 export function getInsightWindow({ now, days, utcOffsetMinutes, timeZone }: InsightWindowOptions): InsightWindow {
-  if (!Number.isFinite(now) || (days !== 7 && days !== 30) || !Number.isInteger(utcOffsetMinutes) || Math.abs(utcOffsetMinutes) > 840) throw new Error("总览时间范围无效");
+  if (!Number.isFinite(now) || (days !== 7 && days !== 30) || !Number.isInteger(utcOffsetMinutes) || Math.abs(utcOffsetMinutes) > 840) throw new Error(t("serverInsightOverview.m001"));
   const zone = statsZone(utcOffsetMinutes, timeZone, now), today = statsLocalDay(now, zone), first = today - (days - 1);
   const dayKeys = Array.from({ length: days }, (_, index) => statsDayText(first + index));
   return { from: dayKeys[0], to: dayKeys[days - 1], startAt: localDayStart(first, zone), endAt: localDayStart(today + 1, zone), dayKeys, zone, timeZone: zone.name };
@@ -113,7 +114,7 @@ function fitOverview(data: InsightOverview): void {
   }
   while (fullBytes() > MAX_OVERVIEW_BYTES) {
     const largest = [data.findings, data.agents, data.projects].filter(rows => rows.length).sort((a, b) => bytes(b) - bytes(a))[0];
-    if (!largest) throw new Error("总览摘要超过传输容量");
+    if (!largest) throw new Error(t("serverInsightOverview.m002"));
     largest.pop();
   }
 }

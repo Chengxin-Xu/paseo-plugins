@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { BrowserCDPSession, BrowserContext, BrowserPage } from './browser-types';
 
 export type FrameLimits={maxWidth?:number;maxHeight?:number};
@@ -29,7 +30,7 @@ const same=(a:ViewportMetrics|null,b:ViewportMetrics)=>!!a&&a.x===b.x&&a.y===b.y
 async function capture(cdp:BrowserCDPSession,quality:number,limits?:FrameLimits):Promise<CapturedFrame>{
   const screenshot=async(clip?:Record<string,number>)=>{
     const result=await cdp.send<{data:string}>('Page.captureScreenshot',{format:'jpeg',quality,fromSurface:true,captureBeyondViewport:false,...(clip?{clip}:{})});
-    if(!result.data)throw new Error('浏览器未返回画面。');return Buffer.from(result.data,'base64');
+    if(!result.data)throw new Error(t('serverError.noFrame'));return Buffer.from(result.data,'base64');
   };
   for(let attempt=0;(limits?.maxWidth||limits?.maxHeight)&&attempt<SCALED_ATTEMPTS;attempt++){
     const view=await viewportMetrics(cdp),scale=view?frameScale(view,limits):1;
@@ -75,7 +76,7 @@ export async function captureBrowserFrame(context:BrowserContext,page:BrowserPag
       return await Promise.race([
         capture(cdp,quality,limits),
         new Promise<never>((_,reject)=>{
-          timer=setTimeout(()=>reject(new Error('浏览器截图超时，请重试。')),Math.max(0,deadline-Date.now()));
+          timer=setTimeout(()=>reject(new Error(t('serverError.screenshotTimeout'))),Math.max(0,deadline-Date.now()));
           if(attempt<MAX_RESTARTS&&options.watchCommits)unwatch=options.watchCommits(()=>reject(new CaptureRestart()));
         }),
       ]);

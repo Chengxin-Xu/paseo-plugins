@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+// These behavioral suites bind Chinese in setup; locale I/O and settings are covered by i18n.test.ts.
+vi.mock("../server/i18n-server", () => ({ createLocaleService: () => ({ dispose() {}, ready: Promise.resolve() }) }));
+
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -65,7 +68,7 @@ type FakePaseo = ReturnType<typeof fakePaseo>;
 /** Loads index.server.ts like the daemon and validates every RPC like the host and client do. */
 function host(paseo: FakePaseo) {
   const handlers = new Map<string, { contract: PluginRpcContract; handler: (input: unknown, context: { paseo: unknown }) => unknown }>();
-  const server = { handle: (contract: PluginRpcContract, handler: never) => { handlers.set(contract.name, { contract, handler }); }, on() {}, before() {}, registerSettings() {}, registerProvider() {} };
+  const server = { handle: (contract: PluginRpcContract, handler: never) => { handlers.set(contract.name, { contract, handler }); }, on() {}, before() {}, registerSettings() { return { read: async () => ({ status: "ready", values: { language: "zh-CN" } }), subscribe: () => () => {} }; }, registerProvider() {} };
   const cleanup = contribute(server as unknown as PluginServerContext);
   const invoke = async (method: string, input: unknown) => {
     const entry = handlers.get(method); if (!entry) throw new Error(`no handler ${method}`);
@@ -78,7 +81,7 @@ function host(paseo: FakePaseo) {
 }
 
 let home = "";
-beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "project-notes-rpc-")); process.env.PASEO_HOME = home; });
+beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "project-notes-rpc-")); process.env.PASEO_HOME = home; await mkdir(join(home, "plugin-data/project-notes"), { recursive: true }); await writeFile(join(home, "plugin-data/project-notes/i18n-state.json"), JSON.stringify({ setting: "zh-CN", device: "zh-CN" })); });
 afterEach(async () => { await rm(home, { recursive: true, force: true }); });
 
 describe("board RPCs", () => {

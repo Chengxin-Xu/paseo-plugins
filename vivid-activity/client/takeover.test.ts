@@ -72,6 +72,26 @@ describe("takeover scope", () => {
     expect(fake.log).toEqual(["+reasoning", "+tool-calls", "-tool-calls"]);
   });
 
+  it("keeps rows native while the initial settings and catalog read is pending", async () => {
+    const fake = fakeHost();
+    const controller = startTakeover(fake.host, "off");
+    expect([...fake.registered]).toEqual([]);
+    fake.resolvePending("all");
+    await flush();
+    expect(controller.scope()).toBe("all");
+    expect([...fake.registered]).toEqual(["reasoning", "tool-calls"]);
+    controller.stop();
+  });
+
+  it("does not register late rows if the plugin stops while its initial read is pending", async () => {
+    const fake = fakeHost();
+    const controller = startTakeover(fake.host, "off");
+    controller.stop();
+    fake.resolvePending("all");
+    await flush();
+    expect([...fake.registered]).toEqual([]);
+  });
+
   it("re-registers when a settings change arrives, and ignores unchanged scopes", async () => {
     const fake = fakeHost(["all", "off", "off", "all"]);
     startTakeover(fake.host);

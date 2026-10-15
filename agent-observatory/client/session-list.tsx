@@ -1,3 +1,5 @@
+import { joinList } from "../shared/i18n";
+import { t } from "../shared/text";
 import { memo, useMemo, type ReactNode, type Ref } from "react";
 import { Pressable, Text, View, type FlatList as NativeFlatList, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -14,7 +16,7 @@ import { ScheduleBadge } from "./schedule-looks";
 import { HeartbeatBadge } from "./heartbeat-card";
 import { openExternalUrl } from "./open-url";
 
-export const groupTitles: Record<DashboardGroup, string> = { attention: "需要处理", running: "执行中", recent: "最近" };
+export const groupTitles: Record<DashboardGroup, string> = { get attention() { return t("secondarySessionList.needsYou"); }, get running() { return t("secondarySessionList.running"); }, get recent() { return t("secondarySessionList.recent"); } };
 export type SessionItem =
   | { kind: "section"; key: string; group: DashboardGroup; title: string; count: number }
   /**
@@ -39,12 +41,12 @@ export const countRunningDescendants = (row: DashboardRow) => countDescendants(r
 function trailingFor(agent: AgentRecord, phase: Phase, signal: string | undefined, theme: PluginTheme, timeLabel: string): { node: ReactNode; pill: boolean } {
   const pill = (hue: Hue, label: string, icon?: string, solid = false) => ({ node: <PhasePill theme={theme} hue={hue} label={label} icon={icon} solid={solid} />, pill: true });
   if (phase === "approval") return { node: <PhaseTag theme={theme} phase={phase} count={agent.pendingPermissionCount} />, pill: true };
-  if (signal?.startsWith("失败")) return pill("red", signal, undefined, true);
+  if (signal?.startsWith(t("secondarySessionList.failed"))) return pill("red", signal, undefined, true);
   if (signal && phase === "running") return pill("amber", signal, "Clock3");
   if (phase === "running" && agent.activeTurnStartedAt) return { node: <LiveTimer since={agent.activeTurnStartedAt} color={hueColor(theme, "blue", "text")} />, pill: false };
   // Its own turn is over and subagents still work: 「后台」 with their run time when known.
-  if (phase === "running" && agent.background) return { node: agent.background.since ? <LiveTimer since={agent.background.since} prefix="后台 " color={hueColor(theme, "blue", "text")} />
-    : <Text style={{ color: hueColor(theme, "blue", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>后台执行中</Text>, pill: false };
+  if (phase === "running" && agent.background) return { node: agent.background.since ? <LiveTimer since={agent.background.since} prefix={t("secondarySessionList.background")} color={hueColor(theme, "blue", "text")} />
+    : <Text style={{ color: hueColor(theme, "blue", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>{t("secondarySessionList.runningInBackground")}</Text>, pill: false };
   if (phase === "running" || phase === "starting") return { node: <Text style={{ color: hueColor(theme, phases[phase].hue, "text"), fontSize: fontSize.meta, fontWeight: "600" }}>{phases[phase].label}</Text>, pill: false };
   if (phase === "closed" || phase === "canceled") return { node: <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{timeLabel}</Text>, pill: false };
   if (signal) return pill("amber", signal, "Clock3");
@@ -96,7 +98,7 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
   return <View style={depth ? { marginLeft: 16 + (depth - 1) * 22, paddingLeft: 6, borderLeftWidth: hairline, borderLeftColor: colors.border } : undefined}>
     {/* The row and its chip share a box of their own, so the chip sits on the row's last line, never on the 子 Agent toggle. */}
     <View>
-      <Pressable accessibilityRole="button" accessibilityLabel={`查看 ${agent.title}，${stateName(agent)}${marked ? "，待归档" : ""}`} accessibilityState={{ selected }} {...aria({ selected })} onPress={() => onSelect(agent.id)}
+      <Pressable accessibilityRole="button" accessibilityLabel={t("secondarySessionList.view", { value1: agent.title, value2: stateName(agent), value3: marked ? t("secondarySessionList.awaitingArchive") : "" })} accessibilityState={{ selected }} {...aria({ selected })} onPress={() => onSelect(agent.id)}
         style={state => ({ flexDirection: "row", alignItems: "flex-start", gap: 10, paddingVertical: 10, paddingLeft: space.md, paddingRight: space.md, borderRadius: radius.md, opacity: row.context ? 0.62 : 1,
           backgroundColor: selected && !marked ? colors.surface2 : state.pressed || (state as { hovered?: boolean }).hovered ? colors.surface1 : wash ?? "transparent" })}>
         <Flash count={changes} color={tint(color, tintAlpha(theme) + 0.1)} radius={radius.md} />
@@ -107,23 +109,23 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
         </View>
         <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
           <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
-            <Text numberOfLines={2} style={{ flex: 1, color: settled ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.body, lineHeight: 20, fontWeight: active ? "600" : "500" }}>{agent.title || "未命名 Agent"}</Text>
+            <Text numberOfLines={2} style={{ flex: 1, color: settled ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.body, lineHeight: 20, fontWeight: active ? "600" : "500" }}>{agent.title || t("secondarySessionList.unnamedAgent")}</Text>
             <View style={{ minHeight: 20, justifyContent: "center", alignItems: "flex-end" }}>{trailing.node}</View>
           </View>
           {/* Chips first; when they leave too little room the project and time wrap to their own line instead of vanishing. */}
           <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 5, rowGap: 3, paddingRight: link && !reason ? reserve : 0 }}>
             {agent.background && phase === "running" ? <BackgroundChip theme={theme} agent={agent} /> : null}
             {agent.todo && phase === "running" ? <TodoChip theme={theme} todo={agent.todo} /> : null}
-            {rate && phase === "running" ? <View accessibilityLabel={`每秒输出 ${rate.toFixed(1)} 个 token`} style={{ flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 5, height: 18, borderRadius: radius.full, backgroundColor: tint(hueColor(theme, "orange"), tintAlpha(theme)) }}>
+            {rate && phase === "running" ? <View accessibilityLabel={t("secondarySessionList.outputtingTokensPerSecond", { value1: rate.toFixed(1) })} style={{ flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 5, height: 18, borderRadius: radius.full, backgroundColor: tint(hueColor(theme, "orange"), tintAlpha(theme)) }}>
               <Icon name="Zap" size={10} color={hueColor(theme, "orange")} />
-              <Text style={{ color: hueColor(theme, "orange", "text"), fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{rate >= 100 ? Math.round(rate) : rate.toFixed(1).replace(/\.0$/, "")} tok/s</Text>
+              <Text style={{ color: hueColor(theme, "orange", "text"), fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{rate >= 100 ? Math.round(rate) : rate.toFixed(1).replace(/\.0$/, "")}{t("secondarySessionList.tokS")}</Text>
             </View> : null}
             {pressure ? <ContextChip theme={theme} percent={pressure.percent} critical={pressure.level === "critical"} /> : null}
             {heartbeats?.length ? <HeartbeatBadge theme={theme} heartbeats={heartbeats} /> : null}
             {agent.labels["paseo.schedule-id"] ? <ScheduleBadge theme={theme} /> : null}
             <View style={{ flex: 1, minWidth: 120, flexDirection: "row", alignItems: "center", gap: 5 }}>
               {depth === 0 ? <HueDot theme={theme} hue={hueFor(agent.projectName)} size={7} /> : null}
-              <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} parts={[...meta, row.node.cycleBroken ? "父子关系成环，已断开" : null]} /></View>
+              <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} parts={[...meta, row.node.cycleBroken ? t("secondarySessionList.aCycleInTheParentRelationship") : null]} /></View>
             </View>
           </View>
           {reason ? <View style={{ flexDirection: "row", alignItems: "center", gap: 4, minWidth: 0, paddingRight: reserve }}>
@@ -133,33 +135,34 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
         </View>
       </Pressable>
       {/* A sibling of the row, not inside it: web must not nest buttons. */}
+      {/* Chinese accessibility contract before catalog extraction: accessibilityLabel={`${expanded ? "收起" : "展开"} ${agent.title} 的子 agent`} */}
       {link ? <ChangeRequestChip theme={theme} link={link} /> : null}
     </View>
-    {children > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "收起" : "展开"} ${agent.title} 的子 agent`} accessibilityState={{ expanded }} {...aria({ expanded })} onPress={() => onToggle(agent.id)} hitSlop={{ top: 6, bottom: 8, left: 6, right: 6 }}
+    {children > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={expanded ? t("secondarySessionList.collapseSubagents", { name: agent.title }) : t("secondarySessionList.expandSubagents", { name: agent.title })} accessibilityState={{ expanded }} {...aria({ expanded })} onPress={() => onToggle(agent.id)} hitSlop={{ top: 6, bottom: 8, left: 6, right: 6 }}
       style={state => ({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", alignSelf: "flex-start", gap: space.xs, marginLeft: 32, marginRight: space.sm, marginTop: -6, marginBottom: space.xs, minHeight: 24, paddingHorizontal: 6, borderRadius: radius.sm, backgroundColor: (state as { hovered?: boolean }).hovered || state.pressed ? colors.surface1 : "transparent" })}>
       <Icon name={expanded ? "ChevronDown" : "ChevronRight"} size={12} color={colors.foregroundMuted} />
-      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{children} 个子 Agent</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("secondarySessionList.subagents", { count: children })}</Text>
       {childAttention > 0 && childPhase ? <ChildAttention theme={theme} count={childAttention} phase={childPhase} /> : null}
-      {childRunning > 0 ? <><Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>·</Text><Spinner size={10} color={hueColor(theme, "run")} /><Text style={{ color: hueColor(theme, "run", "text"), fontSize: fontSize.meta }}>{childRunning} 执行中</Text></> : null}
-      {childUnread > 0 ? <Text style={{ color: hueColor(theme, "pink", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>· {childUnread} 未读</Text> : null}
+      {childRunning > 0 ? <><Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>·</Text><Spinner size={10} color={hueColor(theme, "run")} /><Text style={{ color: hueColor(theme, "run", "text"), fontSize: fontSize.meta }}>{t("secondarySessionList.running2", { value1: childRunning })}</Text></> : null}
+      {childUnread > 0 ? <Text style={{ color: hueColor(theme, "pink", "text"), fontSize: fontSize.meta, fontWeight: "600" }}>{t("secondarySessionList.unread", { value1: childUnread })}</Text> : null}
     </Pressable> : null}
   </View>;
 });
 
-/** 「· 2 个需要处理」 on a thread's 子 Agent line, in the most urgent one's colour and with its mark (P3-3). */
+/** Chinese count contract before catalog extraction: {count} 个需要处理. Uses the most urgent child's color and mark (P3-3). */
 function ChildAttention({ theme, count, phase }: { theme: PluginTheme; count: number; phase: AttentionPhase }) {
   const look = phases[phase];
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
     <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>·</Text>
     <Icon name={look.icon} size={11} color={hueColor(theme, look.hue)} />
-    <Text style={{ color: hueColor(theme, look.hue, "text"), fontSize: fontSize.meta, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{count} 个需要处理</Text>
+    <Text style={{ color: hueColor(theme, look.hue, "text"), fontSize: fontSize.meta, fontWeight: "700", fontVariant: ["tabular-nums"] }}>{t("secondarySessionList.needYou", { count: count })}</Text>
   </View>;
 }
 
 /** 「3/7 · 正在跑测试」: the running turn's todo list, how far it got and the step it is on (opus-B12). */
 function TodoChip({ theme, todo }: { theme: PluginTheme; todo: AgentTodo }) {
   const color = hueColor(theme, "cyan"), text = hueColor(theme, "cyan", "text"), share = todo.total ? todo.done / todo.total : 0;
-  return <View accessibilityLabel={`待办进度 ${todo.done}/${todo.total}${todo.current ? `，正在：${todo.current}` : ""}`}
+  return <View accessibilityLabel={t("secondarySessionList.taskProgress", { value1: todo.done, value2: todo.total, value3: todo.current ? t("secondarySessionList.workingOn", { value1: todo.current }) : "" })}
     style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1, minWidth: 0, maxWidth: 240, paddingHorizontal: 6, height: 18, borderRadius: radius.full, backgroundColor: tint(color, tintAlpha(theme)) }}>
     <View style={{ width: 18, height: 4, borderRadius: 2, overflow: "hidden", backgroundColor: tint(color, 0.3) }}><View style={{ width: `${Math.round(share * 100)}%`, height: 4, backgroundColor: color }} /></View>
     <Text style={{ color: text, fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{todo.done}/{todo.total}</Text>
@@ -170,17 +173,17 @@ function TodoChip({ theme, todo }: { theme: PluginTheme; todo: AgentTodo }) {
 /** 「上下文 87%」 amber from 85 %, red from 95 % (opus-B13): the Agent is about to compact or run out of room. */
 function ContextChip({ theme, percent, critical }: { theme: PluginTheme; percent: number; critical: boolean }) {
   const hue: Hue = critical ? "red" : "amber", color = hueColor(theme, hue);
-  return <View accessibilityLabel={`上下文已用 ${percent}%${critical ? "，即将用满" : ""}`} style={{ flexDirection: "row", alignItems: "center", gap: 3, height: 18, paddingHorizontal: 6, borderRadius: radius.full, backgroundColor: critical ? color : tint(color, tintAlpha(theme)) }}>
+  return <View accessibilityLabel={t("secondarySessionList.contextUsed", { value1: percent, value2: critical ? t("secondarySessionList.almostFull") : "" })} style={{ flexDirection: "row", alignItems: "center", gap: 3, height: 18, paddingHorizontal: 6, borderRadius: radius.full, backgroundColor: critical ? color : tint(color, tintAlpha(theme)) }}>
     <Icon name="Gauge" size={10} color={critical ? "#ffffff" : color} />
-    <Text style={{ color: critical ? "#ffffff" : hueColor(theme, hue, "text"), fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>上下文 {percent}%</Text>
+    <Text style={{ color: critical ? "#ffffff" : hueColor(theme, hue, "text"), fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{t("secondarySessionList.context", { value1: percent })}</Text>
   </View>;
 }
 
 /** 「!42」 / 「#17」: the merge or pull request a reply linked to (opus-B16); opens in the browser. */
 function ChangeRequestChip({ theme, link }: { theme: PluginTheme; link: NonNullable<AgentRecord["changeRequest"]> }) {
   const toast = useToast(), hue: Hue = link.kind === "mr" ? "indigo" : "blue", color = hueColor(theme, hue);
-  const open = () => { void openExternalUrl(link.url).catch(() => toast.error("链接打不开，可在结果里复制")); };
-  return <Pressable accessibilityRole="link" accessibilityLabel={`打开${link.kind === "mr" ? "合并请求" : "拉取请求"} ${link.label}`} onPress={open} hitSlop={6}
+  const open = () => { void openExternalUrl(link.url).catch(() => toast.error(t("secondarySessionList.couldNotOpenLinkYouCan"))); };
+  return <Pressable accessibilityRole="link" accessibilityLabel={t("secondarySessionList.open", { value1: link.kind === "mr" ? t("secondarySessionList.mergeRequest") : t("secondarySessionList.pullRequest"), value2: link.label })} onPress={open} hitSlop={6}
     style={state => ({ position: "absolute", right: space.md, bottom: 10, flexDirection: "row", alignItems: "center", gap: 3, height: 20, paddingHorizontal: 7, borderRadius: radius.full,
       backgroundColor: state.pressed || (state as { hovered?: boolean }).hovered ? tint(color, tintAlpha(theme) + 0.12) : tint(color, tintAlpha(theme)), borderWidth: hairline, borderColor: tint(color, 0.45) })}>
     <Icon name={link.kind === "mr" ? "GitMerge" : "GitPullRequest"} size={11} color={color} />
@@ -191,8 +194,8 @@ function ChangeRequestChip({ theme, link }: { theme: PluginTheme; link: NonNulla
 /** 「后台 · 实现折叠」: what the subagents still running after the Agent's own turn work on. */
 function BackgroundChip({ theme, agent }: { theme: PluginTheme; agent: AgentRecord }) {
   const background = agent.background!, color = hueColor(theme, "blue");
-  const label = background.running > 1 ? `后台 ${background.running} 个子任务` : `后台 · ${background.labels[0] ?? "子任务"}`;
-  return <View accessibilityLabel={`后台子任务 ${background.running} 个在执行${background.labels.length ? `：${background.labels.join("、")}` : ""}`}
+  const label = background.running > 1 ? t("secondarySessionList.backgroundSubtasks", { value1: background.running }) : t("secondarySessionList.background2", { value1: background.labels[0] ?? t("secondarySessionList.subtasks") });
+  return <View accessibilityLabel={t("secondarySessionList.backgroundSubtasksRunning", { value1: background.running, value2: background.labels.length ? t("secondarySessionList.message", { value1: joinList(background.labels) }) : "" })}
     style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1, minWidth: 0, maxWidth: 220, paddingHorizontal: 6, height: 18, borderRadius: radius.full, backgroundColor: tint(color, tintAlpha(theme)) }}>
     <Spinner size={10} color={color} />
     <Text numberOfLines={1} style={{ flexShrink: 1, color: hueColor(theme, "blue", "text"), fontSize: 11, fontWeight: "700" }}>{label}</Text>

@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import {
   emptyStatsMetrics, statsRangeDays, TOOL_KINDS, vendorNames, vendorOf,
   type StatsBreakdownRow, type StatsDay, type StatsMetrics, type StatsRange, type StatsSnapshot, type StatsTool,
@@ -30,7 +31,7 @@ const dayString = statsDayText;
 const weekday = (day: number) => ((day + 3) % 7 + 7) % 7;
 const active = (metrics: StatsMetrics) => metrics.sessions > 0 || metrics.turns > 0;
 const text = (value: string | null | undefined, fallback: string, maximum = 240) => (value?.trim() || fallback).slice(0, maximum);
-const titleOf = (agent: StatsDirectoryAgent | undefined) => text(agent?.title, "未命名 Agent");
+const titleOf = (agent: StatsDirectoryAgent | undefined) => text(agent?.title, t("serverStatsSnapshot.m001"));
 
 function add(target: StatsMetrics, delta: StatsMetrics, includeSessions = true): void {
   // Iterate the metric allowlist: breakdown rows also contain numeric metadata that must not be added here.
@@ -45,14 +46,14 @@ type Dimension = "models" | "providers" | "vendors" | "projects";
 const dimensions: readonly Dimension[] = ["models", "providers", "vendors", "projects"];
 
 function identity(dimension: Dimension, agent: StatsDirectoryAgent | undefined) {
-  if (!agent) return { key: "unknown", label: "未知", vendor: dimension === "projects" ? null : "other" };
+  if (!agent) return { key: "unknown", label: t("serverStatsSnapshot.m002"), vendor: dimension === "projects" ? null : "other" };
   const provider = text(agent.provider, "unknown", 1024), model = text(agent.model, provider, 1024);
   const vendor = vendorOf(agent.model, agent.provider);
   switch (dimension) {
     case "models": return { key: model, label: model.slice(0, 240), vendor };
     case "providers": return { key: provider, label: provider.slice(0, 240), vendor: vendorOf(null, agent.provider) };
     case "vendors": return { key: vendor, label: vendorNames[vendor] ?? vendor, vendor };
-    case "projects": return { key: text(agent.projectKey, "unknown", 1024), label: text(agent.projectName, "未知"), vendor: null };
+    case "projects": return { key: text(agent.projectKey, "unknown", 1024), label: text(agent.projectName, t("serverStatsSnapshot.m003")), vendor: null };
   }
 }
 
@@ -74,7 +75,7 @@ function finishGroups(groups: Map<string, Group>, limit: number, dimension: Dime
   const sorted = [...groups.values()].sort((a, b) => b.row.turns - a.row.turns || b.row.sessions - a.row.sessions || a.row.label.localeCompare(b.row.label) || a.row.key.localeCompare(b.row.key));
   const visible = sorted.slice(0, sorted.length > limit ? limit - 1 : limit);
   if (sorted.length > limit) {
-    const overflow = groupFor(new Map(), { key: "__other__", label: "其他", vendor: dimension === "projects" ? null : "other" });
+    const overflow = groupFor(new Map(), { key: "__other__", label: t("serverStatsSnapshot.m004"), vendor: dimension === "projects" ? null : "other" });
     for (const group of sorted.slice(limit - 1)) {
       add(overflow.row, group.row);
       overflow.row.running += group.row.running; overflow.row.open += group.row.open;

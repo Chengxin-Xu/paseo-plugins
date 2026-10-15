@@ -1,3 +1,5 @@
+import { translator } from "../../shared/i18n";
+import { t } from "../../shared/text";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import type { PaseoApi } from "../paseo-types";
@@ -62,7 +64,7 @@ export class TokenStore {
       if (await this.ingester.probeThreads()) this.changed();
     });
     this.ready = this.initialized.then(() => this.ingester.backfillAll()).catch(error => {
-      console.warn(`Token 导入失败（${safeError(error)}）。`);
+      console.warn(t("serverTokensStore.m001", { value1: safeError(error) }));
     }).finally(() => {
       this.lastScan = this.now();
       if (options.poll !== false) this.schedulePoll();
@@ -157,7 +159,7 @@ export class TokenStore {
     // The zone actually applied (null: the fixed offset) and its local today belong to the revision, so another zone, or the
     // same zone past local midnight, never reuses an earlier projection (as observatory.stats.get does).
     const zone = statsZone(input.utcOffsetMinutes, input.timeZone, now), today = statsDayText(statsLocalDay(now, zone));
-    const revision = createHash("sha256").update(JSON.stringify([this.change, input.range, input.utcOffsetMinutes, zone.name, today, this.directory.digest, this.ingester.roots, this.ingester.backfill, this.ingester.truncated])).digest("hex").slice(0, 24);
+    const revision = createHash("sha256").update(JSON.stringify([translator().language, translator().hash, this.change, input.range, input.utcOffsetMinutes, zone.name, today, this.directory.digest, this.ingester.roots, this.ingester.backfill, this.ingester.truncated])).digest("hex").slice(0, 24);
     if (input.revision === revision) return { mode: "unchanged", unchanged: true, revision };
     const cached = this.cached.get(revision); if (cached) return cached;
     const snapshot = buildTokenSnapshot(this.data, { range: input.range, utcOffsetMinutes: input.utcOffsetMinutes, timeZone: zone.name }, now, this.directory, this.coverage(), this.owners());
@@ -175,7 +177,7 @@ export class TokenStore {
       pruneData(this.data, this.now());
       const change = this.change, payload = this.persistence.serialize(this.data, this.ingester, change);
       if (await this.persistence.write(payload, durable)) this.dirty = this.change !== change;
-    }).catch(error => { console.warn(`Token 保存失败（${safeError(error)}）。`); }).finally(() => { if (this.dirty) this.scheduleWrite(); });
+    }).catch(error => { console.warn(t("serverTokensStore.m002", { value1: safeError(error) })); }).finally(() => { if (this.dirty) this.scheduleWrite(); });
     return this.writes;
   }
   async close(): Promise<void> {

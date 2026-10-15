@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useAgent, useRpc } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, useRevealedText } from "@getpaseo/plugin/client/react-native";
@@ -140,7 +141,7 @@ function HighlightedCodeBlock({
   title,
   lineStart,
   extra,
-  copyLabel = "复制代码",
+  copyLabel = t("ui.copyCode"),
 }: {
   code: string;
   language: string;
@@ -203,8 +204,8 @@ function HighlightedCodeBlock({
         >
           <Text style={styles.showMoreText}>
             {showAll
-              ? "收起"
-              : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+              ? t("ui.collapse")
+              : t("ui.expandAllLinesCharacters", { count: preview.totalLines, lines: preview.totalLines, characters: preview.totalChars.toLocaleString() })}
           </Text>
         </Pressable>
       ) : null}
@@ -259,14 +260,14 @@ function TerminalBlock({
       <View style={styles.frameHeader}>
         <View style={styles.frameTitleRow}>
           {brand ? <BrandChip badge={brand} /> : <Icon name="SquareTerminal" size={13} color={styles.copyText.color} />}
-          <DetailLabel style={styles.detailLabel}>命令</DetailLabel>
+          <DetailLabel style={styles.detailLabel}>{t("ui.command")}</DetailLabel>
         </View>
         {exitCode !== null ? (
           <View style={{ height: 16, paddingHorizontal: 5, borderRadius: 8, justifyContent: "center", borderWidth: 1, borderColor: exitColor }}>
-            <Text style={{ color: exitColor, fontSize: 10, fontWeight: "700", lineHeight: 12 }}>{`退出码 ${exitCode}`}</Text>
+            <Text style={{ color: exitColor, fontSize: 10, fontWeight: "700", lineHeight: 12 }}>{t("ui.exitCode", { code: exitCode })}</Text>
           </View>
         ) : null}
-        <CopyButton value={command} label="复制命令" theme={theme} styles={styles} />
+        <CopyButton value={command} label={t("ui.copyCommand")} theme={theme} styles={styles} />
       </View>
       <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
         <View style={styles.frameBody}>
@@ -276,8 +277,8 @@ function TerminalBlock({
       {output ? (
         <View style={styles.termOutput}>
           <View style={styles.termOutputHeader}>
-            <DetailLabel style={isError ? { ...styles.detailLabel, color: failedColor } : styles.detailLabel}>{isError ? "错误输出" : "输出"}</DetailLabel>
-            <OutputCopyButtons clean={clean} raw={output} label="复制输出" theme={theme} styles={styles} />
+            <DetailLabel style={isError ? { ...styles.detailLabel, color: failedColor } : styles.detailLabel}>{isError ? t("ui.errorOutput") : t("ui.output")}</DetailLabel>
+            <OutputCopyButtons clean={clean} raw={output} label={t("ui.copyOutput")} theme={theme} styles={styles} />
           </View>
           <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
             <View style={styles.frameBody}>
@@ -291,7 +292,7 @@ function TerminalBlock({
           {preview.truncated ? (
             <Pressable accessibilityRole="button" {...aria({ expanded: showAll })} onPress={() => setShowAll(!showAll)} style={styles.showMoreButton}>
               <Text style={styles.showMoreText}>
-                {showAll ? "收起" : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+                {showAll ? t("ui.collapse") : t("ui.expandAllLinesCharacters", { count: preview.totalLines, lines: preview.totalLines, characters: preview.totalChars.toLocaleString() })}
               </Text>
             </Pressable>
           ) : null}
@@ -308,8 +309,8 @@ type ReadImageState =
 
 // 本地补丁：预览只读 Agent 工作目录和临时目录（见 server/read-image.ts），其他位置给出原因。
 const IMAGE_NOTES: Partial<Record<string, string>> = {
-  outside: "图片不在 Agent 工作目录或临时目录内，不显示预览。",
-  "too-large": "图片超过 3 MB，不显示预览。",
+  get outside() { return t("ui.theImageIsOutsideThe"); },
+  get "too-large"() { return t("ui.theImageIsLargerThan"); },
 };
 
 function ReadImageBlock({
@@ -356,12 +357,12 @@ function ReadImageBlock({
       {fallback}
     </> : <>{fallback}</>;
   }
-  if (image.status === "loading") return <Text style={styles.mutedText}>正在加载图片…</Text>;
+  if (image.status === "loading") return <Text style={styles.mutedText}>{t("ui.loadingImage")}</Text>;
   return (
     <View style={styles.section}>
-      <DetailLabel style={styles.detailLabel}>图片</DetailLabel>
+      <DetailLabel style={styles.detailLabel}>{t("ui.image")}</DetailLabel>
       <Pressable
-        accessibilityLabel={expanded ? "缩小图片" : "放大图片"}
+        accessibilityLabel={expanded ? t("ui.shrinkImage") : t("ui.enlargeImage")}
         accessibilityRole="button"
         {...aria({ expanded })}
         onPress={() => setExpanded(!expanded)}
@@ -394,11 +395,11 @@ function DiffBlock({
 
   return (
     <View style={styles.section}>
-      <DetailLabel style={styles.detailLabel}>改动</DetailLabel>
+      <DetailLabel style={styles.detailLabel}>{t("ui.changes")}</DetailLabel>
       <ScrollView horizontal nestedScrollEnabled style={styles.codeScroll}>
         <View style={styles.diffSurface}>
           {displayLines.length === 0 ? (
-            <Text style={styles.empty}>没有可显示的改动。</Text>
+            <Text style={styles.empty}>{t("ui.noChangesToShow")}</Text>
           ) : (
             displayLines.map((line, index) => <DiffRow key={`${line.kind}-${index}`} line={line} palette={palette} styles={styles} />)
           )}
@@ -412,7 +413,7 @@ function DiffBlock({
           style={styles.showMoreButton}
         >
           <Text style={styles.showMoreText}>
-            {showAll ? "收起" : `展开全部（${lines.length} 行）`}
+            {showAll ? t("ui.collapse") : t("ui.expandAllLines", { lines: lines.length })}
           </Text>
         </Pressable>
       ) : null}
@@ -482,13 +483,13 @@ function PlainTextBlock({
     <View style={styles.section}>
       <View style={styles.codeHeader}>
         <DetailLabel style={styles.detailLabel}>{label}</DetailLabel>
-        <OutputCopyButtons clean={clean} raw={text} label={`复制${label}`} theme={theme} styles={styles} />
+        <OutputCopyButtons clean={clean} raw={text} label={t("ui.copy", { label: label })} theme={theme} styles={styles} />
       </View>
       <Text selectable style={color ? { ...styles.detailText, color } : styles.detailText}>{view.shown || " "}</Text>
       {view.preview.truncated ? (
         <Pressable accessibilityRole="button" {...aria({ expanded: showAll })} onPress={() => setShowAll(!showAll)} style={styles.showMoreButton}>
           <Text style={styles.showMoreText}>
-            {showAll ? "收起" : `展开全部（${view.preview.totalLines} 行，${view.preview.totalChars.toLocaleString()} 字符）`}
+            {showAll ? t("ui.collapse") : t("ui.expandAllLinesCharacters", { count: view.preview.totalLines, lines: view.preview.totalLines, characters: view.preview.totalChars.toLocaleString() })}
           </Text>
         </Pressable>
       ) : null}
@@ -496,17 +497,17 @@ function PlainTextBlock({
   );
 }
 
-const NOTICE_STATE_LABEL: Record<NoticeState, string> = { done: "已完成", failed: "失败", stopped: "已停止", blocked: "卡住了", info: "通知" };
+const NOTICE_STATE_LABEL: Record<NoticeState, string> = { get done() { return t("ui.completed"); }, get failed() { return t("ui.failed"); }, get stopped() { return t("ui.stopped"); }, get blocked() { return t("ui.blocked"); }, get info() { return t("ui.notice"); } };
 
 /** A notice's usage line: 「48,213 token · 17 次工具调用 · 2 分 11 秒」. */
 function noticeUsageText(usage: ReturnType<typeof noticeSections>["usage"]): string | null {
   if (!usage) return null;
   const parts = [
-    usage.tokens !== null ? `${usage.tokens.toLocaleString()} token` : null,
-    usage.toolUses !== null ? `${usage.toolUses} 次工具调用` : null,
+    usage.tokens !== null ? t("ui.tokens", { count: usage.tokens.toLocaleString() }) : null,
+    usage.toolUses !== null ? t("ui.toolCalls", { count: usage.toolUses }) : null,
     usage.durationMs !== null ? formatDuration(usage.durationMs) : null,
   ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : null;
+  return parts.length > 0 ? parts.join(t("ui.metaSeparator")) : null;
 }
 
 /**
@@ -517,24 +518,24 @@ function NoticeDetail({ data, raw, theme, palette, styles }: { data: ToolCallDat
   const notice = data.notice!;
   const sections = useMemo(() => noticeSections(raw), [raw]);
   const usage = noticeUsageText(sections.usage);
-  const fields: Array<[string, string, boolean]> = [
-    ["说明", notice.text, false],
-    ["状态", NOTICE_STATE_LABEL[notice.state], false],
-    ...(usage ? ([["用量", usage, false]] as Array<[string, string, boolean]>) : []),
-    ...(notice.outputFile ? ([["输出文件", notice.outputFile, true]] as Array<[string, string, boolean]>) : []),
-    ...(notice.taskId ? ([["任务", notice.taskId, true]] as Array<[string, string, boolean]>) : []),
+  const fields: Array<[string, string, boolean, string?]> = [
+    [t("ui.description"), notice.text, false],
+    [t("ui.status"), NOTICE_STATE_LABEL[notice.state], false, "status"],
+    ...(usage ? ([[t("ui.usage"), usage, false]] as Array<[string, string, boolean, string?]>) : []),
+    ...(notice.outputFile ? ([[t("ui.outputFile"), notice.outputFile, true]] as Array<[string, string, boolean, string?]>) : []),
+    ...(notice.taskId ? ([[t("ui.task"), notice.taskId, true]] as Array<[string, string, boolean, string?]>) : []),
   ];
   const stateColor = notice.state === "failed" || notice.state === "blocked" ? palette.statusColors.failed : notice.state === "done" ? palette.statusColors.completed : undefined;
   return (
     <>
-      {fields.map(([label, value, mono]) => (
+      {fields.map(([label, value, mono, id]) => (
         <View key={label} style={styles.section}>
           <DetailLabel style={styles.detailLabel}>{label}</DetailLabel>
-          <Text selectable style={{ ...styles.detailText, ...(mono ? {} : { fontFamily: undefined }), ...(label === "状态" && stateColor ? { color: stateColor, fontWeight: "600" as const } : {}) }}>{value}</Text>
+          <Text selectable style={{ ...styles.detailText, ...(mono ? {} : { fontFamily: undefined }), ...(id === "status" && stateColor ? { color: stateColor, fontWeight: "600" as const } : {}) }}>{value}</Text>
         </View>
       ))}
-      {sections.event ? <PlainTextBlock text={sections.event} label="事件" theme={theme} styles={styles} /> : null}
-      {sections.result ? <PlainTextBlock text={sections.result} label={notice.kind === "agent" ? "子 Agent 的结论" : "结果"} theme={theme} styles={styles} /> : null}
+      {sections.event ? <PlainTextBlock text={sections.event} label={t("ui.event")} theme={theme} styles={styles} /> : null}
+      {sections.result ? <PlainTextBlock text={sections.result} label={notice.kind === "agent" ? t("ui.subagentConclusion") : t("ui.result")} theme={theme} styles={styles} /> : null}
     </>
   );
 }
@@ -551,12 +552,12 @@ function PiNoticeDetail({ pi, theme, palette, styles }: { pi: PiNoticeData; them
       {pi.fields.map((field) => (
         <View key={field.label} style={styles.section}>
           <DetailLabel style={styles.detailLabel}>{field.label}</DetailLabel>
-          <Text selectable style={{ ...styles.detailText, ...(field.mono ? {} : { fontFamily: undefined }), ...(field.label === "状态" && stateColor ? { color: stateColor, fontWeight: "600" as const } : {}) }}>{field.value}</Text>
+          <Text selectable style={{ ...styles.detailText, ...(field.mono ? {} : { fontFamily: undefined }), ...(field.id === "status" && stateColor ? { color: stateColor, fontWeight: "600" as const } : {}) }}>{field.value}</Text>
         </View>
       ))}
       {/* 0.6.0-local.5 (codex-vivid-merge-F2): drawn without the reader, the body is the message as sent. */}
-      {pi.body ? <PlainTextBlock text={pi.body} label={pi.reader ? "原文" : "内容"} theme={theme} styles={styles} /> : null}
-      {pi.cut ? <Text style={styles.mutedText}>{`内容很长，这里只显示前 ${PI_NOTICE_BODY_CHARS} 字。`}</Text> : null}
+      {pi.body ? <PlainTextBlock text={pi.body} label={pi.reader ? t("ui.originalText") : t("ui.content")} theme={theme} styles={styles} /> : null}
+      {pi.cut ? <Text style={styles.mutedText}>{t("ui.thisContentIsLongOnly", { count: PI_NOTICE_BODY_CHARS })}</Text> : null}
     </>
   );
 }
@@ -572,7 +573,7 @@ function AskDetail({ content, palette, styles }: { content: AskContent; palette:
     <>
       {content.questions.map((question, index) => (
         <View key={`${index}-${question.question}`} style={styles.section}>
-          <DetailLabel style={styles.detailLabel}>{question.header ? `问题 · ${question.header}` : content.questions.length > 1 ? `问题 ${index + 1}` : "问题"}</DetailLabel>
+          <DetailLabel style={styles.detailLabel}>{question.header ? t("ui.question3", { header: question.header }) : content.questions.length > 1 ? t("ui.question2", { number: index + 1 }) : t("ui.question")}</DetailLabel>
           <Text selectable style={prose}>{question.question}</Text>
           {question.options.length > 0 ? (
             <View style={styles.paseoChips}>
@@ -586,15 +587,15 @@ function AskDetail({ content, palette, styles }: { content: AskContent; palette:
               })}
             </View>
           ) : null}
-          {question.multiSelect ? <Text style={styles.mutedText}>可以多选</Text> : null}
+          {question.multiSelect ? <Text style={styles.mutedText}>{t("ui.selectAllThatApply")}</Text> : null}
         </View>
       ))}
       {content.answers.length > 0 ? (
         <View style={styles.section}>
-          <DetailLabel style={styles.detailLabel}>回答</DetailLabel>
+          <DetailLabel style={styles.detailLabel}>{t("ui.answer")}</DetailLabel>
           {content.answers.map((answer, index) => (
             <Text key={`${index}-${answer.answer}`} selectable style={prose}>
-              {answer.question && content.questions.length > 1 ? `${answer.question}：${answer.answer}` : answer.answer}
+              {answer.question && content.questions.length > 1 ? t("ui.answerPair", { question: answer.question, answer: answer.answer }) : answer.answer}
             </Text>
           ))}
         </View>
@@ -607,7 +608,7 @@ function PendingOutput({ styles }: { styles: ReturnType<typeof useActivityStyles
   return (
     <View style={styles.pendingRow}>
       <ActivityIndicator size="small" color={styles.mutedText.color} />
-      <Text style={styles.mutedText}>等待输出…</Text>
+      <Text style={styles.mutedText}>{t("ui.waitingForOutput")}</Text>
     </View>
   );
 }
@@ -633,16 +634,16 @@ function SearchDetail({
   );
   const { matchCount, fileCount } = resolveSearchCounts(detail, parsed);
   const meta = [
-    matchCount !== undefined ? `${matchCount} 处匹配` : undefined,
-    fileCount !== undefined ? `${fileCount} 个文件` : undefined,
+    matchCount !== undefined ? t("ui.matches", { count: matchCount }) : undefined,
+    fileCount !== undefined ? t("ui.files", { count: fileCount }) : undefined,
   ]
     .filter(Boolean)
-    .join(" · ");
+    .join(t("ui.metaSeparator"));
 
   return (
     <>
       {notInHeader(detail.query, headerSummary) ? (
-        <Text style={styles.detailText}>查询：{detail.query}</Text>
+        <Text style={styles.detailText}>{t("ui.queryValue", { value: detail.query })}</Text>
       ) : null}
       {meta ? <Text style={styles.mutedText}>{meta}</Text> : null}
       {parsed && parsed.files.length > 0 ? (
@@ -717,7 +718,7 @@ export function DetailBody({
     return <NoticeDetail data={data} raw={detail?.type === "plain_text" ? detail.text : undefined} theme={theme} palette={palette} styles={styles} />;
   }
   if (data.pi) return <PiNoticeDetail pi={data.pi} theme={theme} palette={palette} styles={styles} />;
-  if (!detail) return <Text style={styles.empty}>没有工具详情。</Text>;
+  if (!detail) return <Text style={styles.empty}>{t("ui.noToolDetails")}</Text>;
   if (isAskTool(data.name) && (detail.type === "unknown" || detail.type === "plain_text")) {
     const content = askContent(detail);
     if (content.questions.length > 0 || content.answers.length > 0) return <AskDetail content={content} palette={palette} styles={styles} />;
@@ -725,7 +726,7 @@ export function DetailBody({
 
   if (isSkillTool(data.name)) {
     const skillName = skillNameForDetail(detail);
-    if (!skillName) return <Text style={styles.empty}>没有技能详情。</Text>;
+    if (!skillName) return <Text style={styles.empty}>{t("ui.noSkillDetails")}</Text>;
     return (
       <Text selectable style={styles.detailText}>
         {skillName}
@@ -750,8 +751,8 @@ export function DetailBody({
           {shell.truncated === true ? (
             <Text selectable style={styles.mutedText}>
               {shell.fullOutputPath
-                ? `输出已截断 · 完整输出在 ${compactText(shell.fullOutputPath, 160)}`
-                : "输出已截断"}
+                ? t("ui.outputTruncatedFullOutputAt", { path: compactText(shell.fullOutputPath, 160) })
+                : t("ui.outputTruncated")}
             </Text>
           ) : null}
         </>
@@ -769,7 +770,7 @@ export function DetailBody({
             chip={fileBadge(detail.filePath)}
             title={shownPath(detail.filePath)}
             lineStart={typeof detail.offset === "number" && detail.offset > 0 ? detail.offset : 1}
-            copyLabel="复制内容"
+            copyLabel={t("ui.copyContent")}
             styles={styles}
             theme={theme}
           />
@@ -789,7 +790,7 @@ export function DetailBody({
                 <HighlightedCodeBlock
                   code={detail.content}
                   language={data.presentation.language ?? "text"}
-                  label="内容"
+                  label={t("ui.content")}
                   styles={styles}
                   theme={theme}
                 />
@@ -806,7 +807,7 @@ export function DetailBody({
           chip={fileBadge(detail.filePath)}
           title={shownPath(detail.filePath)}
           lineStart={1}
-          copyLabel="复制写入内容"
+          copyLabel={t("ui.copyWrittenContent")}
           styles={styles}
           theme={theme}
         />
@@ -824,7 +825,7 @@ export function DetailBody({
               <HighlightedCodeBlock
                 code={detail.oldString}
                 language={data.presentation.language ?? "text"}
-                label="改前"
+                label={t("ui.before")}
                 styles={styles}
                 theme={theme}
               />
@@ -833,7 +834,7 @@ export function DetailBody({
               <HighlightedCodeBlock
                 code={detail.newString}
                 language={data.presentation.language ?? "text"}
-                label="改后"
+                label={t("ui.after")}
                 styles={styles}
                 theme={theme}
               />
@@ -865,16 +866,16 @@ export function DetailBody({
           {notInHeader(detail.url, data.presentation.summary) ? (
             <Text selectable style={styles.detailText}>{detail.url}</Text>
           ) : null}
-          {detail.result ? <HighlightedCodeBlock code={detail.result} language="text" label="结果" styles={styles} theme={theme} /> : null}
-          {detail.code !== undefined ? <Text style={styles.mutedText}>HTTP {detail.code} {detail.codeText ?? ""}</Text> : null}
+          {detail.result ? <HighlightedCodeBlock code={detail.result} language="text" label={t("ui.result")} styles={styles} theme={theme} /> : null}
+          {detail.code !== undefined ? <Text style={styles.mutedText}>{t("ui.httpStatus", { code: detail.code, status: detail.codeText ?? "" })}</Text> : null}
         </>
       );
     case "worktree_setup":
       return (
         <>
-          <Text style={styles.detailText}>分支：{detail.branchName}</Text>
-          <Text style={styles.mutedText}>路径：{detail.worktreePath}</Text>
-          {detail.log ? <HighlightedCodeBlock code={detail.log} language="ansi" label="准备日志" styles={styles} theme={theme} /> : null}
+          <Text style={styles.detailText}>{t("ui.branchValue", { value: detail.branchName })}</Text>
+          <Text style={styles.mutedText}>{t("ui.pathValue", { value: detail.worktreePath })}</Text>
+          {detail.log ? <HighlightedCodeBlock code={detail.log} language="ansi" label={t("ui.setupLog")} styles={styles} theme={theme} /> : null}
         </>
       );
     case "sub_agent":
@@ -887,13 +888,13 @@ export function DetailBody({
         <>
           {notInHeader(detail.subAgentType, data.presentation.summary) ? <Text style={styles.detailText}>{detail.subAgentType}</Text> : null}
           {notInHeader(detail.description, data.presentation.summary) ? <Text style={styles.mutedText}>{detail.description}</Text> : null}
-          {detail.childSessionId ? <Text style={styles.mutedText}>会话 {detail.childSessionId}</Text> : null}
-          {detail.log && !subAgentLogFullyShown(detail) ? <HighlightedCodeBlock code={detail.log} language="ansi" label="活动日志" styles={styles} theme={theme} /> : null}
+          {detail.childSessionId ? <Text style={styles.mutedText}>{t("ui.sessionValue", { value: detail.childSessionId })}</Text> : null}
+          {detail.log && !subAgentLogFullyShown(detail) ? <HighlightedCodeBlock code={detail.log} language="ansi" label={t("ui.activityLog")} styles={styles} theme={theme} /> : null}
         </>
       );
     case "plain_text":
       // 0.5.0: plain-text results can be terminal output: no escape sequences on screen. 0.6.0: a preview first.
-      return detail.text ? <PlainTextBlock text={detail.text} label="结果" theme={theme} styles={styles} /> : <Text style={styles.empty}>没有返回文字。</Text>;
+      return detail.text ? <PlainTextBlock text={detail.text} label={t("ui.result")} theme={theme} styles={styles} /> : <Text style={styles.empty}>{t("ui.noTextReturned")}</Text>;
     case "plan":
       return <Text selectable style={styles.detailText}>{detail.text}</Text>;
     case "unknown": {
@@ -924,9 +925,9 @@ export function DetailBody({
         if (entries !== null) {
           return (
             <View style={styles.section}>
-              <DetailLabel style={styles.detailLabel}>文件</DetailLabel>
+              <DetailLabel style={styles.detailLabel}>{t("ui.file")}</DetailLabel>
               {entries.length === 0 ? (
-                <Text style={styles.empty}>没有返回文件。</Text>
+                <Text style={styles.empty}>{t("ui.noFilesReturned")}</Text>
               ) : (
                 entries.map((entry) => (
                   <PathRow
@@ -1040,7 +1041,7 @@ export function DetailBody({
             <HighlightedCodeBlock
               code={codeInput.code}
               language={codeInput.language}
-              label="输入"
+              label={t("ui.input")}
               styles={styles}
               theme={theme}
             />
@@ -1048,7 +1049,7 @@ export function DetailBody({
               <HighlightedCodeBlock
                 code={formatUnknownValue(detail.output)}
                 language="json"
-                label="输出"
+                label={t("ui.output")}
                 styles={styles}
                 theme={theme}
               />
@@ -1064,7 +1065,7 @@ export function DetailBody({
             <HighlightedCodeBlock
               code={formatUnknownValue(detail.input)}
               language="json"
-              label="输入"
+              label={t("ui.input")}
               styles={styles}
               theme={theme}
             />
@@ -1073,7 +1074,7 @@ export function DetailBody({
             <HighlightedCodeBlock
               code={formatUnknownValue(detail.output)}
               language="json"
-              label="输出"
+              label={t("ui.output")}
               styles={styles}
               theme={theme}
             />
@@ -1228,7 +1229,7 @@ function ReasoningStep({
         {last ? null : <View style={styles.stepLine} />}
       </View>
       <View style={styles.stepContent}>
-        <Text style={styles.stepTitle}>{title ? `${index + 1}. ${title}` : `第 ${index + 1} 步`}</Text>
+        <Text style={styles.stepTitle}>{title ? t("ui.numberedStep", { number: index + 1, title }) : t("ui.step", { number: index + 1 })}</Text>
         {blocks.length > 0 ? (
           <ReasoningBlockList blocks={blocks} keyPrefix={`step-${index}`} theme={theme} styles={styles} />
         ) : null}
@@ -1305,8 +1306,8 @@ export function ReasoningText({
         >
           <Text style={styles.showMoreText}>
             {showAll
-              ? "收起"
-              : `展开全部（${preview.totalLines} 行，${preview.totalChars.toLocaleString()} 字符）`}
+              ? t("ui.collapse")
+              : t("ui.expandAllLinesCharacters", { count: preview.totalLines, lines: preview.totalLines, characters: preview.totalChars.toLocaleString() })}
           </Text>
         </Pressable>
       ) : null}

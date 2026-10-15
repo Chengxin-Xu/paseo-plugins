@@ -2,7 +2,7 @@
 
 Server Browser runs Chromium on the Paseo daemon's machine and shows the same live page on your phone and computer. A browser Agent works on it through its own tools; a switch shows who is in control, and after you take over the Agent only sees screenshots and page text.
 
-Each workspace has its own browser and profile; logins stay separate and survive restarts. The interface and Agent instructions are in Simplified Chinese.
+Each workspace has its own browser and profile; logins stay separate and survive restarts. The interface supports English, Simplified Chinese and user-defined languages.
 
 ## What it adds
 
@@ -20,6 +20,10 @@ The plugin needs a Linux daemon host and Paseo 0.11.1 or later, and never instal
 - Run `node scripts/setup-runtime.mjs` in the plugin folder (`paseo plugin ls --json` shows it). It installs the locked `runtime-deps/` tree (Playwright MCP 0.0.82, Readability, jsdom, Turndown) into `~/.local/share/paseo-server-browser` or `PASEO_SERVER_BROWSER_RUNTIME` with `npm ci`, install scripts disabled.
 - Provide Chromium: Playwright's cached `chromium-headless-shell`, or a binary in `PASEO_SERVER_BROWSER_EXECUTABLE`.
 - The runtime's optional `lib/` and `fonts.conf` supply missing libraries and fonts; Chinese pages need Chinese fonts.
+
+## Languages
+
+English and Simplified Chinese are built in. The device language is used unless Settings → Plugins → Server Browser → Language picks one; English stands in for a missing translation. A translated copy of the bundled template in `~/.paseo/plugin-data/server-browser/locales/` adds a language. Web pages and saved agent replies keep their own language.
 
 ## Browser Agent
 
@@ -46,7 +50,7 @@ Each workspace keeps its data in `~/.local/share/paseo-server-browser/visual/<wo
 
 Other downloads go to a temporary `playwright-artifacts-*` folder, deleted when the browser stops. The activity list keeps 12 actions in memory, without typed text or queries.
 
-The plugin reads the daemon's workspace list and agent profiles. Frames, titles and addresses go only to your Paseo clients; error messages lose page addresses.
+The plugin reads the daemon's workspace list and agent profiles, and keeps its language state, translation templates and the translations you add in `~/.paseo/plugin-data/server-browser/`. Frames, titles and addresses go only to your Paseo clients; error messages lose page addresses.
 
 ## Network and processes
 

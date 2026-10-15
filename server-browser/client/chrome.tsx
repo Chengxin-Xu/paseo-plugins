@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { PluginSurfaceProps } from '@getpaseo/plugin/client';
 import { Icon, ScrollView, TextInput } from '@getpaseo/plugin/client/react-native';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -39,21 +40,21 @@ export function AddressField({ theme, value, onChangeText, onSubmit, editable, b
   const secure = /^https:\/\//i.test(value);
   return <View style={{ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: space.xs + 2, height: compact ? control.md : 30, paddingLeft: 10, paddingRight: focused && editable && shown ? space.xxs : 10, borderRadius: radius.md, backgroundColor: colors.surface2 }}>
     {busy ? <ActivityIndicator size="small" color={colors.foregroundMuted} /> : <Icon name={secure ? 'Lock' : 'Globe'} size={14} color={colors.foregroundMuted} />}
-    <TextInput testID="server-browser-address" accessibilityLabel="网页地址" value={shown} onChangeText={onChangeText} editable={editable} selectTextOnFocus
+    <TextInput testID="server-browser-address" accessibilityLabel={t("browserChrome.pageUrl")} value={shown} onChangeText={onChangeText} editable={editable} selectTextOnFocus
       onFocus={() => { setFocused(true); onFocusChange(true); }} onBlur={() => { setFocused(false); onFocusChange(false); }} onSubmitEditing={onSubmit}
-      placeholder={editable ? '输入网址' : '网页地址'} placeholderTextColor={colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} keyboardType="url" returnKeyType="go"
+      placeholder={editable ? t("browserChrome.enterAUrl") : t("browserChrome.pageUrl")} placeholderTextColor={colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} keyboardType="url" returnKeyType="go"
       style={{ flex: 1, minWidth: 0, color: editable ? colors.foreground : colors.foregroundMuted, fontSize: compact ? fontSize.body : fontSize.small, paddingVertical: 0, ...noFocusRing }} />
-    {focused && editable && shown ? <IconButton theme={theme} icon="ArrowRight" label="访问网址" size="sm" testID="server-browser-go" onPress={onSubmit} /> : null}
+    {focused && editable && shown ? <IconButton theme={theme} icon="ArrowRight" label={t("browserChrome.goToUrl")} size="sm" testID="server-browser-go" onPress={onSubmit} /> : null}
   </View>;
 }
 
 /** Page-tab switcher in the style of mobile browsers: a rounded square with the open-tab count. */
 export function TabCountButton({ theme, count, onPress, size = 'sm' }: { theme: Theme; count: number; onPress: () => void; size?: 'sm' | 'md' }) {
   const { colors } = theme, edge = size === 'sm' ? control.sm : control.md;
-  return <Pressable testID="server-browser-tabs" accessibilityRole="button" accessibilityLabel={`标签页 ${count} 个`} onPress={onPress} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+  return <Pressable testID="server-browser-tabs" accessibilityRole="button" accessibilityLabel={t("browserChrome.tabs", { count: count })} onPress={onPress} hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
     style={state => ({ width: edge, height: edge, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md, backgroundColor: (state as Interaction).hovered || state.pressed ? colors.surface1 : 'transparent' })}>
     <View style={{ minWidth: 17, height: 17, paddingHorizontal: 3, alignItems: 'center', justifyContent: 'center', borderRadius: 5, borderWidth: 1.5, borderColor: colors.foregroundMuted }}>
-      <Text style={{ color: colors.foregroundMuted, fontSize: 10, lineHeight: 12, fontWeight: '600', fontVariant: ['tabular-nums'] }}>{count > 99 ? '99+' : count}</Text>
+      <Text style={{ color: colors.foregroundMuted, fontSize: 10, lineHeight: 12, fontWeight: '600', fontVariant: ['tabular-nums'] }}>{count > 99 ? t("browserChrome.label99") : count}</Text>
     </View>
   </Pressable>;
 }
@@ -67,7 +68,7 @@ export function TabCountButton({ theme, count, onPress, size = 'sm' }: { theme: 
 export function ModeSwitch({ theme, mode, onChange, disabled, compact }: { theme: Theme; mode: ControlMode; onChange: (mode: ControlMode) => void; disabled: boolean; compact: boolean }) {
   const { colors } = theme;
   const options = [{ value: 'agent', testID: 'server-browser-agent-mode', ...controlLooks.agent }, { value: 'manual', testID: 'server-browser-manual', ...controlLooks.manual }] as const;
-  return <View testID="server-browser-mode" accessibilityRole="tablist" accessibilityLabel="控制方式" aria-disabled={disabled} pointerEvents={disabled ? 'none' : 'auto'}
+  return <View testID="server-browser-mode" accessibilityRole="tablist" accessibilityLabel={t("browserChrome.controlMode")} aria-disabled={disabled} pointerEvents={disabled ? 'none' : 'auto'}
     style={{ flexDirection: 'row', padding: space.xxs, gap: space.xxs, borderRadius: radius.md, backgroundColor: colors.surface2, opacity: disabled ? 0.5 : 1 }}>
     {options.map((option) => {
       const selected = option.value === mode;
@@ -111,7 +112,7 @@ export function BusyPill({ theme, label, icon, onPress, tone = 'neutral' }: { th
   </View>;
 }
 
-const keys = [{ key: 'Enter', label: 'Enter' }, { key: 'Tab', label: 'Tab' }, { key: 'Backspace', label: '退格' }, { key: 'Control+A', label: '全选' }, { key: 'Escape', label: 'Esc' }] as const;
+const keys = [{ key: 'Enter', get label() { return t("browserChrome.enter"); } }, { key: 'Tab', get label() { return t("browserChrome.tab"); } }, { key: 'Backspace', get label() { return t("browserChrome.backspace"); } }, { key: 'Control+A', get label() { return t("browserChrome.selectAll"); } }, { key: 'Escape', get label() { return t("browserChrome.esc"); } }] as const;
 export type DockKey = typeof keys[number]['key'];
 /** Typing tray for phones, IME and special keys; the page stays visible above it. */
 export function InputDock({ theme, text, onChangeText, onSend, onKey, onScroll, onClose, enabled }: {
@@ -125,16 +126,16 @@ export function InputDock({ theme, text, onChangeText, onSend, onKey, onScroll, 
   </Pressable>;
   return <View testID="server-browser-input-dock" style={{ gap: space.sm, paddingHorizontal: space.md, paddingVertical: space.sm, borderTopWidth: hairline, borderTopColor: colors.border, backgroundColor: colors.surface0 }}>
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-      <TextInput autoFocus testID="server-browser-input" accessibilityLabel="要输入到网页的文字" value={text} onChangeText={onChangeText} editable={enabled} onSubmitEditing={onSend}
-        placeholder="输入到网页的文字" placeholderTextColor={colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} returnKeyType="send"
+      <TextInput autoFocus testID="server-browser-input" accessibilityLabel={t("browserChrome.textToEnterOnThePage")} value={text} onChangeText={onChangeText} editable={enabled} onSubmitEditing={onSend}
+        placeholder={t("browserChrome.textToEnterOnThePage2")} placeholderTextColor={colors.foregroundMuted} autoCapitalize="none" autoCorrect={false} returnKeyType="send"
         style={{ flex: 1, minWidth: 0, height: control.md, paddingHorizontal: space.md, borderRadius: radius.md, backgroundColor: colors.surface2, color: colors.foreground, fontSize: fontSize.body, ...noFocusRing }} />
-      <Button theme={theme} label="输入" variant="primary" size="sm" disabled={!enabled || !text} testID="server-browser-send" onPress={onSend} />
-      <IconButton theme={theme} icon="X" label="收起输入" size="sm" testID="server-browser-input-close" onPress={onClose} />
+      <Button theme={theme} label={t("browserChrome.enterText")} variant="primary" size="sm" disabled={!enabled || !text} testID="server-browser-send" onPress={onSend} />
+      <IconButton theme={theme} icon="X" label={t("browserChrome.collapseInput")} size="sm" testID="server-browser-input-close" onPress={onClose} />
     </View>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={{ flexGrow: 0 }} contentContainerStyle={{ flexDirection: 'row', gap: space.xs + 2 }}>
       {keys.map(item => key(`server-browser-key-${item.key}`, item.label, () => onKey(item.key)))}
-      {key('server-browser-scroll-up', '上滚', () => onScroll(-1), 'ArrowUp')}
-      {key('server-browser-scroll-down', '下滚', () => onScroll(1), 'ArrowDown')}
+      {key('server-browser-scroll-up', t("browserChrome.scrollUp"), () => onScroll(-1), 'ArrowUp')}
+      {key('server-browser-scroll-down', t("browserChrome.scrollDown"), () => onScroll(1), 'ArrowDown')}
     </ScrollView>
   </View>;
 }

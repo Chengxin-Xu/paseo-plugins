@@ -1,3 +1,5 @@
+import { joinList, onTextChange } from "./i18n";
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { completionReadState, type AgentRecord } from "./model";
@@ -81,7 +83,7 @@ export type ScheduleRunsResponse = z.infer<typeof listScheduleRuns.output>;
 export type ScheduleRunsState = Extract<ScheduleRunsResponse, { mode: "full" }>;
 export function mergeScheduleRuns(previous: ScheduleRunsState | undefined, response: ScheduleRunsResponse): ScheduleRunsState {
   if (response.mode === "full") return response;
-  if (!previous) throw new Error("本地定时运行缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedSchedules.m001"));
   return previous;
 }
 
@@ -136,7 +138,7 @@ export type HeartbeatsResponse = z.infer<typeof getScheduleHeartbeats.output>;
 export type HeartbeatsState = Extract<HeartbeatsResponse, { mode: "full" }>;
 export function mergeHeartbeats(previous: HeartbeatsState | undefined, response: HeartbeatsResponse): HeartbeatsState {
   if (response.mode === "full") return response;
-  if (!previous) throw new Error("本地心跳缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedSchedules.m002"));
   return previous;
 }
 
@@ -147,16 +149,16 @@ export function mergeHeartbeats(previous: HeartbeatsState | undefined, response:
  */
 export type HeartbeatGuard = { ready: true; targets: ReadonlySet<string> } | { ready: false; reason: string };
 export function heartbeatGuard(state: HeartbeatsState | null | undefined, failed = false): HeartbeatGuard {
-  if (failed) return { ready: false, reason: "心跳读取失败，暂时无法确认哪些会话还有心跳。" };
-  if (!state) return { ready: false, reason: "正在读取心跳，读到之前不能批量归档。" };
+  if (failed) return { ready: false, reason: t("sharedSchedules.m003") };
+  if (!state) return { ready: false, reason: t("sharedSchedules.m004") };
   if (state.error) return { ready: false, reason: state.error };
-  if (state.complete !== true || !state.targets) return { ready: false, reason: "定时任务没有全部读到，无法确认哪些会话还有心跳。" };
+  if (state.complete !== true || !state.targets) return { ready: false, reason: t("sharedSchedules.m005") };
   const targets = new Set(state.targets);
   for (const heartbeat of state.heartbeats) if (heartbeat.status !== "completed") targets.add(heartbeat.agentId);
   return { ready: true, targets };
 }
 /** 归档已读完成 waits while the session list is cut short: an Agent below a read session may be among those not loaded. */
-export const ARCHIVE_PARTIAL_LIST = "会话较多，只加载了一部分，看不全子 Agent，暂时不能批量归档。";
+export let ARCHIVE_PARTIAL_LIST = t("sharedSchedules.m006");
 /** `truncated`: `agents` is not every unarchived Agent (the directory read was cut short, its `truncated`). */
 export interface ArchiveListState { truncated?: boolean }
 export interface ArchiveOffer {
@@ -269,7 +271,8 @@ export function previewOf(text: string | null | undefined, max = 280): string | 
   return plain.length <= max ? plain : `${plain.slice(0, max - 1).trimEnd()}…`;
 }
 
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+let WEEKDAYS = [t("sharedSchedules.m007"), t("sharedSchedules.m008"), t("sharedSchedules.m009"), t("sharedSchedules.m010"), t("sharedSchedules.m011"), t("sharedSchedules.m012"), t("sharedSchedules.m013")];
+let WEEKDAY_TAILS = [t("sharedSchedules.shortSunday"), t("sharedSchedules.shortMonday"), t("sharedSchedules.shortTuesday"), t("sharedSchedules.shortWednesday"), t("sharedSchedules.shortThursday"), t("sharedSchedules.shortFriday"), t("sharedSchedules.shortSaturday")];
 const pad = (value: number) => String(value).padStart(2, "0");
 
 /**
@@ -327,55 +330,55 @@ function minuteInterval(field: CronField): number | null {
 function timePart(minute: CronField, hour: CronField): { at: string[] } | { every: string } | null {
   const interval = minuteInterval(minute);
   if (interval) {
-    const every = interval === 1 ? "每分钟" : `每 ${interval} 分钟`;
+    const every = interval === 1 ? t("sharedSchedules.m014") : t("sharedSchedules.m015", { interval: interval });
     if (hour.all) return { every };
-    const span = hour.range ? `${hour.range[0]}–${hour.range[1]} 点` : hour.values.length <= 4 ? `${hour.values.join("、")} 点` : null;
-    return span ? { every: `${span}${every}` } : null;
+    const span = hour.range ? t("sharedSchedules.m016", { value1: hour.range[0], value2: hour.range[1] }) : hour.values.length <= 4 ? t("sharedSchedules.m017", { value1: joinList(hour.values.map(String)) }) : null;
+    return span ? { every: t("sharedSchedules.hourlySpan", { span, every }) } : null;
   }
   if (minute.values.length === 1) {
-    const at = minute.values[0]!, offset = at ? `（整点后 ${at} 分）` : "";
-    if (hour.all) return { every: `每小时${offset}` };
-    if (hour.step) return { every: `每 ${hour.step} 小时${offset}` };
+    const at = minute.values[0]!, offset = at ? t("sharedSchedules.m018", { at: at }) : "";
+    if (hour.all) return { every: t("sharedSchedules.m019", { offset: offset }) };
+    if (hour.step) return { every: t("sharedSchedules.m020", { value1: hour.step, offset: offset }) };
     if (hour.values.length <= 6) return { at: hour.values.map(value => clockText(value, at)) };
-    return hour.range ? { every: `${hour.range[0]}–${hour.range[1]} 点每小时${offset}` } : null;
+    return hour.range ? { every: t("sharedSchedules.m021", { value1: hour.range[0], value2: hour.range[1], offset: offset }) } : null;
   }
   return !hour.all && minute.values.length * hour.values.length <= 6 ? { at: hour.values.flatMap(value => minute.values.map(at => clockText(value, at))) } : null;
 }
 /** 工作日 / 周末 / 每周五 / 周一至周三 / 每周一、三、五 (Monday first). */
 function weekdayText(field: CronField): string {
   const days = [...field.values].sort((a, b) => (a + 6) % 7 - (b + 6) % 7), key = days.join(",");
-  if (key === "1,2,3,4,5") return "工作日";
-  if (key === "6,0") return "周末";
-  if (days.length === 1) return `每${WEEKDAYS[days[0]!]}`;
-  if (field.range && field.range[1] - field.range[0] >= 2) return `${WEEKDAYS[field.range[0]]}至${WEEKDAYS[field.range[1]]}`;
-  return `每${WEEKDAYS[days[0]!]}、${days.slice(1).map(day => WEEKDAYS[day]!.slice(1)).join("、")}`;
+  if (key === "1,2,3,4,5") return t("sharedSchedules.m022");
+  if (key === "6,0") return t("sharedSchedules.m023");
+  if (days.length === 1) return t("sharedSchedules.m024", { value1: WEEKDAYS[days[0]!] });
+  if (field.range && field.range[1] - field.range[0] >= 2) return t("sharedSchedules.m025", { value1: WEEKDAYS[field.range[0]], value2: WEEKDAYS[field.range[1]] });
+  return t("sharedSchedules.m026", { value1: WEEKDAYS[days[0]!], value2: joinList(days.slice(1).map(day => WEEKDAY_TAILS[day]!)) });
 }
 /** 1 日 / 1、15 日 / 1–7 日 (or months), at most 6 listed values. */
 function listText(field: CronField, unit: string): string | null {
-  if (field.range) return `${field.range[0]}–${field.range[1]} ${unit}`;
-  return field.values.length <= 6 ? `${field.values.join("、")} ${unit}` : null;
+  if (field.range) return t("sharedSchedules.unitRange", { from: field.range[0], to: field.range[1], unit });
+  return field.values.length <= 6 ? t("sharedSchedules.unitList", { values: joinList(field.values.map(String)), unit }) : null;
 }
 function dayPart(day: CronField, month: CronField, weekday: CronField): { text: string; date: boolean } | null {
   // A day of month and a weekday together: Paseo 0.11 runs only when both match, standard cron when either does. Neither
   // reading is claimed; the expression is shown as written (the next run time always comes from Paseo itself).
   if (!day.all && !weekday.all) return null;
-  const weekdays = weekday.all ? null : weekdayText(weekday), months = month.all ? null : listText(month, "月");
+  const weekdays = weekday.all ? null : weekdayText(weekday), months = month.all ? null : listText(month, t("sharedSchedules.m027"));
   if (!month.all && !months) return null;
-  if (day.all) return { text: months ? `${months}${weekdays ?? "每天"}` : weekdays ?? "每天", date: false };
-  if (!months) { const days = listText(day, "日"); return days ? { text: `每月 ${days}`, date: false } : null; }
-  if (month.values.length === 1 && day.values.length === 1) return { text: `${month.values[0]}月${day.values[0]}日`, date: true };
-  const days = listText(day, "日");
-  return days ? { text: `每年 ${months} ${days}`, date: false } : null;
+  if (day.all) return { text: months ? t("sharedSchedules.monthWeekdays", { months, weekdays: weekdays ?? t("sharedSchedules.m028") }) : weekdays ?? t("sharedSchedules.m029"), date: false };
+  if (!months) { const days = listText(day, t("sharedSchedules.m030")); return days ? { text: t("sharedSchedules.m031", { days: days }), date: false } : null; }
+  if (month.values.length === 1 && day.values.length === 1) return { text: t("sharedSchedules.m032", { value1: month.values[0], value2: day.values[0] }), date: true };
+  const days = listText(day, t("sharedSchedules.m033"));
+  return days ? { text: t("sharedSchedules.m034", { months: months, days: days }), date: false } : null;
 }
 function describeCron(expression: string, maxRuns: number | null): string | null {
   const spec = parseCron(expression);
   const time = spec && timePart(spec.minute, spec.hour), day = spec && dayPart(spec.day, spec.month, spec.weekday);
   if (!time || !day) return null;
-  const once = maxRuns === 1, dayText = day.date ? `每年 ${day.text}` : day.text;
-  if ("every" in time) return once ? "一次性" : dayText === "每天" ? time.every : `${dayText} ${time.every}`;
-  const times = time.at.join("、");
+  const once = maxRuns === 1, dayText = day.date ? t("sharedSchedules.m035", { value1: day.text }) : day.text;
+  if ("every" in time) return once ? t("sharedSchedules.m036") : spec!.day.all && spec!.month.all && spec!.weekday.all ? time.every : `${dayText} ${time.every}`;
+  const times = joinList(time.at);
   if (!once) return `${dayText} ${times}`;
-  return `一次性 · ${day.text === "每天" ? "" : `${day.text} `}${times}`;
+  return t("sharedSchedules.m038", { value1: spec!.day.all && spec!.month.all && spec!.weekday.all ? "" : `${day.text} `, times: times });
 }
 
 /**
@@ -385,12 +388,12 @@ function describeCron(expression: string, maxRuns: number | null): string | null
  */
 export function cadenceLabel(cadence: { type: "cron"; expression: string; timezone?: string | null } | { type: "every"; everyMs: number }, maxRuns: number | null = null): string {
   if (cadence.type === "every") {
-    if (maxRuns === 1) return "一次性";
+    if (maxRuns === 1) return t("sharedSchedules.m040");
     const minutes = Math.round(cadence.everyMs / 60_000);
-    return minutes % 1440 === 0 ? `每 ${minutes / 1440} 天` : minutes % 60 === 0 ? `每 ${minutes / 60} 小时` : `每 ${minutes} 分钟`;
+    return minutes % 1440 === 0 ? t("sharedSchedules.m041", { value1: minutes / 1440 }) : minutes % 60 === 0 ? t("sharedSchedules.m042", { value1: minutes / 60 }) : t("sharedSchedules.m043", { minutes: minutes });
   }
   const expression = cadence.expression.trim();
-  const text = describeCron(expression, maxRuns) ?? (maxRuns === 1 ? `一次性 · ${expression}` : expression);
+  const text = describeCron(expression, maxRuns) ?? (maxRuns === 1 ? t("sharedSchedules.m044", { expression: expression }) : expression);
   return text.length > 160 ? `${text.slice(0, 159)}…` : text;
 }
 /** The wall date of a fixed-date cron (`35 22 11 10 *`), else null. */
@@ -401,8 +404,8 @@ function fixedDate(expression: string | null | undefined): { month: number; day:
 }
 
 // A display-name table only: no zone is ever assumed. A cron without one runs in UTC (Paseo's rule), the device's comes from Intl.
-const ZONE_NAMES: Record<string, string> = { UTC: "UTC", "Etc/UTC": "UTC", GMT: "UTC", "Asia/Shanghai": "北京时间", "Asia/Hong_Kong": "香港时间", "Asia/Taipei": "台北时间", "Asia/Tokyo": "东京时间",
-  "America/Los_Angeles": "太平洋时间", "America/Denver": "山地时间", "America/Chicago": "中部时间", "America/New_York": "美东时间", "Europe/London": "伦敦时间", "Europe/Berlin": "柏林时间" };
+let ZONE_NAMES: Record<string, string> = { UTC: "UTC", "Etc/UTC": "UTC", GMT: "UTC", "Asia/Shanghai": t("sharedSchedules.m045"), "Asia/Hong_Kong": t("sharedSchedules.m046"), "Asia/Taipei": t("sharedSchedules.m047"), "Asia/Tokyo": t("sharedSchedules.m048"),
+  "America/Los_Angeles": t("sharedSchedules.m049"), "America/Denver": t("sharedSchedules.m050"), "America/Chicago": t("sharedSchedules.m051"), "America/New_York": t("sharedSchedules.m052"), "Europe/London": t("sharedSchedules.m053"), "Europe/Berlin": t("sharedSchedules.m054") };
 const sameZone = (a: string, b: string) => (ZONE_NAMES[a] === "UTC" && ZONE_NAMES[b] === "UTC") || a === b;
 /** The device's IANA zone, or null where the runtime cannot tell. */
 export function deviceTimeZone(): string | null {
@@ -416,7 +419,7 @@ export function clockOf(ms: number): string { const date = new Date(ms); return 
 /** 今天 / 明天 / 昨天, else 10月13日: the device-local day of `ms` seen from `now`. */
 export function dayWord(ms: number, now: number): string {
   const days = Math.round((startOfDay(ms) - startOfDay(now)) / DAY);
-  return days === 0 ? "今天" : days === 1 ? "明天" : days === -1 ? "昨天" : monthDay(ms);
+  return days === 0 ? t("sharedSchedules.m055") : days === 1 ? t("sharedSchedules.m056") : days === -1 ? t("sharedSchedules.m057") : monthDay(ms);
 }
 
 export interface CadenceInfo { cadence: string; timezone: string | null; expression?: string | null; maxRuns?: number | null; onceAt?: string | null }
@@ -429,19 +432,19 @@ export function cadenceText(schedule: CadenceInfo, device: string | null, now = 
   if (!schedule.cadence) return schedule.cadence;
   const zone = schedule.timezone && !(device && sameZone(schedule.timezone, device)) ? schedule.timezone : null;
   // A full-width bracket already spaces the dot: 「（东京时间）· 本地 09:35」.
-  const zoned = zone ? `${schedule.cadence}（${zoneLabel(zone)}）` : schedule.cadence, dot = zone ? "· " : " · ";
-  if (schedule.maxRuns !== 1) return schedule.maxRuns ? `${zoned}${dot}共 ${schedule.maxRuns} 次` : zoned;
+  const zoned = zone ? t("sharedSchedules.m058", { value1: schedule.cadence, value2: zoneLabel(zone) }) : schedule.cadence, dot = zone ? "· " : " · ";
+  if (schedule.maxRuns !== 1) return schedule.maxRuns ? t("sharedSchedules.m059", { zoned: zoned, dot: dot, value3: schedule.maxRuns }) : zoned;
   const at = parseTime(schedule.onceAt);
   if (!at) return zoned;
   const wall = fixedDate(schedule.expression);
-  if (!wall) return `一次性 · ${zone ? "本地 " : ""}${dayWord(at, now)} ${clockOf(at)}`;
+  if (!wall) return t("sharedSchedules.m060", { value1: zone ? t("sharedSchedules.m061") : "", value2: dayWord(at, now), value3: clockOf(at) });
   if (!zone) return zoned;
   const local = new Date(at), sameDate = local.getMonth() + 1 === wall.month && local.getDate() === wall.day;
-  return `${zoned}${dot}本地 ${sameDate ? "" : `${monthDay(at)} `}${clockOf(at)}`;
+  return t("sharedSchedules.m062", { zoned: zoned, dot: dot, value3: sameDate ? "" : `${monthDay(at)} `, value4: clockOf(at) });
 }
 /** 第 2/3 次 for a schedule Paseo stops after `maxRuns` (还没运行 before the first), else 共 7 次. */
 export function runQuota(total: number, maxRuns: number | null | undefined): string {
-  return maxRuns ? total ? `第 ${total}/${maxRuns} 次` : "还没运行" : `共 ${total} 次`;
+  return maxRuns ? total ? t("sharedSchedules.m063", { total: total, maxRuns: maxRuns }) : t("sharedSchedules.m064") : t("sharedSchedules.m065", { total: total });
 }
 
 const HEARTBEAT_ORDER = { active: 0, paused: 1, completed: 2 } as const;
@@ -461,15 +464,15 @@ export interface HeartbeatWake { state: "running" | "scheduled" | "due" | "pause
  */
 export function heartbeatWake(heartbeats: readonly HeartbeatSummary[] | null | undefined, now: number): HeartbeatWake | null {
   if (!heartbeats?.length) return null;
-  if (heartbeats.some(item => item.lastRun?.status === "running")) return { state: "running", label: "心跳唤醒中", description: "心跳正在唤醒这个 Agent", at: null, soon: true };
+  if (heartbeats.some(item => item.lastRun?.status === "running")) return { state: "running", label: t("sharedSchedules.m066"), description: t("sharedSchedules.m067"), at: null, soon: true };
   let next: { at: number; once: boolean } | null = null;
   for (const item of heartbeats) { const at = item.status === "active" ? parseTime(item.nextRunAt) : 0; if (at && (!next || at < next.at)) next = { at, once: item.once }; }
   if (next) {
-    const day = dayWord(next.at, now), description = `心跳会在 ${monthDay(next.at)} ${clockOf(next.at)} 唤醒这个 Agent${next.once ? "（一次性）" : ""}`;
-    if (next.at <= now) return { state: "due", label: "即将唤醒", description, at: next.at, soon: true };
-    return { state: "scheduled", label: `${day === "今天" ? "" : `${day} `}${clockOf(next.at)} 唤醒`, description, at: next.at, soon: next.at - now <= 15 * 60_000 };
+    const day = dayWord(next.at, now), description = t("sharedSchedules.m068", { value1: monthDay(next.at), value2: clockOf(next.at), value3: next.once ? t("sharedSchedules.m069") : "" });
+    if (next.at <= now) return { state: "due", label: t("sharedSchedules.m070"), description, at: next.at, soon: true };
+    return { state: "scheduled", label: t("sharedSchedules.m071", { value1: startOfDay(next.at) === startOfDay(now) ? "" : `${day} `, value2: clockOf(next.at) }), description, at: next.at, soon: next.at - now <= 15 * 60_000 };
   }
-  return heartbeats.some(item => item.status === "paused") ? { state: "paused", label: "心跳已暂停", description: "这个 Agent 的心跳已暂停", at: null, soon: false } : null;
+  return heartbeats.some(item => item.status === "paused") ? { state: "paused", label: t("sharedSchedules.m073"), description: t("sharedSchedules.m074"), at: null, soon: false } : null;
 }
 
 /** Search text: NFKC (full-width letters and digits read as plain ones) in lower case. Chinese matches as substrings. */
@@ -504,7 +507,7 @@ export interface RunGroup { key: string; label: string; runs: ScheduleRunRow[] }
 const DAY = 86_400_000;
 const startOfDay = (ms: number) => { const date = new Date(ms); date.setHours(0, 0, 0, 0); return date.getTime(); };
 const startOfWeek = (ms: number) => { const date = new Date(startOfDay(ms)); date.setDate(date.getDate() - ((date.getDay() + 6) % 7)); return date.getTime(); };
-const monthDay = (ms: number) => { const date = new Date(ms); return `${date.getMonth() + 1}月${date.getDate()}日`; };
+const monthDay = (ms: number) => { const date = new Date(ms); return t("sharedSchedules.m075", { value1: date.getMonth() + 1, value2: date.getDate() }); };
 /**
  * 今天 / 昨天 / 10月6日 周二 for the past week, one group per week (周一起) for the month before, then per month, then per year.
  * Runs arrive newest first and keep their order inside a group.
@@ -515,11 +518,11 @@ export function groupRunsByDay(runs: readonly ScheduleRunRow[], now: number): Ru
   for (const run of runs) {
     const time = parseTime(run.startedAt) || parseTime(run.scheduledFor);
     let key: string, label: string, start: number;
-    if (!time) { key = "undated"; label = "时间未知"; start = 0; }
+    if (!time) { key = "undated"; label = t("sharedSchedules.m076"); start = 0; }
     else if (time >= dayFloor) {
       start = Math.min(startOfDay(time), today); key = `d${start}`;
       const date = new Date(start);
-      label = start === today ? "今天" : start === today - DAY || start === startOfDay(today - DAY) ? "昨天" : `${monthDay(start)} ${WEEKDAYS[date.getDay()]}`;
+      label = start === today ? t("sharedSchedules.m077") : start === today - DAY || start === startOfDay(today - DAY) ? t("sharedSchedules.m078") : `${monthDay(start)} ${WEEKDAYS[date.getDay()]}`;
     } else if (time >= weekFloor) {
       start = startOfWeek(time); key = `w${start}`;
       const end = Math.min(start + 6 * DAY, dayFloor - DAY);
@@ -528,8 +531,8 @@ export function groupRunsByDay(runs: readonly ScheduleRunRow[], now: number): Ru
       const date = new Date(time), thisYear = new Date(now).getFullYear();
       if (time >= new Date(thisYear - 1, new Date(now).getMonth(), 1).getTime()) {
         start = new Date(date.getFullYear(), date.getMonth(), 1).getTime(); key = `m${start}`;
-        label = date.getFullYear() === thisYear ? `${date.getMonth() + 1}月` : `${date.getFullYear()}年${date.getMonth() + 1}月`;
-      } else { start = new Date(date.getFullYear(), 0, 1).getTime(); key = `y${start}`; label = `${date.getFullYear()}年`; }
+        label = date.getFullYear() === thisYear ? t("sharedSchedules.m079", { value1: date.getMonth() + 1 }) : t("sharedSchedules.m080", { value1: date.getFullYear(), value2: date.getMonth() + 1 });
+      } else { start = new Date(date.getFullYear(), 0, 1).getTime(); key = `y${start}`; label = t("sharedSchedules.m081", { value1: date.getFullYear() }); }
     }
     const group = groups.get(key);
     if (group) group.runs.push(run); else groups.set(key, { key, label, runs: [run], start });
@@ -563,14 +566,14 @@ export function describeRunError(error: string | null | undefined): { summary: s
   if (!error?.trim()) return null;
   const detail = error.replace(/^Internal error:\s*/i, "").split(/\n\s*\n|\s+\|\s+code=/)[0]!.replace(/\s*code:\s*-?\d+\s*$/i, "").trim() || error.trim();
   const known: Array<[RegExp, (match: RegExpExecArray) => string]> = [
-    [/Working directory (.+) (?:no longer exists|is not a directory)/, match => `工作目录已不存在：${match[1]}（任务已自动结束）`],
-    [/is waiting for permission/, () => "Agent 在等你审批，这次没能跑完"],
-    [/Daemon restarted before the scheduled run completed/, () => "daemon 重启，打断了这次运行"],
-    [/Timed out refreshing (.+?) after \d+ms/, match => `Provider「${match[1]}」启动超时`],
-    [/already has an active run/, () => "Agent 正在忙，这次心跳被跳过"],
-    [/does not support ACP session resume/, () => "会话无法恢复：这个 ACP Agent 不支持重新载入"],
-    [/was canceled/, () => "运行被取消"],
-    [/Agent \S+ (?:no longer exists|is archived)/, () => "目标 Agent 已归档或删除，任务已自动结束"],
+    [/Working directory (.+) (?:no longer exists|is not a directory)/, match => t("sharedSchedules.m082", { value1: match[1] })],
+    [/is waiting for permission/, () => t("sharedSchedules.m083")],
+    [/Daemon restarted before the scheduled run completed/, () => t("sharedSchedules.m084")],
+    [/Timed out refreshing (.+?) after \d+ms/, match => t("sharedSchedules.m085", { value1: match[1] })],
+    [/already has an active run/, () => t("sharedSchedules.m086")],
+    [/does not support ACP session resume/, () => t("sharedSchedules.m087")],
+    [/was canceled/, () => t("sharedSchedules.m088")],
+    [/Agent \S+ (?:no longer exists|is archived)/, () => t("sharedSchedules.m089")],
   ];
   for (const [pattern, summarize] of known) { const match = pattern.exec(detail); if (match) return { summary: summarize(match), detail, known: true }; }
   return { summary: detail.split("\n")[0]!.slice(0, 200), detail, known: false };
@@ -580,3 +583,12 @@ export function knownRunError(error: string | null | undefined): string | null {
   const described = describeRunError(error);
   return described?.known ? described.summary : null;
 }
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  WEEKDAY_TAILS = [t("sharedSchedules.shortSunday"), t("sharedSchedules.shortMonday"), t("sharedSchedules.shortTuesday"), t("sharedSchedules.shortWednesday"), t("sharedSchedules.shortThursday"), t("sharedSchedules.shortFriday"), t("sharedSchedules.shortSaturday")];
+  ARCHIVE_PARTIAL_LIST = t("sharedSchedules.m006");
+  WEEKDAYS = [t("sharedSchedules.m007"), t("sharedSchedules.m008"), t("sharedSchedules.m009"), t("sharedSchedules.m010"), t("sharedSchedules.m011"), t("sharedSchedules.m012"), t("sharedSchedules.m013")];
+  ZONE_NAMES = { UTC: "UTC", "Etc/UTC": "UTC", GMT: "UTC", "Asia/Shanghai": t("sharedSchedules.m045"), "Asia/Hong_Kong": t("sharedSchedules.m046"), "Asia/Taipei": t("sharedSchedules.m047"), "Asia/Tokyo": t("sharedSchedules.m048"),
+  "America/Los_Angeles": t("sharedSchedules.m049"), "America/Denver": t("sharedSchedules.m050"), "America/Chicago": t("sharedSchedules.m051"), "America/New_York": t("sharedSchedules.m052"), "Europe/London": t("sharedSchedules.m053"), "Europe/Berlin": t("sharedSchedules.m054") };
+});

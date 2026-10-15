@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { BrowserPage } from './browser-types';
 import { BUDGETS, withTimeout } from './budgets';
 
@@ -21,5 +22,5 @@ export async function setVerifiedViewport(page:BrowserPage,size:Size):Promise<vo
   await page.setViewportSize(size);
   const end=Date.now()+1200;
   while(Date.now()<end){if(matches(await actual(page),size))return;await sleep(50);}
-  throw new Error('网页尺寸尚未同步，请稍后重新匹配窗口。');
+  throw new Error(t('serverError.viewportSync'));
 }

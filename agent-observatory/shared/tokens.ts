@@ -1,3 +1,5 @@
+import { currentLanguage } from "./i18n";
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { STATS_RANGES, statsTimeZoneSchema } from "./stats";
@@ -151,13 +153,13 @@ export type TokenSnapshot = z.infer<typeof tokenSnapshotSchema>;
  */
 export const TOKEN_IMPORT_LIMITS = { files: 20_000, bytes: 64 * 1024 ** 3, index: 750_000, scanEntries: 250_000 } as const;
 export type TokenImportLimits = { -readonly [Key in keyof typeof TOKEN_IMPORT_LIMITS]: number };
-const wan = (count: number) => `${count / 10_000} 万`;
+const wan = (count: number) => t("sharedTokens.m001", { value1: count / (currentLanguage() === "zh-CN" ? 10_000 : 1_000) });
 /** Why the Token page is incomplete, in Chinese, or null when no budget cut the import. */
 export function tokenTruncationNotice(truncated: { files: boolean; bytes: boolean; index: boolean; scan: boolean } | undefined, limits: TokenImportLimits = TOKEN_IMPORT_LIMITS): string | null {
   if (!truncated) return null;
-  const reasons = [truncated.files ? `日志文件超过 ${wan(limits.files)}个，只统计最新的部分` : null, truncated.bytes ? `日志总量超过 ${limits.bytes / 1024 ** 3} GB，更早的文件没有导入` : null,
-    truncated.scan ? `日志目录条目超过 ${wan(limits.scanEntries)}个，本次扫描提前结束` : null, truncated.index ? `去重索引超过 ${wan(limits.index)}条，最早的记录已截断` : null].filter(Boolean);
-  return reasons.length ? `统计不完整：${reasons.join("；")}。` : null;
+  const reasons = [truncated.files ? t("sharedTokens.m002", { value1: wan(limits.files) }) : null, truncated.bytes ? t("sharedTokens.m003", { value1: limits.bytes / 1024 ** 3 }) : null,
+    truncated.scan ? t("sharedTokens.m004", { value1: wan(limits.scanEntries) }) : null, truncated.index ? t("sharedTokens.m005", { value1: wan(limits.index) }) : null].filter(Boolean);
+  return reasons.length ? t("sharedTokens.m006", { value1: reasons.join(t("sharedTokens.m007")) }) : null;
 }
 
 const revision = z.string().min(1).max(80);
@@ -177,7 +179,7 @@ export const getTokens = defineRpc({
 export type TokenState = TokenSnapshot & { revision?: string };
 export function mergeTokens(previous: TokenState | undefined, response: TokenResponse): TokenState {
   if (response.mode === "full") { const { mode: _mode, unchanged: _unchanged, ...snapshot } = response; return { ...snapshot, revision: response.revision }; }
-  if (!previous) throw new Error("本地 Token 缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedTokens.m008"));
   return previous;
 }
 

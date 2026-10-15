@@ -1,3 +1,5 @@
+import { translator } from "../shared/i18n";
+import { t } from "../shared/text";
 import { randomUUID } from "node:crypto";
 import { watch as watchDirectory } from "node:fs";
 import { open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
@@ -144,7 +146,7 @@ export function agentFromRecord(raw: unknown): StatsDirectoryAgent | null {
   const labels = record.labels && typeof record.labels === "object" && !Array.isArray(record.labels) ? record.labels as Record<string, unknown> : {};
   const id = recordText(record.id, 256), scheduleId = recordText(labels["paseo.schedule-id"], 80), scheduleRunId = recordText(labels["paseo.schedule-run"], 120);
   if (!id || record.internal === true) return null;
-  const cwd = typeof record.cwd === "string" ? record.cwd : "", cwdName = (basename(cwd) || "未知").slice(0, 240);
+  const cwd = typeof record.cwd === "string" ? record.cwd : "", cwdName = (basename(cwd) || t("serverSchedules.m001")).slice(0, 240);
   const nested = (key: string) => record[key] && typeof record[key] === "object" ? record[key] as Record<string, unknown> : {};
   const persistence = nested("persistence");
   return { id, createdAt: recordText(record.createdAt, 64) ?? "", provider: recordText(record.provider, 1024) ?? "unknown",
@@ -187,12 +189,12 @@ export function ledgerError(error: string | null | undefined): string | null {
   if (!text) return null;
   if (HOST_ERROR.test(text)) return clip(text, 300);
   const marker = text.lastIndexOf(SYSTEM_ERROR);
-  return marker >= 0 ? clip(redactSecrets(text.slice(marker)), 300) : "运行出错（错误内容是 Agent 的回复，未保存）";
+  return marker >= 0 ? clip(redactSecrets(text.slice(marker)), 300) : t("serverSchedules.m002");
 }
 /** The schedule's own name or title; without either, a neutral 未命名定时任务 plus its short id. This is what the ledger keeps. */
 function storedNameOf(schedule: StoredSchedule): string {
   const config = schedule.target.type === "new-agent" ? schedule.target.config : null;
-  return clip(schedule.name?.trim() || config?.title?.trim() || `未命名定时任务 ${schedule.id.slice(0, 8)}`, 200)!;
+  return clip(schedule.name?.trim() || config?.title?.trim() || t("serverSchedules.m003", { value1: schedule.id.slice(0, 8) }), 200)!;
 }
 /** What the live list shows: as stored, except that an unnamed schedule is recognised by its prompt's start (never saved). */
 function nameOf(schedule: StoredSchedule): string {
@@ -223,8 +225,10 @@ export class ScheduleIndex {
   /** False when an unreadable ledger could not be set aside: it is never overwritten then. */
   private ledgerWritable = true;
   private notice: string | null = null;
+  private writeFailed = false;
   private ready: Promise<void>;
   private baseKey: string | null = null;
+  private textKey = "";
   private base: Base | null = null;
   /** When the files were last compared with `base` (reads that tolerate some age reuse it). */
   private checkedAt = -Infinity;
@@ -274,10 +278,10 @@ export class ScheduleIndex {
       const backup = this.ledgerFile.replace(/\.json$/, ".corrupt.json");
       try {
         await rename(this.ledgerFile, backup);
-        this.notice = `定时运行账本损坏，已另存为 ${basename(backup)} 并重新记录；已删除任务的旧运行会从 Agent 记录还原。`;
+        this.notice = t("serverSchedules.m004", { value1: basename(backup) });
       } catch {
         this.ledgerWritable = false;
-        this.notice = "定时运行账本无法读取，本次不会改写它，只显示宿主现有记录。";
+        this.notice = t("serverSchedules.m005");
       }
       this.warn(`ledger unreadable: ${errorKind(error)}`);
     }
@@ -294,7 +298,7 @@ export class ScheduleIndex {
     try { names = (await readdir(directory, { withFileTypes: true })).filter(entry => entry.isFile() && entry.name.endsWith(".json")).map(entry => entry.name).sort(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.files.clear(); this.cut.schedules = false; return { schedules: [], stamps: [], error: null, wakes: { targets: new Set(), complete: true, error: null } }; }
-      return { schedules: [], stamps: ["unreadable"], error: "定时任务目录无法读取，只显示观测台记下的运行。", wakes: { targets: new Set(), complete: false, error: "定时任务目录读不出来，无法确认哪些会话还有心跳。" } };
+      return { schedules: [], stamps: ["unreadable"], error: t("serverSchedules.m006"), wakes: { targets: new Set(), complete: false, error: t("serverSchedules.m007") } };
     }
     let over = names.length > this.limits.scheduleFiles, budget = this.limits.scheduleBytes, unreadable = 0, unknown = 0;
     if (over) names = names.slice(0, this.limits.scheduleFiles);
@@ -317,7 +321,7 @@ export class ScheduleIndex {
     }
     for (const path of this.files.keys()) if (!seen.has(path)) this.files.delete(path);
     this.cut.schedules = over;
-    const problem = unreadable ? `有 ${unreadable} 个定时任务文件读不出来，无法确认哪些会话还有心跳。` : unknown ? `有 ${unknown} 个定时任务的目标类型无法识别，无法确认哪些会话还有心跳。` : null;
+    const problem = unreadable ? t("serverSchedules.m008", { unreadable: unreadable }) : unknown ? t("serverSchedules.m009", { unknown: unknown }) : null;
     return { schedules, stamps, error: null, wakes: { targets, complete: !over && !problem, error: problem } };
   }
 
@@ -395,7 +399,7 @@ export class ScheduleIndex {
     for (const run of Object.values(this.ledger.runs)) if (run.agentId) referenced.add(run.agentId);
     const unlisted = scanned.agents.filter(agent => !listedIds.has(agent.id) && (agent.scheduleRunId || referenced.has(agent.id)));
     // A scan cut short by its file budget lists the same first files: whether the heartbeat targets are complete is part of the key.
-    const key = contentRevision([stamps, stamp, this.options.directory.digest, wakes.complete, wakes.error,
+    const key = contentRevision([translator().language, translator().hash, stamps, stamp, this.options.directory.digest, wakes.complete, wakes.error,
       unlisted.map(agent => [agent.id, agent.status, agent.archivedAt, agent.attentionReason, agent.title, agent.updatedAt, agent.workspaceId])]);
     // Building is synchronous, so two reads in flight (the page and the background recorder) never adopt each other's build
     // under their own key: each builds from what it read unless the other already built exactly that.
@@ -404,13 +408,13 @@ export class ScheduleIndex {
       const unlistedIds = new Set(unlisted.map(agent => agent.id));
       this.base = this.build(schedules, records, error, agents, unlistedIds, wakes); this.baseKey = key; this.windows.clear();
     }
-    this.checkedAt = this.now();
+    this.checkedAt = this.now(); this.textKey = `${translator().language}:${translator().hash}`;
     return this.base;
   }
 
   /** The last build while it is at most `maxAgeMs` old (the background recorder rebuilds it on every file change), else a fresh one. */
   private async recent(maxAgeMs: number): Promise<Base> {
-    return this.base && maxAgeMs > 0 && this.now() - this.checkedAt <= maxAgeMs ? this.base : this.current(null);
+    return this.base && this.textKey === `${translator().language}:${translator().hash}` && maxAgeMs > 0 && this.now() - this.checkedAt <= maxAgeMs ? this.base : this.current(null);
   }
 
   /** The run feed for a window, searched by `query` when given; an unchanged `revision` answers in a few bytes. */
@@ -420,8 +424,8 @@ export class ScheduleIndex {
     // Window edges move in 10-minute steps; a step that moves no run keeps the revision, so polls stay a few bytes.
     const bucket = Math.floor(this.now() / WINDOW_STEP_MS) * WINDOW_STEP_MS;
     const cutoff = limits.days === null ? null : bucket - limits.days * DAY_MS;
-    const notice = [this.notice, this.cut.schedules ? `定时任务文件超过上限（${this.limits.scheduleFiles} 个或 ${Math.round(this.limits.scheduleBytes / 1024 ** 2)} MB），只读取了一部分。` : null,
-      this.cut.agents ? `Agent 记录超过上限（${this.limits.agentRecords} 个、${Math.round(this.limits.agentBytes / 1024 ** 2)} MB 或 ${this.limits.entries} 个目录条目），只读取了一部分。` : null].filter(Boolean).join(" ").slice(0, 500) || null;
+    const notice = [this.notice, this.cut.schedules ? t("serverSchedules.m010", { value1: this.limits.scheduleFiles, value2: Math.round(this.limits.scheduleBytes / 1024 ** 2) }) : null,
+      this.cut.agents ? t("serverSchedules.m011", { value1: this.limits.agentRecords, value2: Math.round(this.limits.agentBytes / 1024 ** 2), value3: this.limits.entries }) : null].filter(Boolean).join(" ").slice(0, 500) || null;
     const cacheKey = `${bucket}:${notice ?? ""}`, slot = `${window}\n${query}`;
     let state = this.windows.get(slot)?.key === cacheKey ? this.windows.get(slot)!.state : undefined;
     if (!state) {
@@ -583,9 +587,9 @@ export class ScheduleIndex {
       // A run still "running" in the ledger after its file vanished never finished as far as anyone recorded.
       const status: RunStatus = run.status === "running" ? agent ? agentRunStatus(agent) : "unknown" : run.status;
       seenRuns.add(runId);
-      rows.push({ id: runId, scheduleId: run.scheduleId, scheduleName: meta?.name ?? `定时任务 ${run.scheduleId}`, kind: run.kind, status, source: "ledger", scheduledFor: run.scheduledFor, startedAt: run.startedAt, endedAt: run.endedAt,
+      rows.push({ id: runId, scheduleId: run.scheduleId, scheduleName: meta?.name ?? t("serverSchedules.m012", { value1: run.scheduleId }), kind: run.kind, status, source: "ledger", scheduledFor: run.scheduledFor, startedAt: run.startedAt, endedAt: run.endedAt,
         preview: null, hasOutput: false, error: run.error, agent: agentRef(agent, run.agentId), workspace: workspaceRef(run.workspaceId ?? agent?.workspaceId ?? null), projectName: agent?.projectName ?? meta?.projectName ?? null, link: linkOf(null, run.workspaceId, run.link) });
-      if (!summaries.has(run.scheduleId)) summaries.set(run.scheduleId, { id: run.scheduleId, name: meta?.name ?? `定时任务 ${run.scheduleId}`, kind: run.kind, status: "deleted", cadence: meta?.cadence ?? "",
+      if (!summaries.has(run.scheduleId)) summaries.set(run.scheduleId, { id: run.scheduleId, name: meta?.name ?? t("serverSchedules.m013", { value1: run.scheduleId }), kind: run.kind, status: "deleted", cadence: meta?.cadence ?? "",
         timezone: meta?.timezone ?? null, target: meta?.projectName ?? null, nextRunAt: null, lastRunAt: null, provider: meta?.provider ?? null,
         expression: meta?.expression ?? null, maxRuns: meta?.maxRuns ?? null, onceAt: null });
     }
@@ -606,7 +610,7 @@ export class ScheduleIndex {
     for (const [scheduleId, titles] of orphanTitles) {
       const meta = this.ledger.schedules[scheduleId];
       const title = [...titles.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-      const name = meta?.name ?? clip(title ? previewOf(title, 60) : null, 200) ?? `定时任务 ${scheduleId}`;
+      const name = meta?.name ?? clip(title ? previewOf(title, 60) : null, 200) ?? t("serverSchedules.m014", { scheduleId: scheduleId });
       for (const row of rows) if (row.scheduleId === scheduleId && row.source === "agent") row.scheduleName = name;
       if (!summaries.has(scheduleId)) summaries.set(scheduleId, { id: scheduleId, name, kind: "new-agent", status: "deleted", cadence: meta?.cadence ?? "", timezone: meta?.timezone ?? null,
         target: meta?.projectName ?? rows.find(row => row.scheduleId === scheduleId)?.projectName ?? null, nextRunAt: null, lastRunAt: null, provider: meta?.provider ?? null,
@@ -619,7 +623,7 @@ export class ScheduleIndex {
       // A deleted one-shot still knows when its run was due.
       const onceAt = summary.onceAt ?? (summary.maxRuns === 1 ? own[0]?.scheduledFor ?? own[0]?.startedAt ?? null : null);
       return { ...summary, onceAt, recent: own.slice(0, 10).reverse().map(row => row.status), total: own.length, failed: own.filter(row => row.status === "failed").length, running: own.filter(row => row.status === "running").length };
-    }).sort((a, b) => Number(a.status === "deleted") - Number(b.status === "deleted") || Number(b.running > 0) - Number(a.running > 0) || a.name.localeCompare(b.name, "zh-CN"));
+    }).sort((a, b) => Number(a.status === "deleted") - Number(b.status === "deleted") || Number(b.running > 0) - Number(a.running > 0) || a.name.localeCompare(b.name, translator().language));
     // Most relevant first, so the 500 the RPC sends are the ones to show: active by next run, paused, then finished (latest first).
     const order = { active: 0, paused: 1, completed: 2 } as const, lastOf = (item: HeartbeatSummary) => parseTime(item.lastRun?.endedAt) || parseTime(item.lastRun?.startedAt);
     heartbeats.sort((a, b) => order[a.status] - order[b.status] || (a.status === "completed" ? lastOf(b) - lastOf(a) : (parseTime(a.nextRunAt) || Infinity) - (parseTime(b.nextRunAt) || Infinity)) || a.scheduleId.localeCompare(b.scheduleId));
@@ -671,9 +675,9 @@ export class ScheduleIndex {
         try { await handle.writeFile(snapshot, "utf8"); } finally { await handle.close(); }
         await rename(temporary, this.ledgerFile);
       } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error; }
-      if (this.notice?.startsWith("定时运行账本无法保存")) this.notice = null;
+      if (this.writeFailed) { this.notice = null; this.writeFailed = false; }
     }).catch(error => {
-      this.notice = "定时运行账本无法保存，已删除任务的运行可能不会保留。";
+      this.notice = t("serverSchedules.m016"); this.writeFailed = true;
       this.warn(`could not save the ledger: ${String(error)}`);
     });
     return this.writes;
@@ -699,10 +703,10 @@ export class ScheduleIndex {
       if (!stored || !run) continue;
       const output = run.output?.replace(/^\s*---\s*\n/, "").trim() || null;
       return { runId, output: output ? output.slice(0, OUTPUT_MAX) : null, outputTruncated: !!output && output.length > OUTPUT_MAX, prompt: clip(stored.prompt ?? null, PROMPT_MAX),
-        note: output ? null : run.status === "running" ? "还在运行，结束后会记录最终回复。" : "这次运行没有记录最终回复，可以读取会话记录。", row, schedule };
+        note: output ? null : run.status === "running" ? t("serverSchedules.m017") : t("serverSchedules.m018"), row, schedule };
     }
     return { runId, output: null, outputTruncated: false, prompt: null, row, schedule,
-      note: row?.source === "ledger" || this.ledger.runs[runId] ? "这个定时任务已被删除，回复没有保留；可以读取会话记录查看最后回复。" : "定时任务记录已不存在，可以读取会话记录查看最后回复。" };
+      note: row?.source === "ledger" || this.ledger.runs[runId] ? t("serverSchedules.m019") : t("serverSchedules.m020") };
   }
 }
 

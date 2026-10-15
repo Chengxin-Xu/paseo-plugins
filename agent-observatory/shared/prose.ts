@@ -24,6 +24,7 @@ function headingOf(line: string): { level: number; text: string } | null {
  * character (replies often run Chinese text straight after a URL); trailing ASCII punctuation stays outside it. Link text cannot
  * contain `[` and is at most 500 characters, so a run of unclosed brackets is scanned once.
  */
+// i18n-ignore: Literal Chinese syntax is matched against provider or user content.
 const URL_CHAR = "[^\\s<>()（）\\[\\]\"'`\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]";
 const INLINE = new RegExp(`(\`[^\`\\n]+\`)|\\[([^\\[\\]\\n]{1,500})\\]\\((https?:\\/\\/[^\\s)]{1,2000})\\)|(https?:\\/\\/${URL_CHAR}*(?:(?![.,;:!?])${URL_CHAR}))|(\\*\\*[^*\\n]+\\*\\*)`, "g");
 

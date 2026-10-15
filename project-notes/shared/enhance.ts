@@ -1,3 +1,5 @@
+import { t } from "./text";
+import { joinList } from "./i18n";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { BODY_MAX_LENGTH } from "./schema";
@@ -20,14 +22,26 @@ export function structurePrompt(title: string, body: string, environment: Projec
     }
     return !fence;
   }).join("\n");
-  const has = (name: string) => new RegExp(`^#{1,6}[ \\t]+${name}[ \\t]*$`, "m").test(headings);
+  // i18n-ignore: Headings recognized in existing user drafts, including drafts created before translation.
+  const knownHeadings = { goal: ["目标", "Goal"], scope: ["范围", "Scope"], constraints: ["约束", "Constraints"], acceptance: ["验收", "Acceptance"] };
+  const titles = { goal: t("enhance.goalHeading"), scope: t("enhance.scopeHeading"), constraints: t("enhance.constraintsHeading"), acceptance: t("enhance.acceptanceHeading") };
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const has = (kind: keyof typeof titles) => [...knownHeadings[kind], titles[kind]].some(name => new RegExp(`^#{1,6}[ \\t]+${escape(name)}[ \\t]*$`, "mi").test(headings));
+  const variable = (name: string) => `{{${name}}}`;
   const sections: string[] = [];
-  if (!has("目标")) sections.push(`## 目标\n${body || title || "{{目标}}"}`);
+  if (!has("goal")) sections.push(t("enhance.goalSection", { heading: titles.goal, goal: body || title || variable(t("enhance.goalVariable")) }));
   else sections.push(body);
-  if (!has("范围")) sections.push("## 范围\n{{范围}}\n仅修改与目标有关的文件。");
-  if (!has("约束")) sections.push(`## 约束\n${environment.languages.length ? `项目语言：${environment.languages.join("、")}。\n` : ""}遵循项目现有约定，保留用户已有改动；不添加未经确认的依赖。\n{{补充约束}}`);
-  if (!has("验收")) sections.push(`## 验收\n{{验收标准}}\n${environment.testCommands.length ? `核对并运行项目已有测试命令：\n${environment.testCommands.map(command => `- ${command}`).join("\n")}` : "{{测试命令}}"}\n说明验证结果与未覆盖的情况。`);
+  if (!has("scope")) sections.push(t("enhance.scopeSection", { heading: titles.scope, scope: variable(t("enhance.scopeVariable")) }));
+  if (!has("constraints")) sections.push(t("enhance.constraintsSection", {
+    heading: titles.constraints,
+    languages: environment.languages.length ? t("enhance.languages", { languages: joinList(environment.languages) }) : "",
+    constraints: variable(t("enhance.constraintsVariable")),
+  }));
+  if (!has("acceptance")) sections.push(t("enhance.acceptanceSection", {
+    heading: titles.acceptance, acceptance: variable(t("enhance.acceptanceVariable")),
+    tests: environment.testCommands.length ? t("enhance.testCommands", { commands: environment.testCommands.map(command => `- ${command}`).join("\n") }) : variable(t("enhance.testsVariable")),
+  }));
   const result = sections.join("\n\n");
-  if (result.length > BODY_MAX_LENGTH) throw new Error("加入模板后超过正文上限，请先缩短草稿。");
+  if (result.length > BODY_MAX_LENGTH) throw new Error(t("enhance.tooLong"));
   return result;
 }

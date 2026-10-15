@@ -6,6 +6,12 @@ import { ServerBrowserSurface, ServerBrowserWorkspacePanel } from "../client/bro
 import { Icon, ToastHost } from "./adapter.jsx";
 import { paseoDark, paseoLight } from "./themes.js";
 
+import { bindTranslator, createTranslator } from '../shared/i18n';
+import zh from '../shared/locales/zh-CN.json';
+import kitZh from '../shared/locales/kit/zh-CN.json';
+
+bindTranslator(createTranslator('zh-CN', [zh, kitZh]));
+
 const params = new URLSearchParams(location.search);
 const theme = params.get("theme") === "light" ? paseoLight : paseoDark;
 globalThis.__previewTheme = theme;

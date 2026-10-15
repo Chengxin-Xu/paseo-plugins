@@ -1,3 +1,4 @@
+import { t } from "./text";
 import type { AgentResult, ResultExcerpt } from "./results";
 import type { ProviderSubagent } from "./provider-subagents";
 import { normalizeTimelinePage, object, projectTimelineRows, string, type TimelinePage, type TimelineRow } from "./timeline";
@@ -19,7 +20,7 @@ export function nativeChildResult(parentId: string, child: ProviderSubagent, tai
   const excerpt = (row: TimelineRow | undefined): ResultExcerpt | null => {
     if (!row) return null;
     const text = excerptText(string(row.item.text), 60000);
-    return { text: text.text, truncated: text.truncated || /内容已截断|超出当前页容量|中段已摘要/.test(text.text),
+    return { text: text.text, truncated: text.truncated || /内容已截断|超出当前页容量|中段已摘要/.test(text.text), // i18n-ignore: Match original Chinese provider/user text; this is parser data.
       ref: `${agentId}:${row.epoch}:${row.seqStart}-${row.seqEnd}`, at: row.timestamp || null };
   };
   const firstInput = excerpt(first), latestReply = excerpt(latest);
@@ -38,5 +39,5 @@ export function nativeChildResult(parentId: string, child: ProviderSubagent, tai
       failedTools: rows.filter(row => row.item.type === "tool_call" && row.item.status === "failed").length,
       changedFiles: artifacts.length, userTurns: rows.filter(row => row.item.type === "user_message").length },
     coverage: { firstInputConfirmed, truncated: !!tail?.truncated || head.truncated || !!latestReply?.truncated || !!firstInput?.truncated || !firstInputConfirmed,
-      rows: rows.length, hasOlder: tail?.hasOlder ?? false, reason: firstInputConfirmed ? null : "宿主未提供可确认起点的子任务输入，未将最近输入冒充首条输入。" } };
+      rows: rows.length, hasOlder: tail?.hasOlder ?? false, reason: firstInputConfirmed ? null : t("sharedNativeResults.m001") } };
 }

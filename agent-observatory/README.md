@@ -6,9 +6,18 @@
 
 「需要处理」与定时运行失败计数始终可见，前台每 20 秒读一次小摘要，后台停止；读取失败或数据超过 90 秒就隐藏旧数字。角标读取时上报设备时区，和页面、弹层共用同一份读数：在详情里点「知道了」「标记已读」，或在弹层里处理审批、发出快捷回复后，角标马上重读。打包时运行仓库根目录 `npm run build`，并提交 `server/generated`、`shared/generated`；`npm run check` 会重新构建并拒绝陈旧产物，同时检查常驻桩的默认 Hermes 编译、无 `class`、interop 补丁、入口导出和体积预算。
 
-从项目和 worktree 看任务，从最新回复看结果。一个面向 Paseo 0.11 的原生可观测插件，支持手机、桌面和深浅主题。界面是简体中文。
+从项目和 worktree 看任务，从最新回复看结果。一个面向 Paseo 0.11 的原生可观测插件，支持手机、桌面和深浅主题。界面支持英文、简体中文和用户自定义语言，默认跟随系统。
 
 ![会话与结果，虚构数据](assets/screenshot-sessions.png)
+
+
+## Languages / 语言
+
+内置英文与简体中文，默认「跟随系统」；设备语言尚无翻译时显示英文。在 **Paseo 设置 → 插件 → Agent 观测台 → 语言**，或看板的 **观测设置** 中选择语言，已打开的界面会随之更新。新的智能分析按当前语言回答，已保存的报告保留原文。
+
+自定义语言目录为 `~/.paseo/plugin-data/agent-observatory/locales/`；自定义 daemon home 时是 `$PASEO_HOME/plugin-data/agent-observatory/locales/`。从目录里的 `templates/en.json` 或 `templates/zh-CN.json` 复制一份，放到同一目录并命名为语言代码，例如 `ko.json`。把 `$meta.name` 改成该语言自己的名字，翻译各条消息，保留原有 `{placeholder}`。单复数使用 CLDR 的 `one`、`other` 等形式，必须有 `other`。缺少或无效的条目显示英文；语言设置会显示翻译覆盖率与文件问题，修改后点「重新读取」。插件更新时会刷新模板。文件名为 `en.json` 或 `zh-CN.json` 时，只覆盖文件中写出的条目。
+
+贡献内置语言：提交 PR，增加 `shared/locales/<code>.json`，并在 `server/locales.ts` 中注册一行；消息 ID 与占位符需与英文目录一致。
 
 ## 界面（2.6）
 

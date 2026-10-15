@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import type { FoldPlan, IndexRow } from "./fold";
@@ -120,7 +121,7 @@ export function estimateLines(text: string, width: number, fontSize: number): nu
 /** What the strip is called: the question that opened this turn, or the latest one (the Agent started the turn itself). */
 export function pinTitle(pin: PromptPin, answer: { seq: number | null; turnId: string | null }): string {
   const sameTurn = pin.promptSeq !== null ? pin.sameTurn : answer.turnId !== null && answer.turnId === pin.turn;
-  return sameTurn ? "本轮提问" : "最近的提问";
+  return t(sameTurn ? "sharedPrompt.current" : "sharedPrompt.recent");
 }
 
 /** The pinned question is at most this long (characters); a longer one says it was cut. */

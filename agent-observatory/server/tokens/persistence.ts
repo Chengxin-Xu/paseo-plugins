@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import { randomUUID } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
@@ -57,7 +58,7 @@ export class TokenPersistence {
       if (details.size > MAX_BYTES) { await this.quarantine(); return empty; }
       content = await readFile(this.file, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.readable = false; console.warn(`Token 历史读取失败（${safeError(error)}），保留原文件。`); }
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { this.readable = false; console.warn(t("serverTokensPersistence.m001", { value1: safeError(error) })); }
       return empty;
     }
     let saved: Saved;
@@ -114,7 +115,7 @@ export class TokenPersistence {
   }
   async write(payload: string, durable = false): Promise<boolean> {
     if (!this.readable) return false;
-    if (Buffer.byteLength(payload) > MAX_BYTES) { console.warn("Token 历史超过保存上限，保留原文件。"); return false; }
+    if (Buffer.byteLength(payload) > MAX_BYTES) { console.warn(t("serverTokensPersistence.m002")); return false; }
     const temporary = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await ensurePrivateDirectory(this.directory);
@@ -122,7 +123,7 @@ export class TokenPersistence {
       try { await handle.writeFile(payload, "utf8"); if (durable) await handle.sync(); } finally { await handle.close(); }
       await rename(temporary, this.file);
       return true;
-    } catch (error) { console.warn(`Token 历史保存失败（${safeError(error)}）。`); return false; }
+    } catch (error) { console.warn(t("serverTokensPersistence.m003", { value1: safeError(error) })); return false; }
     finally { await unlink(temporary).catch(() => {}); }
   }
 }

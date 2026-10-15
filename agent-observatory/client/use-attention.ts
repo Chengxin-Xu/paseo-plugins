@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { defineRpc } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useSyncExternalStore } from "react";
@@ -61,10 +62,10 @@ export function createAttentionStore(intervalMs = ATTENTION_POLL_MS, now: () => 
         try { reply = await read(previous ? { revision: previous.revision } : {}); }
         // The server restarted or the cache was dropped: read in full once.
         catch (error) { if (!previous) throw error; reply = await read({}); }
-        if (reply.mode !== "full" && !previous) throw new Error("需要处理缓存已失效");
+        if (reply.mode !== "full" && !previous) throw new Error(t("boot.secondaryAttentionCacheExpired"));
         const state = reply.mode === "full" ? reply : previous!;
         publish({ state, error: null, at: now() });
-      } catch (error) { publish({ ...view, error: error instanceof Error ? error.message : "需要处理暂时无法读取" }); }
+      } catch (error) { publish({ ...view, error: error instanceof Error ? error.message : t("boot.secondaryAttentionIsTemporarilyUnavailable") }); }
       finally {
         pending = undefined;
         if (again) { again = false; void refresh(); }

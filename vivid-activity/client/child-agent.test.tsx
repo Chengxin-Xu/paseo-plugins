@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { bindTranslator, createTranslator, translator } from "../shared/i18n";
 import type { ChildSummaryOutput } from "../shared/child-summary";
 
 /** Runs the production hook with persistent React hook slots and commit-phase cleanup/effect ordering. */
@@ -216,5 +217,38 @@ describe("an answer slower than the quiet spell (0.6.0-local.5, codex-vivid-merg
     expect(view.view.entries[0]!.x).toBe("slow summary");
     expect(state.requests).toHaveLength(1);
     await advance(9_002); expect(state.requests).toHaveLength(2);
+  });
+});
+
+
+describe("child summaries after a catalog change", () => {
+  it.each(["language", "catalog"])("refetches on a %s change and ignores an older response", async (kind) => {
+    const previous = translator();
+    try {
+      render(); await advance(0);
+      bindTranslator(createTranslator(kind === "language" ? "en" : previous.language, [], { hash: "updated-catalog" }));
+      render(); await advance(0);
+      expect(state.requests).toHaveLength(2);
+      state.requests[1]!.resolve(response("running", "current language")); await settle();
+      state.requests[0]!.resolve(response("running", "old language")); await settle();
+      expect(view.view.entries[0]!.x).toBe("current language");
+    } finally {
+      bindTranslator(previous);
+    }
+  });
+
+  it("keeps a confirmed closed child asleep when the host list still says running", async () => {
+    const previous = translator();
+    try {
+      render(); await advance(0);
+      state.requests[0]!.resolve(response("closed")); await settle();
+      expect(view.hold).toBe("closed");
+      bindTranslator(createTranslator("en", [], { hash: "updated-catalog" }));
+      render(); await advance(60_000);
+      expect(view.hold).toBe("closed");
+      expect(state.requests).toHaveLength(1);
+    } finally {
+      bindTranslator(previous);
+    }
   });
 });

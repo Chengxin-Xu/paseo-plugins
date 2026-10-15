@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -44,7 +45,7 @@ export class ReadReceiptStore {
       }
       this.trim();
     } catch (error) {
-      if ((error as { code?: string }).code !== "ENOENT") { this.corrupt = true; this.error = "已读回执无法读取，原文件会在下次保存时保留备份。原生已读状态仍以宿主为准。"; }
+      if ((error as { code?: string }).code !== "ENOENT") { this.corrupt = true; this.error = t("serverReadState.m001"); }
     }
   }
   private trim() {
@@ -62,7 +63,7 @@ export class ReadReceiptStore {
   async record(input: ReadReceipt): Promise<ReadReceipt> {
     await this.ready;
     const receipt = readReceiptSchema.parse(input), previous = this.receipts.get(receipt.agentId);
-    if (Date.parse(receipt.readAt) < Date.parse(receipt.completionAt)) throw new Error("已读时间早于完成时间，回执未保存");
+    if (Date.parse(receipt.readAt) < Date.parse(receipt.completionAt)) throw new Error(t("serverReadState.m002"));
     if (previous && (Date.parse(previous.completionAt) > Date.parse(receipt.completionAt)
       || Date.parse(previous.completionAt) === Date.parse(receipt.completionAt) && Date.parse(previous.readAt) >= Date.parse(receipt.readAt))) return { ...previous };
     this.receipts.set(receipt.agentId, receipt); this.trim();
@@ -85,7 +86,7 @@ export class ReadReceiptStore {
         await ensurePrivateDirectory(this.directory);
         if (this.corrupt) { try { await rename(this.file, `${this.file}.backup`); } catch { /* missing previous file */ } this.corrupt = false; }
         await writeFile(temporary, serialized, { mode: 0o600 }); await rename(temporary, this.file); this.error = null;
-      } catch { this.error = "原生已读已同步，但回执暂时无法写入磁盘；当前回执保留在内存。"; }
+      } catch { this.error = t("serverReadState.m003"); }
       finally { await rm(temporary, { force: true }).catch(() => {}); }
     });
     return this.writes;
@@ -96,7 +97,7 @@ export class ReadReceiptStore {
 let activeReadReceiptStore: ReadReceiptStore | null = null;
 /** Call before a plugin-driven restore, including archives predating installation. */
 export async function rememberArchiveReadOrigin(origin: ArchiveReadOrigin): Promise<ArchiveReadOrigin> {
-  if (!activeReadReceiptStore) throw new Error("已读状态服务尚未初始化。");
+  if (!activeReadReceiptStore) throw new Error(t("serverReadState.m004"));
   return activeReadReceiptStore.recordArchiveOrigin(origin);
 }
 
@@ -138,7 +139,7 @@ export class CompletionReadController {
     const token = JSON.stringify([input.attentionTimestamp, input.lastUserMessageAt, input.kind ?? null, input.completionAt ?? null, input.stopAt ?? null, input.rearm === true, input.round ?? null]);
     const existing = this.pending.get(input.agentId);
     if (existing?.token === token) return existing.promise;
-    if (existing) return { agentId: input.agentId, status: "stale", receipt: await this.store.get(input.agentId), message: "此会话正在同步另一次已读操作，请刷新状态后重试。" };
+    if (existing) return { agentId: input.agentId, status: "stale", receipt: await this.store.get(input.agentId), message: t("serverReadState.m005") };
     const promise = this.perform(paseo, input).finally(() => this.pending.delete(input.agentId));
     this.pending.set(input.agentId, { token, promise }); return promise;
   }
@@ -175,7 +176,7 @@ export class CompletionReadController {
     const { agentId } = input;
     const previous = await this.store.get(agentId);
     const result = (status: MarkCompletionReadResult["status"], message: string, receipt = previous): MarkCompletionReadResult => ({ agentId, status, receipt, message });
-    if (this.closed) return result("failed", "已读同步正在关闭，请稍后重试。");
+    if (this.closed) return result("failed", t("serverReadState.m006"));
     const generation = this.generations.get(agentId) ?? 0;
     const changed = () => this.closed || generation !== (this.generations.get(agentId) ?? 0);
     const error = input.kind === "error";
@@ -188,27 +189,27 @@ export class CompletionReadController {
     const samePrompt = (agent: Record<string, unknown>) => (agent.lastUserMessageAt ?? null) === input.lastUserMessageAt;
     try {
       const handle = paseo.agents.ref(agentId), before = await handle.refresh();
-      if (!before?.agent) return result("failed", "当前宿主找不到此会话。");
+      if (!before?.agent) return result("failed", t("serverReadState.m007"));
       const agent = object(before.agent);
-      if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
-      if (!quiet(agent) || !samePrompt(agent)) return result("stale", "会话已开始新任务、需要审批或已归档，本次未标记已读。");
+      if (changed()) return result("stale", t("serverReadState.m008"));
+      if (!quiet(agent) || !samePrompt(agent)) return result("stale", t("serverReadState.m009"));
       // A claim of the host's own stamp is checked too: a heartbeat may have run another turn since (codex-obs-attn-F1).
       const seen = stopAt !== null || input.completionAt || input.round ? await this.observed(agentId) : null, observed = seen?.record ?? null;
-      if (stopAt !== null && observed?.stop?.at !== stopAt) return result("stale", "停下的原因已有更新，请刷新后再确认。");
+      if (stopAt !== null && observed?.stop?.at !== stopAt) return result("stale", t("serverReadState.m010"));
       // 待回复 names its round: a heartbeat's next round asks again under the same host tokens, and a page still on the earlier
       // question must not mark the new one read, here or in the receipt of a session the host has not loaded (codex-obs-attn-R2).
       // So does a quick reply's rearm, the round it answers (codex-obs-attn-R4). A round that cannot be checked here clears nothing:
       // no telemetry, or a store that reports an error, whose record may be behind (as the reply's own check, codex-obs-attn-R3-remaining).
-      if (input.round && seen?.error) return result("failed", "观测台的记录暂时有问题，核实不了这一轮，本次未标记已读；请稍后再试。");
-      if (input.round && (!this.telemetry || !sameRound(input.round, observed))) return result("stale", "这之后它又跑了一轮，请刷新后看最新的提问再标记已读。");
+      if (input.round && seen?.error) return result("failed", t("serverReadState.m011"));
+      if (input.round && (!this.telemetry || !sameRound(input.round, observed))) return result("stale", t("serverReadState.m012"));
       if (agent.requiresAttention !== true || (error ? !["finished", "error"].includes(String(agent.attentionReason)) : agent.attentionReason !== "finished")) {
         // No native attention to clear: a turn the host closed mid-way raised none (and one opened in Paseo has none left).
         // 知道了 is then the plugin's own record on the stop, the only way such a stop is seen.
-        if (stopAt === null) return result("not_unread", error ? "这次异常已经看过了；原生状态已同步。" : "当前会话没有待查看的完成结果；原生状态已同步。");
-        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
-        return await this.telemetry!.ackStop(agentId, stopAt) ? result("read", "已标记为知道了。", previous) : result("stale", "停下的原因已有更新，请刷新后再确认。");
+        if (stopAt === null) return result("not_unread", error ? t("serverReadState.m013") : t("serverReadState.m014"));
+        if (changed()) return result("stale", t("serverReadState.m015"));
+        return await this.telemetry!.ackStop(agentId, stopAt) ? result("read", t("serverReadState.m016"), previous) : result("stale", t("serverReadState.m017"));
       }
-      if (agent.attentionTimestamp !== input.attentionTimestamp) return result("stale", "已有更新的完成结果，请先查看最新结果。");
+      if (agent.attentionTimestamp !== input.attentionTimestamp) return result("stale", t("serverReadState.m018"));
       // An Agent the host has not loaded: clearing its attention loads it (a provider process that then stays), and an ACP
       // Agent cannot be loaded again at all, so the request fails (P2-3, P2-4). Its token was checked above; the receipt here,
       // for that token or the newer completion it stands for, is what the page counts as read, and the host's flag goes when
@@ -216,39 +217,39 @@ export class CompletionReadController {
       const unloaded = agent.status === "closed" && input.rearm !== true;
       const receiptFor = (completionAt: string) => this.store.record({ agentId, completionAt, lastUserMessageAt: input.lastUserMessageAt, readAt: new Date(this.now()).toISOString() });
       if (unloaded && error) {
-        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
-        if (stopAt !== null && !await this.telemetry!.ackStop(agentId, stopAt)) return result("stale", "停下的原因已有更新，请刷新后再确认。");
+        if (changed()) return result("stale", t("serverReadState.m019"));
+        if (stopAt !== null && !await this.telemetry!.ackStop(agentId, stopAt)) return result("stale", t("serverReadState.m020"));
         // 知道了 as clearing would have made it: a failure's token says it was seen; a finished turn's result is seen with its
         // stop (that token, or the newer completion it stands for when the server can verify it).
         const token = agent.attentionReason === "finished" ? this.completionToken(input, input.attentionTimestamp!, observed) : input.attentionTimestamp!;
         const receipt = token ? await receiptFor(token).catch(() => previous) : previous;
-        return result("read", "已标记为知道了（会话没有载入，没有为此载入它）。", receipt);
+        return result("read", t("serverReadState.m021"), receipt);
       }
       const completionAt = error ? null : this.completionToken(input, input.attentionTimestamp!, observed);
-      if (!error && completionAt === null) return result("stale", "完成结果已有更新，请刷新后再标记已读。");
+      if (!error && completionAt === null) return result("stale", t("serverReadState.m022"));
       if (unloaded) {
-        if (changed()) return result("stale", "会话在读取期间发生变化，请刷新后查看最新结果。");
-        return result("read", "已标记为已读（会话没有载入，没有为此载入它）。", await receiptFor(completionAt!));
+        if (changed()) return result("stale", t("serverReadState.m023"));
+        return result("read", t("serverReadState.m024"), await receiptFor(completionAt!));
       }
       // The native RPC (still in 0.9) has no compare-and-swap token. Exact preconditions,
       // lifecycle generations and postchecks detect races; never claim atomicity.
       const response = await this.transport.request({ type: "clear_agent_attention", agentId }, "clear_agent_attention_response");
-      if (response.agentId !== agentId || !Array.isArray(response.agents)) return result("failed", "宿主未确认此会话的已读状态，请刷新后确认。");
+      if (response.agentId !== agentId || !Array.isArray(response.agents)) return result("failed", t("serverReadState.m025"));
       const acknowledged = response.agents.map(object).find(agent => agent.id === agentId);
       if (!acknowledged || changed() || !quiet(acknowledged) || !samePrompt(acknowledged) || acknowledged.requiresAttention !== false)
-        return result("stale", "已读同步期间会话发生变化，请以最新原生状态为准。");
+        return result("stale", t("serverReadState.m026"));
       const after = await handle.refresh();
       const confirmed = object(after?.agent);
       if (!after?.agent || changed() || !quiet(confirmed) || !samePrompt(confirmed) || confirmed.requiresAttention !== false)
-        return result("stale", "会话已有新状态，本次未记录新的已读回执，请刷新查看。");
+        return result("stale", t("serverReadState.m027"));
       if (error) {
         // The same record as without native attention, so a stop seen here stays seen whichever way it was seen.
         if (stopAt !== null) await this.telemetry?.ackStop(agentId, stopAt).catch(() => false);
-        return result("read", "已标记为知道了，并同步到 Paseo。", previous);
+        return result("read", t("serverReadState.m028"), previous);
       }
-      return result("read", "已标记为已读，并同步到 Paseo。", await receiptFor(completionAt!));
+      return result("read", t("serverReadState.m029"), await receiptFor(completionAt!));
     } catch (error) {
-      return result("failed", `已读同步未确认：${error instanceof Error ? error.message.replaceAll("子任务", "已读") : "宿主暂不可用"}。请刷新后确认状态。`);
+      return result("failed", t("serverReadState.m030", { value1: error instanceof Error ? error.message.replaceAll(t("serverReadState.m031"), t("serverReadState.m032")) : t("serverReadState.m033") }));
     }
   }
   async close() { this.closed = true; await Promise.allSettled([...this.pending.values()].map(entry => entry.promise)); await this.store.close(); }

@@ -1,3 +1,4 @@
+import { t } from "./text";
 /** A transport-independent timeline model; never imports a host runtime. */
 export type TimelineItem = { type: string; [key: string]: unknown };
 export interface TimelineCursor { epoch: string; seq: number }
@@ -186,12 +187,12 @@ export function timelineSummary(item: TimelineItem): string {
   const detail = object(item.detail);
   if (item.type === "tool_call") return string(detail.command) || string(detail.filePath) || string(detail.query)
     || string(detail.url) || string(detail.description) || string(detail.label) || string(item.name);
-  if (item.type === "todo") return `${Array.isArray(item.items) ? item.items.length : 0} 个任务`;
+  if (item.type === "todo") return t("sharedTimeline.m001", { value1: Array.isArray(item.items) ? item.items.length : 0 });
   return string(item.text) || string(item.message) || string(item.kind) || item.type;
 }
 export function prettyValue(value: unknown, maxLength = 30000): string {
   let text: string;
   try { text = typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? ""; }
-  catch { text = "无法序列化此数据"; }
-  return text.length > maxLength ? `${text.slice(0, maxLength)}\n… 内容较长，已截断显示` : text;
+  catch { text = t("sharedTimeline.m002"); }
+  return text.length > maxLength ? t("sharedTimeline.m003", { value1: text.slice(0, maxLength) }) : text;
 }

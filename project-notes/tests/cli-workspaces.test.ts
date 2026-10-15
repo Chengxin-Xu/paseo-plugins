@@ -25,6 +25,8 @@ async function fixture() {
   await writeFile(join(home, "projects", "projects.json"), JSON.stringify(projects));
   const workspace = { workspaceId: "wks_example", projectId: "prj_first", cwd: worktree, kind: "worktree", archivedAt: null };
   await writeFile(join(home, "projects", "workspaces.json"), JSON.stringify([workspace]));
+  await mkdir(join(home, "plugin-data/project-notes"), { recursive: true });
+  await writeFile(join(home, "plugin-data/project-notes/i18n-state.json"), JSON.stringify({ setting: "zh-CN", device: "zh-CN" }));
   // No CLI on PATH: both registries come only from this fixture, never from a running daemon.
   const env: NodeJS.ProcessEnv = { ...process.env, PASEO_HOME: home, PATH: join(root, "no-bin") };
   delete env.PASEO_AGENT_ID; delete env.PASEO_AGENT_CWD;

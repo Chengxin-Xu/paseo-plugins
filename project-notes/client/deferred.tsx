@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useToast } from "@getpaseo/plugin/client/react-native";
@@ -40,8 +41,8 @@ export function useDeferredQueue(hostId: string, agentId: string | undefined) {
     actingRef.current = true; setActing(messageId);
     try { put(await call()); } finally { actingRef.current = false; setActing(null); }
   }, [put]);
-  const send = useCallback(async (input: { text: string; messageId: string; key: string; source: string; what: string; consent: Consent | null }): Promise<DeferredSendResult> => {
-    if (!agentId) throw new Error("没有选中 Agent。");
+  const send = useCallback(async (input: { text: string; messageId: string; key: string; source: string; what?: string; consent: Consent | null }): Promise<DeferredSendResult> => {
+    if (!agentId) throw new Error(t("deferred.noAgent"));
     try {
       const result = await sendRpc({ agentId, ...input });
       put("view" in result ? result.view : null);
@@ -49,7 +50,7 @@ export function useDeferredQueue(hostId: string, agentId: string | undefined) {
     } catch (error) { put(null); throw error; }
   }, [agentId, put, sendRpc]);
   const enqueue = useCallback(async (input: { text: string; messageId: string; key: string; source: string }) => {
-    if (!agentId) throw new Error("没有选中 Agent。");
+    if (!agentId) throw new Error(t("deferred.noAgent"));
     try {
       const view = await enqueueRpc({ agentId, ...input });
       put(view);
@@ -84,20 +85,20 @@ function DeferredRow({ theme, view, busy, onCancel, onResume }: { theme: PluginT
   const { colors } = theme, badge = deferredBadge(view), waiting = isOnItsWay(view), changed = useChangeCount(view.state);
   const mark = <Badge theme={theme} label={badge.label} tone={badge.tone} icon={ICONS[view.state]} />;
   // A held prompt may be a send now that got no answer, not a queued one: plain 取消 there.
-  const cancelLabel = view.state === "held" ? "取消" : "取消排队";
-  const cancel = <Button theme={theme} size="sm" label={cancelLabel} accessibilityLabel={`${cancelLabel}：${view.source || view.preview}`} icon="X" variant="ghost" disabled={busy} onPress={onCancel} />;
-  return <View accessibilityLabel={`${badge.label}：${view.source || view.preview}`} {...aria({ live: "polite" })}
+  const cancelLabel = view.state === "held" ? t("deferred.cancel") : t("deferred.cancelQueue");
+  const cancel = <Button theme={theme} size="sm" label={cancelLabel} accessibilityLabel={t("deferred.rowLabel", { label: cancelLabel, text: view.source || view.preview })} icon="X" variant="ghost" disabled={busy} onPress={onCancel} />;
+  return <View accessibilityLabel={t("deferred.rowLabel", { label: badge.label, text: view.source || view.preview })} {...aria({ live: "polite" })}
     style={{ overflow: "hidden", gap: space.xs + 2, padding: space.sm + 2, borderRadius: radius.md, borderWidth: hairline, borderColor: toneColor(theme, badge.tone, "line"), backgroundColor: toneColor(theme, badge.tone, "soft") }}>
     <Flash count={changed} color={withAlpha(toneColor(theme, badge.tone, "mark"), 0.35)} radius={radius.md} />
     <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.sm }}>
       {view.state === "queued" || view.state === "sending" ? <Breathe>{mark}</Breathe> : mark}
-      <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "500" }}>{view.source || view.preview || "提示词"}</Text>
+      <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.small, fontWeight: "500" }}>{view.source || view.preview || t("deferred.prompt")}</Text>
       <Text style={{ flexShrink: 0, color: colors.foregroundMuted, fontSize: fontSize.meta }}>{relativeTime(waiting ? view.createdAt : view.at)}</Text>
       {view.state === "queued" ? <View style={{ marginLeft: "auto" }}>{cancel}</View> : null}
     </View>
     {view.note && view.note !== badge.label ? <Text style={{ color: colors.foreground, fontSize: fontSize.meta, lineHeight: 17 }}>{view.note}</Text> : null}
     {view.state === "held" ? <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: space.sm }}>
-      <Button theme={theme} size="sm" label="仍然发送" icon="Send" tone="warning" busy={busy} onPress={onResume} />
+      <Button theme={theme} size="sm" label={t("deferred.sendAnyway")} icon="Send" tone="warning" busy={busy} onPress={onResume} />
       {cancel}
     </View> : null}
   </View>;

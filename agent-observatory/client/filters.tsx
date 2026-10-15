@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -9,8 +10,8 @@ import { Icon } from "@getpaseo/plugin/client/react-native";
 import { ChoiceList, statusNames } from "./ui";
 
 export type SessionScope = "all" | "current" | "history";
-export const sessionScopeNames: Record<SessionScope, string> = { all: "全部会话", current: "当前会话", history: "历史会话" };
-export const readFilterNames = { all: "全部结果", unread: "完成未读", read: "完成已读" } as const;
+export const sessionScopeNames: Record<SessionScope, string> = { get all() { return t("coreFilters.allSessions"); }, get current() { return t("coreFilters.currentSessions"); }, get history() { return t("coreFilters.pastSessions"); } };
+export const readFilterNames = { get all() { return t("coreFilters.allResults"); }, get unread() { return t("coreFilters.completedAndUnread"); }, get read() { return t("coreFilters.completedAndRead"); } } as const;
 
 function Group({ theme, title, children }: { theme: PluginTheme; title: string; children: ReactNode }) {
   return <View style={{ gap: space.sm }}>
@@ -38,28 +39,28 @@ export function FilterSheet({ theme, open, onClose, archiveMode, state, checkout
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const save = () => { const trimmed = name.trim(); if (!trimmed || saving) return; setSaving(true); void onSaveView(trimmed).then(() => setName("")).catch(() => {}).finally(() => setSaving(false)); };
-  return <Sheet title="筛选" open={open} onClose={onClose}>
-    {!archiveMode ? <Choices theme={theme} title="会话" options={(["all", "current", "history"] as const).map(id => [id, sessionScopeNames[id]] as const)} value={state.sessionScope} onChange={sessionScope => onChange({ sessionScope, readFilter: "all" })} /> : null}
-    <Choices theme={theme} title="状态" options={[["all", "全部状态"], ...AGENT_STATUSES.map(id => [id, statusNames[id], statusTones[id]] as const)]} value={state.status} onChange={status => onChange({ status })} />
-    {!archiveMode ? <Choices theme={theme} title="结果" options={(["all", "unread", "read"] as const).map(id => [id, readFilterNames[id], id === "unread" ? "success" as const : undefined] as const)} value={state.readFilter} onChange={readFilter => onChange({ readFilter, status: "all", sessionScope: "all" })} /> : null}
-    <Choices theme={theme} title="Worktree / 检出" options={[["all", "全部检出"], ...checkouts]} value={state.checkout} onChange={checkout => onChange({ checkout })} />
-    {showWorkspace ? <Choices theme={theme} title="工作区" options={[["all", "全部工作区"], ...workspaces]} value={state.workspace} onChange={workspace => onChange({ workspace, checkout: "all" })} /> : null}
-    <Choices theme={theme} title="Provider" options={[["all", "全部 provider"], ...providers.map(id => [id, id] as const)]} value={state.provider} onChange={provider => onChange({ provider })} />
+  return <Sheet title={t("coreFilters.filters")} open={open} onClose={onClose}>
+    {!archiveMode ? <Choices theme={theme} title={t("coreFilters.sessions")} options={(["all", "current", "history"] as const).map(id => [id, sessionScopeNames[id]] as const)} value={state.sessionScope} onChange={sessionScope => onChange({ sessionScope, readFilter: "all" })} /> : null}
+    <Choices theme={theme} title={t("coreFilters.status")} options={[["all", t("coreFilters.allStatuses")], ...AGENT_STATUSES.map(id => [id, statusNames[id], statusTones[id]] as const)]} value={state.status} onChange={status => onChange({ status })} />
+    {!archiveMode ? <Choices theme={theme} title={t("coreFilters.results")} options={(["all", "unread", "read"] as const).map(id => [id, readFilterNames[id], id === "unread" ? "success" as const : undefined] as const)} value={state.readFilter} onChange={readFilter => onChange({ readFilter, status: "all", sessionScope: "all" })} /> : null}
+    <Choices theme={theme} title={t("coreFilters.worktreeCheckout")} options={[["all", t("coreFilters.allCheckouts")], ...checkouts]} value={state.checkout} onChange={checkout => onChange({ checkout })} />
+    {showWorkspace ? <Choices theme={theme} title={t("coreFilters.workspace")} options={[["all", t("coreFilters.allWorkspaces")], ...workspaces]} value={state.workspace} onChange={workspace => onChange({ workspace, checkout: "all" })} /> : null}
+    <Choices theme={theme} title={t("coreFilters.provider")} options={[["all", t("coreFilters.allProviders")], ...providers.map(id => [id, id] as const)]} value={state.provider} onChange={provider => onChange({ provider })} />
     <Divider theme={theme} />
     <View style={{ gap: space.sm }}>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>保存的视图</Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>{t("coreFilters.savedViews")}</Text>
       {savedViews.map(view => <View key={view.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
         <View style={{ flex: 1, minWidth: 0, alignItems: "flex-start" }}><Chip theme={theme} label={view.name} icon="Bookmark" onPress={() => { onApplyView(view); onClose(); }} /></View>
-        <IconButton theme={theme} icon="Trash2" label={`删除视图 ${view.name}`} size="sm" onPress={() => onDeleteView(view)} />
+        <IconButton theme={theme} icon="Trash2" label={t("coreFilters.deleteView", { value1: view.name })} size="sm" onPress={() => onDeleteView(view)} />
       </View>)}
       <View style={{ flexDirection: "row", alignItems: "flex-end", gap: space.sm }}>
-        <View style={{ flex: 1 }}><TextField theme={theme} label="视图名称" value={name} onChangeText={setName} placeholder="例如：支付项目未读" /></View>
-        <Button theme={theme} label="保存视图" icon="Bookmark" onPress={save} disabled={!name.trim() || !canSave} busy={saving} />
+        <View style={{ flex: 1 }}><TextField theme={theme} label={t("coreFilters.viewName")} value={name} onChangeText={setName} placeholder={t("coreFilters.forExampleUnreadPaymentProjectResults")} /></View>
+        <Button theme={theme} label={t("coreFilters.saveView")} icon="Bookmark" onPress={save} disabled={!name.trim() || !canSave} busy={saving} />
       </View>
     </View>
     <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: space.sm, paddingTop: space.xs }}>
-      <Button theme={theme} label="重置" variant="ghost" onPress={onReset} />
-      <Button theme={theme} label="完成" variant="primary" onPress={onClose} />
+      <Button theme={theme} label={t("coreFilters.reset")} variant="ghost" onPress={onReset} />
+      <Button theme={theme} label={t("coreFilters.done")} variant="primary" onPress={onClose} />
     </View>
   </Sheet>;
 }
@@ -67,16 +68,16 @@ export function FilterSheet({ theme, open, onClose, archiveMode, state, checkout
 export function ProjectSheet({ theme, open, onClose, projects, value, total, onChange }: {
   theme: PluginTheme; open: boolean; onClose: () => void; projects: readonly { id: string; name: string; count: number }[]; value: string; total: number; onChange: (id: string) => void;
 }) {
-  return <Sheet title="项目" open={open} onClose={onClose}>
-    <ChoiceList theme={theme} value={value} onChange={id => { onChange(id); onClose(); }} options={[{ value: "all", label: "全部项目", count: total, leading: <Icon name="Layers" size={18} color={hue(theme, "blue")} /> },
+  return <Sheet title={t("coreFilters.projects")} open={open} onClose={onClose}>
+    <ChoiceList theme={theme} value={value} onChange={id => { onChange(id); onClose(); }} options={[{ value: "all", label: t("coreFilters.allProjects"), count: total, leading: <Icon name="Layers" size={18} color={hue(theme, "blue")} /> },
       ...projects.map(project => ({ value: project.id, label: project.name, count: project.count, leading: <ProjectMark theme={theme} name={project.name} size={20} /> }))]} />
   </Sheet>;
 }
 
 export const rangeOptions: readonly TimeRange[] = ["24h", "7d", "30d", "all"];
 export function RangeSheet({ theme, open, onClose, value, onChange }: { theme: PluginTheme; open: boolean; onClose: () => void; value: TimeRange; onChange: (range: TimeRange) => void }) {
-  return <Sheet title="时间范围" open={open} onClose={onClose}>
+  return <Sheet title={t("coreFilters.timeRange")} open={open} onClose={onClose}>
     <ChoiceList theme={theme} value={value} onChange={range => { onChange(range); onClose(); }} options={rangeOptions.map(range => ({ value: range, label: rangeLabels[range] }))} />
-    <MetaLine theme={theme} numberOfLines={2} parts={["执行中、待审批和未读结果不受时间范围限制"]} />
+    <MetaLine theme={theme} numberOfLines={2} parts={[t("coreFilters.runningSessionsPendingApprovalsAndUnreadResults")]} />
   </Sheet>;
 }

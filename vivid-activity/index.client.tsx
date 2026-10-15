@@ -1,3 +1,7 @@
+import { createClientI18n } from "./client/i18n-client";
+import { boot as bootEn } from "./shared/locales/en.json";
+import { boot as bootZh } from "./shared/locales/zh-CN.json";
+import { t } from "./shared/text";
 import { settingsRpc } from "@getpaseo/plugin";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { z } from "zod";
@@ -14,7 +18,7 @@ import { BOUNDARY_ITEM_TYPES, configurePiNotices, observeBoundary, transformReas
 import { applyTakeover, isSettingsChange, setLiveTakeover, startTakeover, type TakeoverPart } from "./client/takeover";
 import { installColorfulFonts } from "./client/web";
 import { foldIndexRpc } from "./shared/fold-index";
-import { activitySettings, foldFromValues } from "./shared/settings";
+import { activitySettings, DEFAULT_TAKEOVER, foldFromValues } from "./shared/settings";
 import {
   FOLD_RENDERER_KIND,
   FOLD_RENDERER_VERSION,
@@ -67,7 +71,8 @@ function watchSettings(client: PluginClientContext, changed: () => void): () => 
 const NudgeRow = () => null;
 
 export default function contribute(client: PluginClientContext) {
-  const surface = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: "彩色活动行", fallback: (id, props) => id === "settings" ? <ActivityIndicator color={props.theme?.colors.foregroundMuted} /> : <PlainDetail {...props} /> });
+  const i18n = createClientI18n(client, { pluginId: "vivid-activity", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } } });
+  const surface = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n, fallback: (id, props) => id === "settings" ? <ActivityIndicator color={props.theme?.colors.foregroundMuted} /> : <PlainDetail {...props} /> });
   const details = { DetailBody: surface("detail"), ReasoningText: surface("reasoning") };
   const LazySettings = surface("settings");
   const actions = { onFoldSettings: foldRuntime.setSettings, onTakeover: applyTakeover };
@@ -77,7 +82,7 @@ export default function contribute(client: PluginClientContext) {
   const removeFonts = installColorfulFonts();
   client.addSettingsScreen({
     id: "display",
-    title: "彩色活动行",
+    title: t("boot.name"),
     icon: "Palette",
     Component: ActivitySettings,
   });
@@ -113,9 +118,10 @@ export default function contribute(client: PluginClientContext) {
       nudgeRegistration = client.addTimelineRenderer({ kind: "vivid-nudge", version: 1, schema: z.null(), Component: NudgeRow });
     }
   };
+  const stopText = i18n.subscribe(nudge);
   foldRuntime.configure({ rpc: (input) => client.rpc(foldIndexRpc, input), nudge });
   // 0.6.0-local.5: the Pi notice reader comes in its own small chunk, the first time a Pi notice row is drawn.
-  const piChunk = createChunkLoader(client, { rpc: getClientChunk, manifest: PI_CHUNK, label: "Pi 通知" });
+  const piChunk = createChunkLoader(client, { rpc: getClientChunk, manifest: PI_CHUNK, label: () => t("boot.piNotice"), text: i18n });
   configurePiNotices({ load: () => piChunk.load().then((surfaces) => surfaces.readPiNotice as unknown as PiNoticeReader), redraw: nudge });
 
   const readSettings = settingsRpc(activitySettings.id).read;
@@ -137,16 +143,20 @@ export default function contribute(client: PluginClientContext) {
   const takeover = startTakeover({
     register,
     read: async () => {
-      const result = await client.rpc(readSettings, {});
+      const [result] = await Promise.all([client.rpc(readSettings, {}), i18n.ready()]);
       if (result.status !== "ready") return null;
       const fold = foldFromValues(result.values);
       if (fold) foldRuntime.setSettings(fold);
       return fold?.scope ?? null;
     },
     watch: (changed) => watchSettings(client, changed),
-  });
+    // Rows need their text: with a catalog already kept (reconnect, web reload) take over at once as before; otherwise
+    // the first read waits for both settings and text, and the host's own rows show until then.
+  }, i18n.isReady() ? DEFAULT_TAKEOVER : "off");
   setLiveTakeover(takeover);
   return () => {
+    stopText();
+    i18n.dispose();
     setLiveTakeover(null);
     takeover.stop();
     configurePiNotices(null);

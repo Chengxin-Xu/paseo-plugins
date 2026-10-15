@@ -1,3 +1,4 @@
+import { t } from "./text";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
 import type { ExpansionMode } from "./settings";
@@ -93,7 +94,7 @@ export const piNoticeDataSchema = z.object({
   customType: z.string(),
   state: z.enum(["done", "failed", "stopped", "running", "info"]),
   look: z.enum(["shell", "agent", "web", "plan", "other"]),
-  fields: z.array(z.object({ label: z.string(), value: z.string(), mono: z.boolean().optional() })),
+  fields: z.array(z.object({ id: z.string().optional(), label: z.string(), value: z.string(), mono: z.boolean().optional() })),
   body: z.string().optional(),
   /** The body was longer than PI_NOTICE_BODY_CHARS. */
   cut: z.boolean().optional(),
@@ -115,9 +116,9 @@ const PI_LOOKS: Record<PiNoticeLook, { icon: string; category: "shell" | "agent"
  * except while the reader is on its way the message as sent, so it can still be read.
  */
 const PI_NOTICE_UNREAD: Record<PiNoticeReaderPhase, { summary: string; note: string }> = {
-  loading: { summary: "正在读取…", note: "正在读取这条通知…" },
-  failed: { summary: "没能读取，点开看原文", note: "Pi 通知的读法没有下载成功（网络断开或插件出错），下面先显示原文；稍后会自动再试，也可以点「重新读取」。" },
-  idle: { summary: "还没读取，点开看原文", note: "Pi 通知的读法还没有加载，下面先显示原文。" },
+  loading: { get summary() { return t("timelinePi.loadingSummary"); }, get note() { return t("timelinePi.loadingNote"); } },
+  failed: { get summary() { return t("timelinePi.failedSummary"); }, get note() { return t("timelinePi.failedNote"); } },
+  idle: { get summary() { return t("timelinePi.idleSummary"); }, get note() { return t("timelinePi.idleNote"); } },
 };
 function unreadPiNotice(customType: string, raw: string, phase: PiNoticeReaderPhase): PiNoticeData {
   const body = phase === "loading" ? "" : raw;
@@ -125,7 +126,7 @@ function unreadPiNotice(customType: string, raw: string, phase: PiNoticeReaderPh
     customType,
     state: "info",
     look: "other",
-    fields: [{ label: "说明", value: PI_NOTICE_UNREAD[phase].note }],
+    fields: [{ label: t("timelinePi.note"), value: PI_NOTICE_UNREAD[phase].note }],
     ...(body ? { body: body.slice(0, PI_NOTICE_BODY_CHARS) } : {}),
     ...(body.length > PI_NOTICE_BODY_CHARS ? { cut: true } : {}),
     reader: phase,
@@ -224,7 +225,7 @@ export function createToolCallData(
     : pi
       ? { category: PI_LOOKS[pi.look].category, icon: PI_LOOKS[pi.look].icon, label: pi.title, summary: pi.summary || undefined }
       : unread
-        ? { category: PI_LOOKS.other.category, icon: PI_LOOKS.other.icon, label: "Pi 通知", summary: PI_NOTICE_UNREAD[unread].summary }
+        ? { category: PI_LOOKS.other.category, icon: PI_LOOKS.other.icon, label: t("timelinePi.notice"), summary: PI_NOTICE_UNREAD[unread].summary }
         : resolveToolCallPresentation({ name: item.name, detail });
   const errorText = formatError(item.error);
   return {
@@ -246,7 +247,7 @@ export function createToolCallData(
             customType: pi.customType,
             state: pi.state,
             look: pi.look,
-            fields: pi.fields.slice(0, PI_NOTICE_FIELDS).map((field) => ({ ...field, value: field.value.slice(0, PI_NOTICE_FIELD_CHARS) })),
+            fields: pi.fields.slice(0, PI_NOTICE_FIELDS).map((field) => ({ ...field, ...(field.id ? { id: field.id } : {}), value: field.value.slice(0, PI_NOTICE_FIELD_CHARS) })),
             ...(pi.body ? { body: pi.body.slice(0, PI_NOTICE_BODY_CHARS) } : {}),
             ...(pi.body && pi.body.length > PI_NOTICE_BODY_CHARS ? { cut: true } : {}),
           },

@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import { basename } from "node:path";
 import { emptyTokenCounts, type TokenCounts, type TokenSource } from "../../shared/tokens";
 import { DAY, dayOf, hourOf, type LedgerCall } from "./types";
@@ -54,7 +55,7 @@ export function rootSession(data: Pick<TokenData, "threads">, source: TokenSourc
 export const bucketKey = (at: number, source: TokenSource, model: string | null): string => JSON.stringify([at, source, model]);
 export const sessionHourKey = (row: SessionHour): string => JSON.stringify([row.at, row.source, row.sessionId, row.model]);
 export const projectHourKey = (row: ProjectHour): string => JSON.stringify([row.at, row.cwd]);
-export const projectName = (cwd: string): string => (basename(cwd) || "未知").slice(0, 240);
+export const projectName = (cwd: string): string => (basename(cwd) || t("serverTokensData.m001")).slice(0, 240);
 const countKeys = Object.keys(emptyTokenCounts()) as (keyof TokenCounts)[];
 /** Model calls a ledger record stands for: one, or a Grok turn's `modelCalls`. */
 export const modelCalls = (call: Pick<LedgerCall, "calls">): number => call.calls !== undefined && call.calls > 1 ? Math.floor(call.calls) : 1;

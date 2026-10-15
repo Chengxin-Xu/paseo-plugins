@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import type { PaseoAgentTimelineRefetchOptions } from "../paseo-types";
 import { normalizeTimelinePage, object, type TimelineCursor } from "../../shared/timeline";
 import { compactRow, createFold, foldRows, withTimeBounds } from "./fold";
@@ -19,9 +20,9 @@ class Replaced extends Error {}
 
 function readPage(raw: unknown) {
   const value = object(raw);
-  if (value.error) throw new Error("会话时间线读取失败，请稍后重试");
+  if (value.error) throw new Error(t("serverDigestReader.m001"));
   const page = normalizeTimelinePage(raw);
-  if (page.rows.length && (typeof value.epoch !== "string" || !value.epoch)) throw new Error("会话时间线缺少 epoch，请稍后重试");
+  if (page.rows.length && (typeof value.epoch !== "string" || !value.epoch)) throw new Error(t("serverDigestReader.m002"));
   return { ...page, projected: value.projection === "projected" || page.rows.some(row => row.seqStart !== row.seqEnd) };
 }
 
@@ -128,5 +129,5 @@ export async function fetchHistory(fetch: TimelineFetch, agentId: string, cwd: s
     }
     catch (error) { if (!(error instanceof Replaced)) throw error; }
   }
-  throw new Error("会话历史正在替换，请稍后刷新复盘");
+  throw new Error(t("serverDigestReader.m003"));
 }

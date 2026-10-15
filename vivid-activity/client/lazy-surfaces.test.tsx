@@ -6,6 +6,8 @@ const host = vi.hoisted(() => ({ settings: {} as any }));
 vi.mock("@getpaseo/plugin/client", () => ({ useSettings: () => host.settings }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({ SettingsAction: "SettingsAction", SettingsCard: "SettingsCard", SettingsRow: "SettingsRow", SettingsSection: "SettingsSection", SettingsSelect: "SettingsSelect", SettingsSwitch: "SettingsSwitch" }));
 vi.mock("react-native", () => ({ Text: "Text" }));
+vi.mock("./language-settings", () => ({ LanguageSettings: () => null }));
+vi.mock("./i18n-client", () => ({ useI18n: () => undefined }));
 vi.mock("./kit", () => ({ toneColor: () => "#ffffff" }));
 vi.mock("react", async (original) => ({ ...await original<typeof import("react")>(), useMemo: (compute: () => unknown) => compute() }));
 

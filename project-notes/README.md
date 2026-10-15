@@ -1,8 +1,16 @@
 # 拾页 · 项目手记（Project Notes）
 
-Paseo 项目看板，版本 **0.10.1**，插件 ID `project-notes`。按项目记录任务、提示词和想法，并能从一条手记直接开工：新建工作区和 Agent，把手记作为第一条消息发出去。需要 Paseo 0.11.1 或更新版本（daemon 与 App 都要满足，旧版本会拒绝加载）。界面为简体中文。
+Paseo 项目看板，版本 **0.11.0**，插件 ID `project-notes`。按项目记录任务、提示词和想法，并能从一条手记直接开工：新建工作区和 Agent，把手记作为第一条消息发出去。需要 Paseo 0.11.1 或更新版本（daemon 与 App 都要满足，旧版本会拒绝加载）。内置英文和简体中文，默认跟随系统，也支持用户自定义语言。
 
 插件市场的说明页见 [OVERVIEW.md](OVERVIEW.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+
+## Languages / 语言
+
+在 Paseo 的 **Settings → Plugins → Project Notes → Language**（中文界面为「语言」）选择语言。默认「跟随系统」按设备语言选择，没有对应翻译时显示英文。切换后已打开的界面立即更新。CLI 从 `$PASEO_HOME/plugin-data/project-notes/i18n-state.json` 读取同一设置，没有固定语言时使用最近一次设备语言；没有状态时使用英文。已保存的手记和历史正文保持原文。
+
+自定义翻译放在 `~/.paseo/plugin-data/project-notes/locales/`（设置了 `PASEO_HOME` 时位于其下的对应目录）。复制该目录内的 `templates/en.json` 或 `templates/zh-CN.json`，改名为语言代码，例如 `ko.json`；把 `$meta.name` 改成语言自己的名字。翻译各条值并保留 `{placeholder}`。复数使用 CLDR 的 `one`、`other` 等形式，必须提供 `other`。省略或无效条目回退英文；「语言」设置显示覆盖率和具体问题。保存后点「重新读取」再选择该语言。同名 `en.json` 或 `zh-CN.json` 可以覆盖部分内置文字；不要修改会在升级时重写的模板。
+
+贡献内置语言时，提交 PR 添加 `shared/locales/<code>.json`，在 `server/locales.ts` 的 `BUILTIN_CATALOGS` 中增加一项并导入该文件。可以从现有目录复制，保持消息 ID、占位符和复数结构一致。
 
 ## 功能
 

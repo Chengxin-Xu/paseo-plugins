@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -8,7 +9,7 @@ export const GROK_DEFAULT_EFFORT = "xhigh";
 export const GROK_EFFORTS = ["xhigh", "high", "medium", "low"] as const;
 export type GrokEffort = (typeof GROK_EFFORTS)[number];
 /** A Grok CLI model id, passed to the CLI as one argument: letters, digits and `._:/-`, never starting with `-` (an option). */
-export const grokModelSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/, "模型 ID 只能包含字母、数字和 . _ : / -，并以字母或数字开头");
+export const grokModelSchema = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/, { error: () => t("sharedInsights.m001") });
 /** "Grok 4.7" for grok-<version> ids; any other id as written. */
 export function grokModelLabel(model: string): string { return /^grok-\d+(?:\.\d+)*$/.test(model) ? `Grok ${model.slice(5)}` : model; }
 /** "Grok 4.7 · xhigh" for the defaults. */

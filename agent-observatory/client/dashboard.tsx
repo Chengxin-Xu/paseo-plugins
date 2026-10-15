@@ -1,3 +1,5 @@
+import { t } from "../shared/text";
+import { LanguageSettings } from "./language-settings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View, type FlatList as NativeFlatList } from "react-native";
 import { usePaseo, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
@@ -177,10 +179,10 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const projects = useMemo(() => { const found = new Map<string, { id: string; name: string; count: number }>(); for (const agent of ranged) { const key = projectKey(agent); const entry = found.get(key) ?? { id: key, name: agent.projectName, count: 0 }; entry.count++; found.set(key, entry); } return [...found.values()].sort((a, b) => a.name.localeCompare(b.name)); }, [ranged]);
   const workspaces = useMemo(() => {
     const found = new Map<string, { name: string; folder: string }>();
-    for (const agent of agents) if (agent.workspaceId && !found.has(agent.workspaceId)) { const folder = agent.cwd?.split("/").filter(Boolean).pop() || "工作区"; found.set(agent.workspaceId, { name: agent.workspaceName || folder, folder }); }
+    for (const agent of agents) if (agent.workspaceId && !found.has(agent.workspaceId)) { const folder = agent.cwd?.split("/").filter(Boolean).pop() || t("coreDashboard.workspace"); found.set(agent.workspaceId, { name: agent.workspaceName || folder, folder }); }
     const repeated = new Set([...found.values()].map(item => item.name).filter((name, index, names) => names.indexOf(name) !== index));
     // Workspaces may share a title; the folder tells them apart.
-    return [...found.entries()].map(([id, item]) => [id, repeated.has(item.name) ? `${item.name}（${item.folder}）` : item.name] as const).sort((a, b) => a[1].localeCompare(b[1]));
+    return [...found.entries()].map(([id, item]) => [id, repeated.has(item.name) ? t("coreDashboard.message", { value1: item.name, value2: item.folder }) : item.name] as const).sort((a, b) => a[1].localeCompare(b[1]));
   }, [agents]);
   const checkouts = useMemo(() => [...new Map(agents.map(a => [checkoutKey(a), checkoutName(a)] as const)).entries()].sort((a, b) => a[1].localeCompare(b[1])), [agents]);
   const providers = useMemo(() => [...new Set(agents.map(a => a.provider))].sort(), [agents]);
@@ -218,14 +220,14 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const scopeIds = useMemo(() => new Set(scoped.filter(agent => matchesAgentStatus(agent, status) && (readFilter === "all" || completionReadState(agent) === readFilter) && (focus === "all" || attentionOf(agent))).map(a => a.id)), [scoped, status, readFilter, focus, attentionOf]);
   const eventSince = range === "all" ? -Infinity : filterNow - (range === "24h" ? 1 : range === "7d" ? 7 : 30) * 86400_000;
   const events = useMemo(() => (telemetry?.events ?? []).filter(event => scopeIds.has(event.agentId) && Date.parse(event.at) >= eventSince), [telemetry, scopeIds, eventSince]);
-  const signals = useMemo(() => { const labels = new Map<string, string>(); for (const signal of decisionSignals(agents, telemetry?.events ?? [], now)) { if (signal.kind === "quiet") labels.set(signal.agentId, "久无更新"); else if (signal.kind === "repeated_failure") labels.set(signal.agentId, `失败 ${signal.count} 次`); } return labels; }, [agents, telemetry, now]);
+  const signals = useMemo(() => { const labels = new Map<string, string>(); for (const signal of decisionSignals(agents, telemetry?.events ?? [], now)) { if (signal.kind === "quiet") labels.set(signal.agentId, t("coreDashboard.noRecentUpdates")); else if (signal.kind === "repeated_failure") labels.set(signal.agentId, t("coreDashboard.failedTimes", { value1: signal.count })); } return labels; }, [agents, telemetry, now]);
   // A live directory observation is current by definition; polling-only syncs are stale after missing a cycle.
   const stale = !data.live && !!data.lastSyncedAt && now - new Date(data.lastSyncedAt).getTime() > 25000;
-  const sync = data.error ? { state: "error" as const, label: "同步失败" } : data.loading && !data.agents.length ? { state: "syncing" as const, label: "连接中" } : data.isRefreshing ? { state: "syncing" as const, label: "同步中" } : stale ? { state: "stale" as const, label: "等待同步" } : { state: "live" as const, label: data.live ? "实时" : "已同步" };
+  const sync = data.error ? { state: "error" as const, label: t("coreDashboard.syncFailed") } : data.loading && !data.agents.length ? { state: "syncing" as const, label: t("coreDashboard.connecting") } : data.isRefreshing ? { state: "syncing" as const, label: t("coreDashboard.syncing") } : stale ? { state: "stale" as const, label: t("coreDashboard.waitingToSync") } : { state: "live" as const, label: data.live ? t("coreDashboard.live") : t("coreDashboard.synced") };
   const toggle = useCallback((id: string) => setExpanded(previous => { const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next; }), []);
   async function exportSnapshot() {
-    try { await copyText(JSON.stringify({ exportedAt: new Date().toISOString(), host: host.label, agents: scoped, observation: telemetry ? { startedAt: telemetry.startedAt, agents: telemetry.agents.filter(item => scopeIds.has(item.agentId)) } : null }, null, 2)); toast.show("观测快照已复制", { variant: "success" }); }
-    catch { toast.error("复制失败，请检查剪贴板权限后重试"); }
+    try { await copyText(JSON.stringify({ exportedAt: new Date().toISOString(), host: host.label, agents: scoped, observation: telemetry ? { startedAt: telemetry.startedAt, agents: telemetry.agents.filter(item => scopeIds.has(item.agentId)) } : null }, null, 2)); toast.show(t("coreDashboard.observationSnapshotCopied"), { variant: "success" }); }
+    catch { toast.error(t("coreDashboard.couldNotCopyCheckClipboardPermissionsAnd")); }
   }
   const navigatePage = (action?: () => void) => { if (!action) return; returningAt = Date.now(); void preferences.saveView(withScroll(syncedView)).catch(() => {}).finally(action); };
   const onScrollEnd = (offset: number) => {
@@ -242,9 +244,9 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
       setSelectedId(agentId); return;
     }
     setSelectedId(null);
-    if (!navigation?.openAgent) { toast.error("这个 Agent 不在当前列表中，请在 Paseo 会话列表中打开"); return; }
-    try { Promise.resolve(navigation.openAgent({ agentId })).catch(error => toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`)); }
-    catch (error) { toast.error(`会话打开失败：${error instanceof Error ? error.message : "请稍后重试"}`); }
+    if (!navigation?.openAgent) { toast.error(t("coreDashboard.thisAgentIsNotInTheCurrent")); return; }
+    try { Promise.resolve(navigation.openAgent({ agentId })).catch(error => toast.error(t("coreDashboard.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreDashboard.tryAgainLater") }))); }
+    catch (error) { toast.error(t("coreDashboard.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreDashboard.tryAgainLater") })); }
   }
   function selectProject(projectId: string) {
     setReadFilter("all"); setFocus("all"); setProject(projectId); setCheckout("all"); setRange("all"); setSessionScope("all"); setQuery(""); setStatus("all"); setProvider("all");
@@ -254,9 +256,9 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   selectRef.current = selectAgent;
   const selectRow = useCallback((agentId: string) => selectRef.current(agentId), []);
   const openFromView = (agentId: string) => { setTab("agents"); selectAgent(agentId); };
-  const nextHarvest = (currentId: string) => { const start = harvestQueue.findIndex(item => item.id === currentId); for (let offset = 1; offset <= harvestQueue.length; offset++) { const index = (Math.max(0, start) + offset) % harvestQueue.length; const item = harvestQueue[index]!; const next = agents.find(agent => agent.id === item.id); if (item.id !== currentId && next && isUnreadCompletion(next) && !stopUnseen(next) && knownCompletionAt(next) === item.token && !isCompletionSnoozed(next, snoozes, Date.now())) { setQueuePosition(index); setSelectedId(item.id); return; } } setSelectedId(null); setHarvestQueue([]); toast.show("这一批未读结果已处理完", { variant: "success" }); };
+  const nextHarvest = (currentId: string) => { const start = harvestQueue.findIndex(item => item.id === currentId); for (let offset = 1; offset <= harvestQueue.length; offset++) { const index = (Math.max(0, start) + offset) % harvestQueue.length; const item = harvestQueue[index]!; const next = agents.find(agent => agent.id === item.id); if (item.id !== currentId && next && isUnreadCompletion(next) && !stopUnseen(next) && knownCompletionAt(next) === item.token && !isCompletionSnoozed(next, snoozes, Date.now())) { setQueuePosition(index); setSelectedId(item.id); return; } } setSelectedId(null); setHarvestQueue([]); toast.show(t("coreDashboard.allUnreadResultsInThisBatchHave"), { variant: "success" }); };
   // A result or a reply that asks you (待回复): the snooze is tied to it, a newer one shows again (opus-F1).
-  const snoozeAgent = async (agent: AgentRecord) => { const token = snoozeToken(agent); if (!token) return; await preferences.mutate({ snooze: { agentId: agent.id, completionAt: token, until: new Date(Date.now() + 3600000).toISOString() } }); toast.show("已延后 1 小时，有新结果仍会提醒"); if (harvestQueue.length) nextHarvest(agent.id); };
+  const snoozeAgent = async (agent: AgentRecord) => { const token = snoozeToken(agent); if (!token) return; await preferences.mutate({ snooze: { agentId: agent.id, completionAt: token, until: new Date(Date.now() + 3600000).toISOString() } }); toast.show(t("coreDashboard.snoozedFor1HourNewResultsWill")); if (harvestQueue.length) nextHarvest(agent.id); };
   // From the 看板 hero: show exactly the sessions behind the tapped live count.
   const showScope = (target: SessionScopeTarget) => {
     resetFilters(); setRange("all"); setSelectedId(null); setTab("agents");
@@ -289,22 +291,22 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     ...(status !== "all" && status !== "running" && status !== "idle" ? [{ key: "status", label: statusNames[status], clear: () => setStatus("all") }] : []),
     ...(readFilter === "read" ? [{ key: "read", label: readFilterNames.read, clear: () => setReadFilter("all") }] : []),
     ...(sessionScope !== "all" ? [{ key: "scope", label: sessionScopeNames[sessionScope], clear: () => setSessionScope("all") }] : []),
-    ...(checkout !== "all" ? [{ key: "checkout", label: checkouts.find(([id]) => id === checkout)?.[1] ?? "检出", clear: () => setCheckout("all") }] : []),
-    ...(workspace !== workspaceDefault ? [{ key: "workspace", label: workspaces.find(([id]) => id === workspace)?.[1] ?? "工作区", clear: () => setWorkspace(workspaceDefault) }] : []),
+    ...(checkout !== "all" ? [{ key: "checkout", label: checkouts.find(([id]) => id === checkout)?.[1] ?? t("coreDashboard.checkout"), clear: () => setCheckout("all") }] : []),
+    ...(workspace !== workspaceDefault ? [{ key: "workspace", label: workspaces.find(([id]) => id === workspace)?.[1] ?? t("coreDashboard.workspace"), clear: () => setWorkspace(workspaceDefault) }] : []),
     ...(provider !== "all" ? [{ key: "provider", label: provider, clear: () => setProvider("all") }] : []),
   ];
-  const projectLabel = projects.find(item => item.id === project)?.name ?? (project === "all" ? "全部项目" : "项目");
+  const projectLabel = projects.find(item => item.id === project)?.name ?? (project === "all" ? t("coreDashboard.allProjects") : t("coreDashboard.project"));
   const savedViews = preferences.snapshot?.savedViews ?? [];
   const sessionsTab = tab === "agents", listTab = tab === "agents" || tab === "activity";
-  const archiveSummary = useMemo(() => { const worktrees = new Set(scoped.filter(a => a.checkoutKind === "worktree").map(a => a.worktreePath)).size; return [`${scoped.length} 个会话`, `${new Set(scoped.map(projectKey)).size} 个项目`, worktrees ? `${worktrees} 个 worktree` : null].filter(Boolean).join(" · "); }, [scoped]);
+  const archiveSummary = useMemo(() => { const worktrees = new Set(scoped.filter(a => a.checkoutKind === "worktree").map(a => a.worktreePath)).size; return [t("coreDashboard.sessions", { count: scoped.length }), t("coreDashboard.projects", { count: new Set(scoped.map(projectKey)).size }), worktrees ? t("coreDashboard.worktrees", { count: worktrees }) : null].filter(Boolean).join(" · "); }, [scoped]);
   const banners = [
-    data.error && data.agents.length ? <Banner key="sync" theme={theme} tone="danger" message={`同步失败：${String(data.error)}。显示的是上次结果。`} action={{ label: "重试", onPress: onRefresh }} /> : null,
-    data.truncated ? <Banner key="truncated" theme={theme} message="会话较多，只加载了一部分；计数只覆盖已加载的会话。" /> : null,
-    telemetryError ? <Banner key="telemetry" theme={theme} tone="warning" message="事件记录暂不可用，会话状态仍会实时更新。" /> : null,
+    data.error && data.agents.length ? <Banner key="sync" theme={theme} tone="danger" message={t("coreDashboard.syncFailedShowingThePreviousResults", { value1: String(data.error) })} action={{ label: t("coreDashboard.retry"), onPress: onRefresh }} /> : null,
+    data.truncated ? <Banner key="truncated" theme={theme} message={t("coreDashboard.onlySomeSessionsAreLoadedBecauseThere")} /> : null,
+    telemetryError ? <Banner key="telemetry" theme={theme} tone="warning" message={t("coreDashboard.eventHistoryIsTemporarilyUnavailableSessionStatus")} /> : null,
     // The server says in one Chinese sentence whether saving failed or the saved history could not be read back (opus-F74).
     telemetry?.persistenceError ? <Banner key="persist" theme={theme} tone="warning" message={telemetry.persistenceError} /> : null,
-    readReceiptError ? <Banner key="receipts" theme={theme} tone="warning" message={`已读状态同步异常：${readReceiptError}`} /> : null,
-    preferences.error ? <Banner key="preferences" theme={theme} tone="warning" message={`视图无法保存：${preferences.error}`} /> : null,
+    readReceiptError ? <Banner key="receipts" theme={theme} tone="warning" message={t("coreDashboard.readStatusSyncError", { value1: readReceiptError })} /> : null,
+    preferences.error ? <Banner key="preferences" theme={theme} tone="warning" message={t("coreDashboard.cannotSaveView", { value1: preferences.error })} /> : null,
   ].filter(Boolean);
   // 归档已读完成 (opus-B18): completed sessions whose result was read, with nothing running above or below them and no heartbeat
   // or limit to come back for. Paseo completes an Agent's heartbeats when it is archived, so only a heartbeat read that covered every
@@ -320,7 +322,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     // The heartbeats are read again for this tap: one created since the first tap keeps its Agent, and a read that cannot be trusted
     // archives nothing. Only rows still eligible stay in the batch (one that started a new turn meanwhile stays out).
     const plan = confirmArchive(archiveMarks, agents, harvestScope, await checkHeartbeats(), { truncated: data.truncated });
-    if (!plan.ok) { setArchivingMarked(false); toast.error(`没有归档：${plan.reason}`); return; }
+    if (!plan.ok) { setArchivingMarked(false); toast.error(t("coreDashboard.nothingArchived", { value1: plan.reason })); return; }
     const queue = [...plan.ids], total = queue.length;
     let done = 0, failed = 0;
     const worker = async () => { while (queue.length) { const id = queue.shift()!; try { await paseo.agents.ref(id).archive(); done++; } catch { failed++; } } };
@@ -328,50 +330,51 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     finally {
       setArchivingMarked(false); setArchiveMarks(null);
       // Why the rest stayed: a heartbeat of their own, or an Agent below them that archiving would take along.
-      const kept = [plan.spared ? `${plan.spared} 个有心跳` : null, plan.sparedForChildren ? `${plan.sparedForChildren} 个的子 Agent 还没处理完` : null].filter(Boolean).join("，");
-      const spared = kept ? `；${kept}，已留下` : "";
-      if (failed) toast.error(`已归档 ${done} 个，${failed} 个失败，可以再试一次${spared}`);
-      else if (total) toast.show(`已归档 ${done} 个已读完成的会话${spared}`, { variant: "success" });
-      else toast.show(kept ? `${kept}，没有归档` : "这些会话已有新动静，没有归档");
+      const kept = [plan.spared ? t("coreDashboard.haveHeartbeats", { count: plan.spared }) : null, plan.sparedForChildren ? t("coreDashboard.haveSubagentsThatStillNeedAttention", { value1: plan.sparedForChildren }) : null].filter(Boolean).join(t("coreDashboard.message2"));
+      const spared = kept ? t("coreDashboard.kept", { value1: kept }) : "";
+      if (failed) toast.error(t("coreDashboard.archivedFailedAndCanBeRetried", { value1: done, value2: failed, value3: spared }));
+      else if (total) toast.show(t("coreDashboard.archivedCompletedSessionsWithReadResults", { value1: done, value2: spared }), { variant: "success" });
+      else toast.show(kept ? t("coreDashboard.nothingArchived2", { value1: kept }) : t("coreDashboard.theseSessionsHaveNewActivityNothingArchived"));
       void data.refresh();
     }
   };
   const detail = selected
     ? <AgentDetail key={`${host.id}:${selected.id}`} hostId={host.id} heartbeats={heartbeats.data?.byAgent.get(selected.id)} agent={selected} agents={loadedAgents} theme={theme} compact={compact} navigation={navigation} onSelectAgent={selectAgent} onClose={detailClosed} telemetry={telemetry} onReadNext={harvestQueue.length ? receipt => nextHarvest(receipt.agentId) : undefined} onSnooze={preferences.ready ? snoozeAgent : undefined} queue={detailQueue} onOpenSchedules={onOpenSchedules} initialEvidenceRef={evidenceTarget?.agentId === selected.id ? evidenceTarget.ref : undefined} />
-    : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" title="选择一个会话" message="结果、时间线和子任务会显示在这里" /></View>;
+    : <View style={{ flex: 1, justifyContent: "center" }}><EmptyState theme={theme} icon="PanelRight" title={t("coreDashboard.selectASession")} message={t("coreDashboard.resultsTimelineAndSubtasksAppearHere")} /></View>;
   const empty = data.loading ? <Skeleton theme={theme} rows={6} />
-    : data.error ? <EmptyState theme={theme} icon="WifiOff" title="暂时无法读取会话" message="恢复连接后会自动重试" action={{ label: "重试", onPress: onRefresh, icon: "RefreshCw" }} />
-    : readFilter === "unread" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title={counts.snoozed && !showSnoozed ? "未读结果都已稍后处理" : "没有未读结果"} message="新一轮任务完成后会出现在这里" action={{ label: "查看全部", onPress: resetFilters }} />
-    : focus === "attention" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title="没有需要处理的会话" message="新的审批、异常和未读结果会出现在这里" action={{ label: "查看全部", onPress: resetFilters }} />
-    : filtered ? <EmptyState theme={theme} icon="SearchX" title="没有匹配的会话" action={{ label: "清除筛选", onPress: resetFilters }} />
-    : archiveMode ? <EmptyState theme={theme} icon="Archive" title="这个时间范围没有归档会话" action={range !== "all" ? { label: "查看全部时间", onPress: () => setRange("all") } : undefined} />
-    : <EmptyState theme={theme} icon="Orbit" title="还没有会话" message="在 Paseo 新建 Agent 后会自动出现在这里" />;
+    : data.error ? <EmptyState theme={theme} icon="WifiOff" title={t("coreDashboard.cannotLoadSessionsRightNow")} message={t("coreDashboard.willRetryAutomaticallyWhenTheConnectionReturns")} action={{ label: t("coreDashboard.retry"), onPress: onRefresh, icon: "RefreshCw" }} />
+    : readFilter === "unread" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title={counts.snoozed && !showSnoozed ? t("coreDashboard.allUnreadResultsAreSnoozed") : t("coreDashboard.noUnreadResults")} message={t("coreDashboard.newCompletedTurnsWillAppearHere")} action={{ label: t("coreDashboard.viewAll"), onPress: resetFilters }} />
+    : focus === "attention" && !query.trim() ? <EmptyState theme={theme} icon="Inbox" title={t("coreDashboard.noSessionsNeedAttention")} message={t("coreDashboard.newApprovalsIssuesAndUnreadResultsAppear")} action={{ label: t("coreDashboard.viewAll"), onPress: resetFilters }} />
+    : filtered ? <EmptyState theme={theme} icon="SearchX" title={t("coreDashboard.noMatchingSessions")} action={{ label: t("coreDashboard.clearFilters"), onPress: resetFilters }} />
+    : archiveMode ? <EmptyState theme={theme} icon="Archive" title={t("coreDashboard.noArchivedSessionsInThisTimeRange")} action={range !== "all" ? { label: t("coreDashboard.viewAllTime"), onPress: () => setRange("all") } : undefined} />
+    : <EmptyState theme={theme} icon="Orbit" title={t("coreDashboard.noSessionsYet")} message={t("coreDashboard.agentsCreatedInPaseoAppearHereAutomatically")} />;
+  // Catalog migration preserves disabled archive wording: disabled: true, hint: `暂不可用：${archiveOffer.reason}`
   const menu: MenuAction[] = [
-    ...(archiveMode ? onOpenOverview ? [{ key: "overview", label: "返回观测台", icon: "ArrowLeft", onPress: () => navigatePage(onOpenOverview) }] : [] : onOpenArchive ? [{ key: "archives", label: "已归档会话", icon: "Archive", onPress: () => navigatePage(onOpenArchive) }] : []),
+    ...(archiveMode ? onOpenOverview ? [{ key: "overview", label: t("coreDashboard.backToObservatory"), icon: "ArrowLeft", onPress: () => navigatePage(onOpenOverview) }] : [] : onOpenArchive ? [{ key: "archives", label: t("coreDashboard.archivedSessions"), icon: "Archive", onPress: () => navigatePage(onOpenArchive) }] : []),
     ...(sessionsTab ? [
-      { key: "view", label: view === "tree" ? "切换为列表" : "切换为树状", icon: view === "tree" ? "List" : "ListTree", hint: view === "tree" ? "子 Agent 与上级分开显示" : "子 Agent 收在上级下面", onPress: () => setView(view === "tree" ? "list" : "tree") },
-      { key: "sort", label: sort === "attention" ? "按最近活动排序" : "按需要处理排序", icon: "ArrowDownWideNarrow", onPress: () => setSort(sort === "attention" ? "recent" : "attention") },
-      ...(view === "tree" ? [{ key: "expand", label: expanded.size ? "收起全部子 Agent" : "展开全部子 Agent", icon: "ChevronsUpDown", onPress: () => setExpanded(expanded.size ? new Set() : new Set(scoped.map(agent => agent.id))) }] : []),
+      { key: "view", label: view === "tree" ? t("coreDashboard.switchToList") : t("coreDashboard.switchToTree"), icon: view === "tree" ? "List" : "ListTree", hint: view === "tree" ? t("coreDashboard.showSubagentsSeparatelyFromTheirParents") : t("coreDashboard.groupSubagentsUnderTheirParents"), onPress: () => setView(view === "tree" ? "list" : "tree") },
+      { key: "sort", label: sort === "attention" ? t("coreDashboard.sortByRecentActivity") : t("coreDashboard.sortByAttentionNeeded"), icon: "ArrowDownWideNarrow", onPress: () => setSort(sort === "attention" ? "recent" : "attention") },
+      ...(view === "tree" ? [{ key: "expand", label: expanded.size ? t("coreDashboard.collapseAllSubagents") : t("coreDashboard.expandAllSubagents"), icon: "ChevronsUpDown", onPress: () => setExpanded(expanded.size ? new Set() : new Set(scoped.map(agent => agent.id))) }] : []),
     ] : []),
-    ...(listTab ? [{ key: "export", label: "导出快照", icon: "Download", hint: "复制当前筛选下的会话与观测记录", onPress: () => void exportSnapshot() }] : []),
-    ...(sessionsTab && archivable.length ? [{ key: "archive-read", label: `归档已读完成（${archivable.length}）`, icon: "Archive",
-      hint: `只归档结果已经看过、没在运行、也没有心跳的完成会话（它的子 Agent 也要这样，归档会连带它们）；会先标出来，再点一次确认${archiveOffer.sparedForChildren ? `；另有 ${archiveOffer.sparedForChildren} 个的子 Agent 还没处理完，没有列入` : ""}`,
+    ...(listTab ? [{ key: "export", label: t("coreDashboard.exportSnapshot"), icon: "Download", hint: t("coreDashboard.copySessionsAndObservationsMatchingTheCurrent"), onPress: () => void exportSnapshot() }] : []),
+    ...(sessionsTab && archivable.length ? [{ key: "archive-read", label: t("coreDashboard.archiveCompletedAndRead", { value1: archivable.length }), icon: "Archive",
+      hint: t("coreDashboard.archivesCompletedSessionsWhoseResultsAreRead", { value1: archiveOffer.sparedForChildren ? t("coreDashboard.othersHaveSubagentsThatStillNeedAttention", { value1: archiveOffer.sparedForChildren }) : "" }),
       onPress: () => setArchiveMarks(new Set(archivable.map(agent => agent.id))) }]
       // Read sessions are waiting, but the heartbeat read (or a cut session list) cannot show they are safe: disabled, with the reason.
-      : sessionsTab && archiveOffer.withheld && archiveOffer.reason ? [{ key: "archive-read", label: "归档已读完成", icon: "Archive", disabled: true, hint: `暂不可用：${archiveOffer.reason}`, onPress: () => {} }] : []),
-    ...(sessionsTab ? [{ key: "legend", label: "状态图例", icon: "Palette", tone: "violet" as const, hint: "每种颜色和标记代表什么", onPress: () => setLegendOpen(true) }] : []),
-    ...(!archiveMode ? [{ key: "settings", label: "观测设置", icon: "Settings2", hint: "需要处理的计算方式，对这台主机上所有页面和侧栏角标生效", onPress: () => setSettingsOpen(true) }] : []),
-    { key: "refresh", label: "刷新", icon: "RefreshCw", disabled: data.isRefreshing, onPress: refresh },
+      : sessionsTab && archiveOffer.withheld && archiveOffer.reason ? [{ key: "archive-read", label: t("coreDashboard.archiveCompletedAndRead2"), icon: "Archive", disabled: true, hint: t("coreDashboard.unavailable", { value1: archiveOffer.reason }), onPress: () => {} }] : []),
+    ...(sessionsTab ? [{ key: "legend", label: t("coreDashboard.statusLegend"), icon: "Palette", tone: "violet" as const, hint: t("coreDashboard.whatEachColorAndMarkerMeans"), onPress: () => setLegendOpen(true) }] : []),
+    ...(!archiveMode ? [{ key: "settings", label: t("coreDashboard.observationSettings"), icon: "Settings2", hint: t("coreDashboard.howAttentionIsCountedAcrossAllPages"), onPress: () => setSettingsOpen(true) }] : []),
+    { key: "refresh", label: t("coreDashboard.refresh"), icon: "RefreshCw", disabled: data.isRefreshing, onPress: refresh },
   ];
   // Each view has its own colours. Phones show the unselected views as coloured icons only.
   const tabs: ViewTab<DashboardTab>[] = [
-    { value: "agents", label: "会话", icon: "MessagesSquare", colors: ["sky", "blue"], count: !compact && known ? scoped.length : undefined },
-    { value: "board", label: "看板", icon: "LayoutDashboard", colors: ["pink", "fuchsia"] },
-    { value: "tokens", label: "Token", icon: "Coins", colors: ["amber", "orange"] },
-    { value: "analytics", label: "明细", icon: "ChartColumn", colors: ["violet", "indigo"] },
-    { value: "compare", label: "横评", icon: "Swords", colors: ["cyan", "blue"] },
-    { value: "activity", label: compact ? "事件" : "事件流", icon: "Activity", colors: ["orange", "red"] },
-    { value: "insights", label: compact ? "分析" : "智能分析", icon: "Sparkles", colors: ["teal", "green"] },
+    { value: "agents", label: t("coreDashboard.sessions2"), icon: "MessagesSquare", colors: ["sky", "blue"], count: !compact && known ? scoped.length : undefined },
+    { value: "board", label: t("coreDashboard.dashboard"), icon: "LayoutDashboard", colors: ["pink", "fuchsia"] },
+    { value: "tokens", label: t("coreDashboard.tokens"), icon: "Coins", colors: ["amber", "orange"] },
+    { value: "analytics", label: t("coreDashboard.details"), icon: "ChartColumn", colors: ["violet", "indigo"] },
+    { value: "compare", label: t("coreDashboard.compare"), icon: "Swords", colors: ["cyan", "blue"] },
+    { value: "activity", label: compact ? t("coreDashboard.events") : t("coreDashboard.eventStream"), icon: "Activity", colors: ["orange", "red"] },
+    { value: "insights", label: compact ? t("coreDashboard.analysis") : t("coreDashboard.intelligentAnalysis"), icon: "Sparkles", colors: ["teal", "green"] },
   ];
   const iconTabs = compact && surfaceWidth > 0 && surfaceWidth < 560;
   const statsProps = { theme, compact, stats: stats.data, loading: stats.isPending, error: stats.error?.message, range: statsRange, onRange: setStatsRange, onRefresh: refresh };
@@ -384,38 +387,38 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     {pushDetail ? detail : <>
       {chrome ? <Toolbar theme={theme}>
         {archiveMode ? <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.small }}>{archiveSummary}</Text>
-          : <ViewTabs theme={theme} value={tab} onChange={setTab} tabs={tabs} iconOnly={iconTabs} accessibilityLabel="视图" />}
+          : <ViewTabs theme={theme} value={tab} onChange={setTab} tabs={tabs} iconOnly={iconTabs} accessibilityLabel={t("coreDashboard.view")} />}
         <Spacer />
-        {sessionsTab && !compact ? <View style={{ width: 240, flexShrink: 1 }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder="搜索任务、项目或分支" accessibilityLabel="搜索会话" /></View> : null}
-        {sessionsTab && compact ? <IconButton theme={theme} icon="Search" label="搜索" active={searching} onPress={() => { if (searching) { setQuery(""); setSearchOpen(false); } else setSearchOpen(true); }} /> : null}
+        {sessionsTab && !compact ? <View style={{ width: 240, flexShrink: 1 }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder={t("coreDashboard.searchTasksProjectsOrBranches")} accessibilityLabel={t("coreDashboard.searchSessions")} /></View> : null}
+        {sessionsTab && compact ? <IconButton theme={theme} icon="Search" label={t("coreDashboard.search")} active={searching} onPress={() => { if (searching) { setQuery(""); setSearchOpen(false); } else setSearchOpen(true); }} /> : null}
         <View accessibilityLabel={sync.label}>{sync.state === "live" ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
           <LiveDot color={hueColor(theme, "ok")} size={6} live={data.live} />
           {compact ? null : <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{sync.label}</Text>}
         </View> : <SyncStatus theme={theme} state={sync.state} label={compact ? undefined : sync.label} />}</View>
-        <IconButton theme={theme} icon="Ellipsis" label="更多操作" onPress={() => setMenuOpen(true)} />
+        <IconButton theme={theme} icon="Ellipsis" label={t("coreDashboard.moreActions")} onPress={() => setMenuOpen(true)} />
       </Toolbar> : null}
-      {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder="搜索任务、项目或分支" accessibilityLabel="搜索会话" autoFocus={!query} grow={false} /></View> : null}
+      {searching ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><SearchField theme={theme} value={query} onChangeText={setQuery} placeholder={t("coreDashboard.searchTasksProjectsOrBranches")} accessibilityLabel={t("coreDashboard.searchSessions")} autoFocus={!query} grow={false} /></View> : null}
       {sessionsTab ? <ChipBar>
         {!archiveMode ? <>
-          <StatusChip theme={theme} label="需要处理" count={known ? counts.attention : undefined} hue="warn" motion={counts.approvals ? "ping" : undefined} selected={focus === "attention"} onPress={() => openScope({ focus: "attention" })} />
-          <StatusChip theme={theme} label="执行中" count={known ? counts.running : undefined} hue="run" motion="spin" selected={status === "running"} onPress={() => openScope({ status: "running" })} />
-          <StatusChip theme={theme} label="未读" count={known ? counts.unread : undefined} hue="pink" motion={counts.unread ? "ping" : undefined} selected={readFilter === "unread" && !showSnoozed} onPress={() => openScope({ readFilter: "unread" })} />
-          <StatusChip theme={theme} label="待回复" count={known ? counts.idle : undefined} hue="violet" selected={status === "idle"} onPress={() => openScope({ status: "idle" })} />
-          {counts.snoozed > 0 ? <Chip theme={theme} label="稍后处理" count={counts.snoozed} icon="Clock3" selected={showSnoozed} onPress={() => openScope({ snoozed: true })} /> : null}
+          <StatusChip theme={theme} label={t("coreDashboard.needsAttention")} count={known ? counts.attention : undefined} hue="warn" motion={counts.approvals ? "ping" : undefined} selected={focus === "attention"} onPress={() => openScope({ focus: "attention" })} />
+          <StatusChip theme={theme} label={t("coreDashboard.running")} count={known ? counts.running : undefined} hue="run" motion="spin" selected={status === "running"} onPress={() => openScope({ status: "running" })} />
+          <StatusChip theme={theme} label={t("coreDashboard.unread")} count={known ? counts.unread : undefined} hue="pink" motion={counts.unread ? "ping" : undefined} selected={readFilter === "unread" && !showSnoozed} onPress={() => openScope({ readFilter: "unread" })} />
+          <StatusChip theme={theme} label={t("coreDashboard.awaitingReply")} count={known ? counts.idle : undefined} hue="violet" selected={status === "idle"} onPress={() => openScope({ status: "idle" })} />
+          {counts.snoozed > 0 ? <Chip theme={theme} label={t("coreDashboard.snoozed")} count={counts.snoozed} icon="Clock3" selected={showSnoozed} onPress={() => openScope({ snoozed: true })} /> : null}
         </> : null}
         <Chip theme={theme} label={projectLabel} icon="Folder" tone={project !== "all" ? hueFor(projectLabel) : undefined} selected={project !== "all"} onPress={() => setSheet("project")} />
         <Chip theme={theme} label={rangeLabels[range]} icon="Calendar" selected={range !== "7d"} onPress={() => setSheet("range")} />
-        <Chip theme={theme} label="筛选" icon="SlidersHorizontal" count={applied.length || undefined} selected={applied.length > 0} onPress={() => setSheet("filters")} />
-        {!archiveMode ? <Chip theme={theme} label="图例" icon="Palette" tone="violet" onPress={() => setLegendOpen(true)} /> : null}
+        <Chip theme={theme} label={t("coreDashboard.filters")} icon="SlidersHorizontal" count={applied.length || undefined} selected={applied.length > 0} onPress={() => setSheet("filters")} />
+        {!archiveMode ? <Chip theme={theme} label={t("coreDashboard.legend")} icon="Palette" tone="violet" onPress={() => setLegendOpen(true)} /> : null}
         {applied.map(item => <Chip key={item.key} theme={theme} label={item.label} selected onRemove={item.clear} />)}
         {savedViews.map(saved => <Chip key={saved.id} theme={theme} label={saved.name} icon="Bookmark" onPress={() => applyView(saved.view)} />)}
       </ChipBar> : null}
       {banners.length ? <View style={{ gap: space.sm, paddingHorizontal: space.md, paddingTop: sessionsTab ? 0 : space.sm, paddingBottom: space.sm }}>{banners}</View> : null}
       {sessionsTab && archiveMarks ? <View accessibilityRole="alert" style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm, marginHorizontal: space.md, marginBottom: space.sm, padding: space.md,
         borderRadius: radius.lg, borderWidth: hairline, borderColor: tint(hueColor(theme, "red"), 0.5), backgroundColor: tint(hueColor(theme, "red"), tintAlpha(theme)) }}>
-        <Text style={{ flexGrow: 1, flexShrink: 1, minWidth: 180, color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>将归档列表里标红的 {archiveMarks.size} 个已读完成会话。确认时会再查一次心跳，有心跳的会留下；归档后可在「已归档会话」里恢复。</Text>
-        <Button theme={theme} size="sm" label="取消" disabled={archivingMarked} onPress={() => setArchiveMarks(null)} />
-        <Button theme={theme} size="sm" variant="danger" icon="Archive" label={`确认归档 ${archiveMarks.size} 个`} busy={archivingMarked} onPress={() => void archiveMarked()} />
+        <Text style={{ flexGrow: 1, flexShrink: 1, minWidth: 180, color: colors.foreground, fontSize: fontSize.small, lineHeight: 20 }}>{t("coreDashboard.archivesTheCompletedAndReadSessionsMarked", { value1: archiveMarks.size })}</Text>
+        <Button theme={theme} size="sm" label={t("coreDashboard.cancel")} disabled={archivingMarked} onPress={() => setArchiveMarks(null)} />
+        <Button theme={theme} size="sm" variant="danger" icon="Archive" label={t("coreDashboard.confirmArchive", { value1: archiveMarks.size })} busy={archivingMarked} onPress={() => void archiveMarked()} />
       </View> : null}
       {sessionsTab ? <SplitView theme={theme} compact={compact} showDetail={false} list={sessionList} detail={detail} />
         : tab === "activity" ? <>
@@ -432,23 +435,25 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
           live={tokenLive.data} liveError={tokenLive.error?.message} liveWindow={liveWindow} onLiveWindow={setLiveWindow} onOpenAgent={openFromView} />
         : <InsightsHub theme={theme} compact={compact} agents={agents} onSelectAgent={openFromView} onOpenEvidence={target => { setEvidenceTarget(target); openFromView(target.agentId); }} onPush={setHubPushed} />}
     </>}
-    <ActionMenu theme={theme} title="更多操作" open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
-    <Sheet title="状态图例" open={legendOpen} onClose={() => setLegendOpen(false)}><PhaseLegend theme={theme} /></Sheet>
-    <Sheet title="观测设置" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+    <ActionMenu theme={theme} title={t("coreDashboard.moreActions")} open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />
+    <Sheet title={t("coreDashboard.statusLegend")} open={legendOpen} onClose={() => setLegendOpen(false)}><PhaseLegend theme={theme} /></Sheet>
+    <Sheet title={t("coreDashboard.observationSettings")} open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+      {/* Catalog migration preserves: 子 Agent 出错、撞额度、空轮或没收尾、等审批或提问时照常计入 */}
+      <LanguageSettings />
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
         <View style={{ flex: 1, gap: 2 }}>
-          <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>子 Agent 完成也计入「需要处理」</Text>
-          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>默认不计入：上级 Agent 已经拿到子 Agent 的结果。子 Agent 出错、撞额度、空轮或没收尾、等审批或提问时照常计入；它们的未读仍显示在上级那一行。</Text>
+          <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{t("coreDashboard.countCompletedSubagentsAsNeedsAttention")}</Text>
+          <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("coreDashboard.offByDefaultTheParentAgentAlready")}</Text>
         </View>
-        <Switch theme={theme} label="子 Agent 完成也计入需要处理" value={settings.childCompletions} disabled={!preferences.ready}
-          onChange={value => { void preferences.mutate({ settings: { childCompletions: value } }).catch(() => toast.error("设置没有保存，请重试")); }} />
+        <Switch theme={theme} label={t("coreDashboard.countCompletedSubagentsAsNeedingAttention")} value={settings.childCompletions} disabled={!preferences.ready}
+          onChange={value => { void preferences.mutate({ settings: { childCompletions: value } }).catch(() => toast.error(t("coreDashboard.settingsWereNotSavedTryAgain"))); }} />
       </View>
     </Sheet>
     <ProjectSheet theme={theme} open={sheet === "project"} onClose={() => setSheet(null)} projects={projects} total={ranged.length} value={project} onChange={value => { setProject(value); setWorkspace(workspaceDefault); setCheckout("all"); }} />
     <RangeSheet theme={theme} open={sheet === "range"} onClose={() => setSheet(null)} value={range} onChange={setRange} />
     <FilterSheet theme={theme} open={sheet === "filters"} onClose={() => setSheet(null)} archiveMode={archiveMode} state={filterState} checkouts={checkouts} workspaces={workspaces} providers={providers} showWorkspace={!workspaceId}
       onChange={changeFilters} onReset={resetFilters} savedViews={savedViews} canSave={preferences.ready}
-      onSaveView={name => preferences.mutate({ saveView: { name, view: withScroll(currentView) } }).then(() => { toast.show("已保存视图", { variant: "success" }); })}
+      onSaveView={name => preferences.mutate({ saveView: { name, view: withScroll(currentView) } }).then(() => { toast.show(t("coreDashboard.viewSaved"), { variant: "success" }); })}
       onApplyView={saved => applyView(saved.view)} onDeleteView={saved => { void preferences.mutate({ deleteSavedViewId: saved.id }).catch(() => {}); }} />
   </View>;
 }

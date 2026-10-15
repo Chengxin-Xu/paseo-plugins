@@ -1,3 +1,6 @@
+import { followText } from "./shared/i18n";
+import type { ChunkExtras } from "./client/lazy-chunk";
+import { LanguageScreen } from "./client/language-screen";
 import type { ComponentType } from "react";
 import type { PluginAgentPanelProps, PluginClientContext, PluginScreenProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { ArchivedSurface, DashboardSurface, WorkspaceDashboard } from "./client/dashboard";
@@ -10,7 +13,8 @@ import { AttentionStoresContext } from "./client/attention-context";
 // Paseo freezes exports before running the module body; this declaration must be hoisted.
 export default function chunk() { return { api: 1, createSurfaces }; }
 
-function createSurfaces(client: PluginClientContext): Record<string, ComponentType<any>> {
+function createSurfaces(client: PluginClientContext, extras?: ChunkExtras): Record<string, ComponentType<any>> {
+  followText(extras?.text);
   const screens = typeof client.addScreen === "function";
   const open = (screenId: string, params?: Record<string, string>) => { if (screens) client.openScreen(params ? { screenId, params } : { screenId }); else client.openSurface(screenId); };
   // The schedule writer and reader remain in the same chunk, including the older-host fallback.
@@ -21,5 +25,5 @@ function createSurfaces(client: PluginClientContext): Record<string, ComponentTy
   const Inspector = (props: PluginAgentPanelProps) => <AgentInspector {...props} onOpenSchedules={openSchedules} onOpenOverview={agentId => open("observatory", screens ? { agent: agentId, t: Date.now().toString(36) } : undefined)} />;
   // Each surface provides the stub's 需要处理 stores (its `attentionStores` prop) to its subtree: a detail's 知道了 re-reads the badge.
   const provide = (Surface: ComponentType<any>): ComponentType<any> => (props: any) => <AttentionStoresContext.Provider value={props.attentionStores ?? null}><Surface {...props} /></AttentionStoresContext.Provider>;
-  return { observatory: provide(Overview), archives: provide(Archives), "schedule-runs": provide(ScheduleSurface), "workspace-observatory": provide(Workspace), "agent-inspector": provide(Inspector), "attention-popover": AttentionPopover };
+  return { observatory: provide(Overview), archives: provide(Archives), "schedule-runs": provide(ScheduleSurface), "workspace-observatory": provide(Workspace), "agent-inspector": provide(Inspector), "attention-popover": AttentionPopover, language: LanguageScreen };
 }

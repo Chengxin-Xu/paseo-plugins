@@ -1,3 +1,5 @@
+import { createLocaleService } from "./server/i18n-server";
+import { BUILTIN_CATALOGS } from "./server/locales";
 import { registerClientChunks } from "./server/ui-chunk";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
@@ -14,6 +16,7 @@ import { DeferredSend } from "./server/deferred-send";
 import { daemonHome, readSendCapabilities } from "./server/steerable-providers";
 
 export default function contribute(server: PluginServerContext) {
+  const locales = createLocaleService(server, { pluginId: "project-notes", builtins: BUILTIN_CATALOGS });
   const store = new BoardStore();
   const projects = new ProjectDirectory();
   const dashboard = new DashboardService(store, projects);
@@ -46,5 +49,5 @@ export default function contribute(server: PluginServerContext) {
   handle(readDashboardRpc, (input, { paseo }) => dashboard.read(paseo, input.revision, input.refreshProjectIds));
   handle(readHistoryRpc, input => store.readHistory(input.projectId, input.itemId));
   handle(writeBoardRpc, async input => store.write(input));
-  return async () => { deferred.stop(); await launches.stop(); projects.stop(); };
+  return async () => { locales.dispose(); deferred.stop(); await launches.stop(); projects.stop(); };
 }

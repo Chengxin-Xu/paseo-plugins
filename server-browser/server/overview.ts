@@ -1,3 +1,5 @@
+import { translator } from '../shared/i18n';
+import { t } from '../shared/text';
 import { readdir } from 'node:fs/promises';
 import type { PluginHandlerContext } from '@getpaseo/plugin/server';
 import type { BrowserManager } from './browser-manager';
@@ -10,6 +12,7 @@ type Manager = Pick<BrowserManager,'dataRoot'|'state'>;
 type Overview = {items:BrowserOverviewItem[];checkedAt:number;revision:string};
 
 export function overviewPageUrl(value:string):string {
+  // i18n-ignore: legacy protocol sentinel, translated by the client; never used as identity.
   try { const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.origin+url.pathname:value==='about:blank'?'本地体验页':''; }
   catch { return ''; }
 }
@@ -24,7 +27,7 @@ export function overviewRevision(items:readonly BrowserOverviewItem[]):string {
 }
 async function bounded<T>(operation:Promise<T>,timeoutMs:number):Promise<T>{
   let timer:ReturnType<typeof setTimeout>|undefined;
-  try{return await Promise.race([operation,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error('状态读取超时')),timeoutMs);})]);}
+  try{return await Promise.race([operation,new Promise<T>((_,reject)=>{timer=setTimeout(()=>reject(new Error(t('serverError.stateTimeout'))),timeoutMs);})]);}
   finally{if(timer)clearTimeout(timer);}
 }
 
@@ -33,9 +36,11 @@ export class BrowserOverviewService {
   private pending?:Promise<Overview>;
   private previous?:Overview;
   private generation=0;
+  private text=translator();
   constructor(private manager:Manager,private workspaces:(paseo:Paseo)=>Promise<PaseoWorkspace[]>=listBrowserWorkspaces,private agents=new BrowserAgentDirectory()){}
   invalidate():void{this.generation++;this.previous=undefined;this.pending=undefined;}
   async list(paseo:Paseo):Promise<Overview>{
+    const text=translator();if(this.text!==text){this.text=text;this.invalidate();}
     if(this.pending)return this.pending;
     if(this.previous&&Date.now()-this.previous.checkedAt<800)return this.previous;
     const generation=this.generation,operation=this.read(paseo).then(result=>{if(generation===this.generation)this.previous=result;return result;});this.pending=operation;
@@ -54,7 +59,7 @@ export class BrowserOverviewService {
         const workspace:BrowserWorkspace={id:source.id,title:source.title??source.name??source.projectDisplayName,projectId:source.projectId??null,projectTitle:source.projectDisplayName};
         let session:BrowserSession;
         try{session=overviewSession(await bounded(this.manager.state(workspace.id),3500));}
-        catch{session={workspaceId:workspace.id,status:'error',title:'状态暂不可用',url:'',mode:'manual',width:1120,height:720,tabs:[],agentId:null,error:'此工作区浏览器状态暂时无法读取，请稍后刷新。',agentBusy:false,activity:[]};}
+        catch{session={workspaceId:workspace.id,status:'error',title:t('serverText.statusUnavailable'),url:'',mode:'manual',width:1120,height:720,tabs:[],agentId:null,error:t('serverError.workspaceStateUnavailable'),agentBusy:false,activity:[]};}
         const linked=await this.agents.inspect(paseo,workspace.id,session.agentId);
         session={...session,agentAvailability:linked.availability};
         items.push({workspace,session,agent:linked.agent,observedAt:Date.now()});

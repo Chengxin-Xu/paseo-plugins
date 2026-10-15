@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import * as host from "@getpaseo/plugin/client";
 import { Linking } from "react-native";
 
@@ -11,7 +12,7 @@ export function isHttpUrl(url: string): boolean {
   try { const protocol = new URL(url).protocol; return protocol === "http:" || protocol === "https:"; } catch { return false; }
 }
 export async function openExternalUrl(url: string): Promise<void> {
-  if (!isHttpUrl(url)) throw new Error("只能打开 http(s) 链接");
+  if (!isHttpUrl(url)) throw new Error(t("coreOpenUrl.onlyHttpSLinksCanBeOpened"));
   const open = (host as { openExternalUrl?: Opener }).openExternalUrl;
   if (typeof open === "function") return open(url);
   await Linking.openURL(url);

@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { applyTelemetry, timestamp, type AgentBackground, type AgentRecord } from "./model";
@@ -32,7 +33,7 @@ export const getBackground = defineRpc({
 export interface BackgroundState { available: boolean; agents: BackgroundAgent[]; revision: string }
 export function mergeBackground(previous: BackgroundState | undefined, response: BackgroundResponse): BackgroundState {
   if (response.mode === "full") return { available: response.available, agents: response.agents, revision: response.revision };
-  if (!previous) throw new Error("本地后台任务缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedBackground.m001"));
   return previous;
 }
 

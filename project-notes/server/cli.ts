@@ -11,16 +11,19 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { open, realpath, readdir, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
-  BOARD_FILE_LIMIT_BYTES, BODY_MAX_LENGTH, INBOX_DESCRIPTION, INBOX_PROJECT_ID, OVERVIEW_LIMIT_BYTES, fieldsSchema, kindSchema, statusSchema,
+  BOARD_FILE_LIMIT_BYTES, BODY_MAX_LENGTH, getInboxDescription, INBOX_PROJECT_ID, OVERVIEW_LIMIT_BYTES, fieldsSchema, kindSchema, statusSchema,
   type BoardItem, type BoardProject, type NoteFields, type WriteBoardInput,
 } from "../shared/schema";
 import { BoardStore, defaultStorageRoot, paseoHome } from "./store";
+import { t } from "../shared/text";
+import { assembleCatalog, bindTranslator, checkCatalog, createTranslator, joinList, normalizeLanguage, resolveLanguage, type Catalog } from "../shared/i18n";
+import { BUILTIN_CATALOGS } from "./locales";
 
 export class CliError extends Error { constructor(message: string, readonly exitCode = 2) { super(message); } }
 
@@ -39,7 +42,7 @@ export interface CliDeps {
 
 export interface BoardWorkspace { projectId: string; cwd: string }
 
-const INBOX: BoardProject = { id: INBOX_PROJECT_ID, name: "随手记", path: "" };
+const inbox = (): BoardProject => ({ id: INBOX_PROJECT_ID, name: t("serverStore.inbox"), path: "" });
 /** UTF-8 takes at most 3 bytes per UTF-16 unit, so a larger body file or stdin can never pass the body limit. */
 const MAX_BODY_BYTES = BODY_MAX_LENGTH * 3;
 /** The same bound as the `paseo project ls` output that projects.json stands in for. */
@@ -56,11 +59,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     if (arg === "--") { positionals.push(...argv.slice(i + 1)); break; }
     if (!arg.startsWith("--")) { positionals.push(arg); continue; }
     const eq = arg.indexOf("="); const key = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
-    if (FLAG_OPTIONS.has(key)) { if (eq >= 0) throw new CliError(`--${key} 不接受值。`); flags.add(key); continue; }
-    if (!VALUE_OPTIONS.has(key)) throw new CliError(`未知选项 --${key}。运行 --help 查看用法。`);
+    if (FLAG_OPTIONS.has(key)) { if (eq >= 0) throw new CliError(t("cli.flagNoValue", { key })); flags.add(key); continue; }
+    if (!VALUE_OPTIONS.has(key)) throw new CliError(t("cli.unknownOption", { key }));
     let value: string | undefined;
     if (eq >= 0) value = arg.slice(eq + 1);
-    else { value = argv[i + 1]; if (value === undefined || (value.startsWith("--") && value !== "-")) throw new CliError(`--${key} 需要一个值。`); i++; }
+    else { value = argv[i + 1]; if (value === undefined || (value.startsWith("--") && value !== "-")) throw new CliError(t("cli.optionNeedsValue", { key })); i++; }
     values.set(key, value);
   }
   const [command = "help", ...rest] = positionals;
@@ -78,9 +81,9 @@ export function resolveProject(ref: string | undefined, projects: readonly Board
     const closest = matches[0];
     if (closest) {
       const equallyClose = matches.filter(workspace => path.resolve(workspace.cwd).length === path.resolve(closest.cwd).length);
-      if (new Set(equallyClose.map(workspace => workspace.projectId)).size > 1) throw new CliError(`目录 ${target} 对应多个工作区项目，请用 --project 指定项目 ID。`);
+      if (new Set(equallyClose.map(workspace => workspace.projectId)).size > 1) throw new CliError(t("cli.ambiguousWorkspace", { target }));
       const project = projects.find(project => project.id === closest.projectId);
-      if (!project) throw new CliError(`目录 ${target} 的工作区所属项目已不可用，请用 --project 指定项目。`);
+      if (!project) throw new CliError(t("cli.workspaceProjectMissing", { target }));
       return project;
     }
     let best: BoardProject | null = null;
@@ -94,20 +97,21 @@ export function resolveProject(ref: string | undefined, projects: readonly Board
   if (ref === undefined || ref.trim() === "") {
     const found = byPath(cwd);
     if (found) return found;
-    throw new CliError(`当前目录 ${cwd} 不属于任何 Paseo 项目。请用 --project 指定（inbox、项目 ID、路径或名称），运行 projects 查看可选项。`);
+    throw new CliError(t("cli.cwdNoProject", { cwd }));
   }
   const wanted = ref.trim();
-  if (wanted === "inbox" || wanted === INBOX.name || wanted === INBOX_PROJECT_ID) return INBOX;
+  // i18n-ignore: the original Chinese CLI alias remains accepted as input for existing scripts.
+  if (wanted === "inbox" || wanted === "随手记" || wanted === INBOX_PROJECT_ID) return inbox();
   const byId = projects.find(p => p.id === wanted); if (byId) return byId;
-  if (path.isAbsolute(wanted)) { const found = byPath(wanted); if (found) return found; throw new CliError(`路径 ${wanted} 不属于任何 Paseo 项目。`); }
+  if (path.isAbsolute(wanted)) { const found = byPath(wanted); if (found) return found; throw new CliError(t("cli.pathNoProject", { wanted })); }
   const lower = wanted.toLowerCase();
   const exact = projects.filter(p => p.name.toLowerCase() === lower);
   if (exact.length === 1) return exact[0]!;
-  if (exact.length > 1) throw new CliError(`名称「${wanted}」对应多个项目，请改用项目 ID：${exact.map(p => `${p.id} (${p.path})`).join("、")}`);
+  if (exact.length > 1) throw new CliError(t("cli.duplicateProjectName", { wanted, projects: joinList(exact.map(p => t("cli.projectReference", { id: p.id, path: p.path }))) }));
   const partial = projects.filter(p => p.name.toLowerCase().includes(lower));
   if (partial.length === 1) return partial[0]!;
-  if (partial.length > 1) throw new CliError(`名称「${wanted}」匹配多个项目：${partial.map(p => p.name).join("、")}。请写完整名称或项目 ID。`);
-  throw new CliError(`找不到项目「${wanted}」。可用项目：inbox、${projects.map(p => p.name).join("、") || "（无）"}`);
+  if (partial.length > 1) throw new CliError(t("cli.ambiguousProjectName", { wanted, projects: joinList(partial.map(p => p.name)) }));
+  throw new CliError(t("cli.projectNotFound", { wanted, projects: joinList(["inbox", joinList(projects.map(p => p.name)) || t("cli.none")]) }));
 }
 
 async function resolveCliProject(ref: string | undefined, projects: readonly BoardProject[], deps: CliDeps, cwd = deps.cwd): Promise<BoardProject> {
@@ -127,34 +131,7 @@ async function resolveCliProject(ref: string | undefined, projects: readonly Boa
   return projects.find(candidate => candidate.id === project.id)!;
 }
 
-export const USAGE = `拾页 · 项目手记 命令行
-
-用法：node bin/notes.mjs <命令> [选项]
-
-命令：
-  projects                       列出可归属的项目（含 inbox 随手记）
-  list [--project <ref>] [--kind task|prompt|idea] [--status todo|doing|done] [--all] [--trash] [--limit N]
-                                 列出手记；默认排除已完成任务与回收站，--all 包含已完成
-  add --title <标题> [--project <ref>] [--kind task|prompt|idea] [--body <正文> | --body-file <路径|->]
-      [--status todo|doing|done] [--high] [--pinned] [--request-id <id>]
-                                 新增一条；省略 --project 时按当前目录（或 PASEO_AGENT_CWD）归属
-  show <itemId> [--history]      显示一条完整内容；--history 单独读取最近 10 版修改快照
-  update <itemId> [--title] [--body|--body-file] [--kind] [--status] [--high|--normal] [--pinned|--no-pinned]
-  done <itemId>                  标记任务完成
-  delete <itemId> / restore <itemId>
-                                 移入 / 移出回收站
-
-通用：--json 机器可读输出；--project 接受 inbox、prj_… ID、绝对路径或项目名称。
-正文最多 32000 字：--body-file 只读普通文件，- 读标准输入，都不超过 96000 字节。时间按 UTC 显示。
-数据目录：$PASEO_HOME/plugin-data/project-notes/boards（与插件界面同一份文件）。
-
-示例：
-  node bin/notes.mjs add --project inbox --title "待整理的任务" --body-file - <<'EOF'
-  ...多行设计说明...
-  EOF
-  node bin/notes.mjs list --project inbox --kind task
-  node bin/notes.mjs done 3f1c…
-`;
+export const usage = () => t("cli.usage");
 
 /**
  * Human-readable output escapes control characters that come from notes, project names or paths: ESC sequences could
@@ -168,14 +145,17 @@ export function terminalSafe(text: string): string {
 /** Times print in UTC and say so: the CLI runs in agent shells whose time zone says nothing about the reader's. */
 function formatTime(value: string): string {
   const time = Date.parse(value);
-  return Number.isFinite(time) ? `${new Date(time).toISOString().slice(0, 16).replace("T", " ")} UTC` : value;
+  return Number.isFinite(time) ? t("cli.utcTime", { time: new Date(time).toISOString().slice(0, 16).replace("T", " ") }) : value;
 }
+
+const kindLabel = (kind: NoteFields["kind"]) => ({ task: t("cli.kindTask"), prompt: t("cli.kindPrompt"), idea: t("cli.kindIdea") })[kind];
+const statusLabel = (status: NoteFields["status"]) => ({ todo: t("cli.statusTodo"), doing: t("cli.statusDoing"), done: t("cli.statusDone") })[status];
 
 function formatItem(item: BoardItem, projectName: string): string {
   const marks = `${item.pinned ? "📌" : " "}${item.priority === "high" ? "!" : " "}`;
-  const status = item.kind === "task" ? item.status.padEnd(5) : "     ";
-  const trash = item.deletedAt ? " [回收站]" : "";
-  return `${item.kind.padEnd(6)} ${status} ${marks} ${item.id}  ${item.title}  · ${projectName}${trash}  (rev ${item.revision}, ${formatTime(item.updatedAt)})`;
+  const status = item.kind === "task" ? statusLabel(item.status).padEnd(5) : "     ";
+  const trash = item.deletedAt ? t("cli.trash") : "";
+  return t("cli.item", { kind: kindLabel(item.kind).padEnd(6), status, marks, id: item.id, title: item.title, project: projectName, trash, revision: item.revision, time: formatTime(item.updatedAt) });
 }
 
 function sortItems(items: BoardItem[]): BoardItem[] {
@@ -188,7 +168,7 @@ export async function readLimited(chunks: AsyncIterable<Buffer | string>, maxByt
   for await (const chunk of chunks) {
     const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
     total += buffer.length;
-    if (total > maxBytes) throw new CliError(`${label}过大：超过 ${maxBytes} 字节的上限。`);
+    if (total > maxBytes) throw new CliError(t("cli.streamTooLarge", { label, maxBytes }));
     buffers.push(buffer);
   }
   return Buffer.concat(buffers).toString("utf8");
@@ -207,25 +187,25 @@ async function* fileChunks(handle: FileHandle): AsyncGenerator<Buffer> {
  */
 async function readFileLimited(file: string, maxBytes: number, label: string, hint = ""): Promise<string> {
   const info = await stat(file);
-  if (!info.isFile()) throw new CliError(`${label}不是普通文件：${file}。${hint}`);
-  if (info.size > maxBytes) throw new CliError(`${label}过大：${file} 有 ${info.size} 字节，上限 ${maxBytes} 字节。`);
+  if (!info.isFile()) throw new CliError(t("cli.notRegularFile", { label, file, hint }));
+  if (info.size > maxBytes) throw new CliError(t("cli.fileTooLarge", { label, file, bytes: info.size, maxBytes }));
   const handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    if (!(await handle.stat()).isFile()) throw new CliError(`${label}不是普通文件：${file}。${hint}`);
+    if (!(await handle.stat()).isFile()) throw new CliError(t("cli.notRegularFile", { label, file, hint }));
     return await readLimited(fileChunks(handle), maxBytes, `${label.trim()} ${file} `);
   } finally { await handle.close(); }
 }
 
 async function readBody(args: ParsedArgs, deps: CliDeps): Promise<string | undefined> {
-  if (args.values.has("body") && args.values.has("body-file")) throw new CliError("--body 与 --body-file 只能选一个。");
+  if (args.values.has("body") && args.values.has("body-file")) throw new CliError(t("cli.bodyOptionsExclusive"));
   if (args.values.has("body")) return args.values.get("body")!;
   const file = args.values.get("body-file");
   if (file === undefined) return undefined;
   if (file === "-" || file === "/dev/stdin") return deps.readStdin(MAX_BODY_BYTES);
-  return readFileLimited(path.resolve(deps.cwd, file), MAX_BODY_BYTES, "正文文件", "要从管道读取正文请用 --body-file -。");
+  return readFileLimited(path.resolve(deps.cwd, file), MAX_BODY_BYTES, t("cli.bodyFile"), t("cli.stdinHint"));
 }
 
-const megabytes = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
+const megabytes = (bytes: number) => t("cli.megabytes", { count: Math.round(bytes / (1024 * 1024)) });
 /** Readable boards plus, by project, the ones left out of the overview for their size (a single board still reads with --project). */
 async function readEveryBoard(deps: CliDeps, projects: readonly BoardProject[]) {
   const { entries, unavailable } = await deps.store.readEntries();
@@ -238,22 +218,22 @@ async function readEveryBoard(deps: CliDeps, projects: readonly BoardProject[]) 
 type Unavailable = Awaited<ReturnType<typeof readEveryBoard>>["unavailable"];
 function describeUnavailable(unavailable: Unavailable, nameOf: (projectId: string) => string): string {
   const each = unavailable.map(board => {
-    const who = board.projectId ? `「${nameOf(board.projectId)}」` : "一个已移除的项目";
-    return board.reason === "file" ? `${who}（${megabytes(board.bytes)}，超过单个项目 ${megabytes(BOARD_FILE_LIMIT_BYTES)} 的上限）`
-      : `${who}（${megabytes(board.bytes)}，全部手记合计超过 ${megabytes(OVERVIEW_LIMIT_BYTES)}，可用 --project 单独查看）`;
+    const who = board.projectId ? t("cli.projectQuoted", { name: nameOf(board.projectId) }) : t("cli.removedProject");
+    return board.reason === "file" ? t("cli.unavailableFile", { project: who, size: megabytes(board.bytes), limit: megabytes(BOARD_FILE_LIMIT_BYTES) })
+      : t("cli.unavailableTotal", { project: who, size: megabytes(board.bytes), limit: megabytes(OVERVIEW_LIMIT_BYTES) });
   });
-  return `另有 ${unavailable.length} 个项目的手记没有读取：${each.join("、")}。`;
+  return t("cli.unavailableBoards", { count: unavailable.length, projects: joinList(each) });
 }
 
-async function projectsWithInbox(deps: CliDeps): Promise<BoardProject[]> { return [INBOX, ...(await deps.loadProjects())]; }
+async function projectsWithInbox(deps: CliDeps): Promise<BoardProject[]> { return [inbox(), ...(await deps.loadProjects())]; }
 
 async function locateItem(id: string, args: ParsedArgs, deps: CliDeps, projects: BoardProject[]): Promise<{ item: BoardItem; project: BoardProject }> {
-  if (!z.string().uuid().safeParse(id).success) throw new CliError(`「${id}」不是有效的记录 ID。`);
-  const nameOf = (projectId: string) => projects.find(p => p.id === projectId) ?? { id: projectId, name: `历史项目 · ${projectId.slice(-8)}`, path: "" };
+  if (!z.string().uuid().safeParse(id).success) throw new CliError(t("cli.invalidNoteId", { id }));
+  const nameOf = (projectId: string) => projects.find(p => p.id === projectId) ?? { id: projectId, name: t("serverStore.historicalProject", { id: projectId.slice(-8) }), path: "" };
   if (args.values.has("project")) {
     const project = await resolveCliProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps);
     const item = (await deps.store.read(project.id)).items.find(x => x.id === id);
-    if (!item) throw new CliError(`项目「${project.name}」里没有记录 ${id}。`);
+    if (!item) throw new CliError(t("cli.noteMissingInProject", { project: project.name, id }));
     return { item, project };
   }
   const { boards, unavailable } = await readEveryBoard(deps, projects);
@@ -261,28 +241,28 @@ async function locateItem(id: string, args: ParsedArgs, deps: CliDeps, projects:
     const item = board.items.find(x => x.id === id);
     if (item) return { item, project: nameOf(board.projectId) };
   }
-  throw new CliError(`没有找到记录 ${id}。${unavailable.length ? describeUnavailable(unavailable, projectId => nameOf(projectId).name) + "记录在其中时请用 --project 指定项目。" : ""}`);
+  throw new CliError(t("cli.noteNotFound", { id, hint: unavailable.length ? t("cli.noteInUnavailable", { details: describeUnavailable(unavailable, projectId => nameOf(projectId).name) }) : "" }));
 }
 
 function describeZodError(error: z.ZodError): string {
-  return error.issues.map(issue => `${issue.path.join(".") || "输入"}: ${issue.message}`).join("；");
+  return error.issues.map(issue => t("cli.validationIssue", { field: issue.path.join(".") || t("cli.input"), message: issue.message })).join(t("cli.errorSeparator"));
 }
 
 export async function runCli(argv: readonly string[], deps: CliDeps): Promise<number> {
   const args = parseArgs(argv);
   const json = args.flags.has("json");
   const emit = (human: string, data: unknown) => deps.stdout(json ? JSON.stringify(data, null, 2) + "\n" : terminalSafe(human.endsWith("\n") ? human : human + "\n"));
-  if (args.command === "help" || args.flags.has("help")) { deps.stdout(USAGE); return 0; }
+  if (args.command === "help" || args.flags.has("help")) { deps.stdout(usage()); return 0; }
 
   if (args.command === "projects") {
     const projects = await projectsWithInbox(deps);
-    emit(projects.map(p => `${p.id}\t${p.name}\t${p.path || `（${INBOX_DESCRIPTION}）`}`).join("\n"), { projects });
+    emit(projects.map(p => `${p.id}\t${p.name}\t${p.path || t("cli.inboxPath", { description: getInboxDescription() })}`).join("\n"), { projects });
     return 0;
   }
 
   if (args.command === "list") {
     const projects = await projectsWithInbox(deps);
-    const nameOf = (projectId: string) => projects.find(p => p.id === projectId)?.name ?? `历史项目 · ${projectId.slice(-8)}`;
+    const nameOf = (projectId: string) => projects.find(p => p.id === projectId)?.name ?? t("serverStore.historicalProject", { id: projectId.slice(-8) });
     const { boards, unavailable } = args.values.has("project")
       ? { boards: [await deps.store.read((await resolveCliProject(args.values.get("project"), projects.filter(p => p.id !== INBOX_PROJECT_ID), deps)).id)], unavailable: [] as Unavailable }
       : await readEveryBoard(deps, projects);
@@ -295,8 +275,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     const limit = args.values.has("limit") ? z.coerce.number().int().positive().parse(args.values.get("limit")) : undefined;
     const total = items.length; if (limit) items = items.slice(0, limit);
     const lines = items.map(item => formatItem(item, nameOf(item.projectId)));
-    if (limit && total > items.length) lines.push(`… 共 ${total} 条，仅显示前 ${items.length} 条`);
-    if (!lines.length) lines.push("（没有匹配的手记）");
+    if (limit && total > items.length) lines.push(t("cli.limited", { total, count: items.length }));
+    if (!lines.length) lines.push(t("cli.empty"));
     if (unavailable.length) lines.push(describeUnavailable(unavailable, nameOf));
     emit(lines.join("\n"), {
       total, items: items.map(item => ({ ...item, projectName: nameOf(item.projectId) })),
@@ -308,7 +288,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
   if (args.command === "add") {
     const projects = await deps.loadProjects();
     const project = await resolveCliProject(args.values.get("project"), projects, deps, deps.env.PASEO_AGENT_CWD ?? deps.cwd);
-    if (!args.values.has("title")) throw new CliError("add 需要 --title。");
+    if (!args.values.has("title")) throw new CliError(t("cli.titleRequired"));
     const fields: NoteFields = fieldsSchema.parse({
       kind: args.values.get("kind") ?? "task",
       title: args.values.get("title"),
@@ -319,20 +299,20 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     });
     const requestId = args.values.get("request-id") ?? `cli-${randomUUID()}`;
     const result = await deps.store.write({ projectId: project.id, requestId, operation: { type: "create", fields } });
-    emit(`${result.replayed ? "已存在（幂等重放）" : "已记录"} ${fields.kind}「${fields.title}」→ 项目「${project.name}」\nid=${result.itemId}`,
+    emit(t(result.replayed ? "cli.createdReplay" : "cli.created", { kind: kindLabel(fields.kind), title: fields.title, project: project.name, id: result.itemId }),
       { itemId: result.itemId, replayed: result.replayed, projectId: project.id, projectName: project.name, requestId });
     return 0;
   }
 
   if (["show", "update", "done", "delete", "restore"].includes(args.command)) {
-    const id = args.positionals[0]; if (!id) throw new CliError(`${args.command} 需要记录 ID。`);
+    const id = args.positionals[0]; if (!id) throw new CliError(t("cli.idRequired", { command: args.command }));
     const projects = await projectsWithInbox(deps);
     const { item, project } = await locateItem(id, args, deps, projects);
     if (args.command === "show") {
       const loaded = args.flags.has("history") ? await deps.store.readHistory(item.projectId, item.id) : undefined;
       const history = loaded?.versions;
-      const warning = loaded?.missing ? `\n\n有 ${loaded.missingCount} 个修改快照缺失。请从备份恢复，或在手记详情确认「放弃缺失的快照并继续」；当前正文仍保留。` : "";
-      emit(`${formatItem(item, project.name)}\n${item.body ? "\n" + item.body : "（无正文）"}${history ? "\n\n修改快照\n" + history.map(version => `第 ${version.revision} 版 · ${version.title}\n${version.body}`).join("\n\n") : ""}${warning}`, { ...item, projectName: project.name, ...(loaded ? { history: loaded.versions, historyMissing: loaded.missing, historyMissingCount: loaded.missingCount } : {}) });
+      const warning = loaded?.missing ? t("cli.missingSnapshots", { count: loaded.missingCount }) : "";
+      emit(`${formatItem(item, project.name)}\n${item.body ? "\n" + item.body : t("cli.noBody")}${history ? t("cli.snapshots", { snapshots: history.map(version => t("cli.snapshot", { revision: version.revision, title: version.title, body: version.body })).join("\n\n") }) : ""}${warning}`, { ...item, projectName: project.name, ...(loaded ? { history: loaded.versions, historyMissing: loaded.missing, historyMissingCount: loaded.missingCount } : {}) });
       return 0;
     }
     const requestId = args.values.get("request-id") ?? `cli-${randomUUID()}`;
@@ -349,16 +329,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       if (args.flags.has("high")) partial.priority = "high"; else if (args.flags.has("normal")) partial.priority = "normal";
       else if (args.values.has("priority")) partial.priority = z.enum(["normal", "high"]).parse(args.values.get("priority"));
       if (args.flags.has("pinned")) partial.pinned = true; else if (args.flags.has("no-pinned")) partial.pinned = false;
-      if (Object.keys(partial).length === 0) throw new CliError("update 至少需要一个要修改的字段。");
+      if (Object.keys(partial).length === 0) throw new CliError(t("cli.updateFieldRequired"));
       operation = { type: "update", id, expectedRevision: item.revision, fields: fieldsSchema.partial().parse(partial) };
     }
     const result = await deps.store.write({ projectId: item.projectId, requestId, operation });
     const updated = result.board.items.find(x => x.id === id)!;
-    emit(`${result.replayed ? "已执行过（幂等重放）" : "已更新"} ${formatItem(updated, project.name)}`, { ...updated, projectName: project.name, replayed: result.replayed, requestId });
+    emit(t(result.replayed ? "cli.updatedReplay" : "cli.updated", { item: formatItem(updated, project.name) }), { ...updated, projectName: project.name, replayed: result.replayed, requestId });
     return 0;
   }
 
-  throw new CliError(`未知命令「${args.command}」。\n\n${USAGE}`);
+  throw new CliError(t("cli.unknownCommand", { command: args.command, usage: usage() }));
 }
 
 /** 真实项目列表：优先 paseo CLI，失败时读 daemon 的 projects.json。 */
@@ -374,7 +354,7 @@ export async function loadPaseoProjects(env: Record<string, string | undefined>)
     const rows = z.array(z.object({ projectId: z.string(), rootPath: z.string(), displayName: z.string(), customName: z.string().nullable().optional(), archivedAt: z.string().nullable().optional() })).parse(JSON.parse(raw));
     return rows.filter(row => !row.archivedAt).map(row => ({ id: row.projectId, name: row.customName ?? row.displayName, path: row.rootPath }));
   } catch (e) { errors.push(`projects.json: ${(e as Error).message}`); }
-  throw new CliError(`无法读取 Paseo 项目列表：${errors.join("；")}`);
+  throw new CliError(t("cli.projectsReadFailed", { errors: errors.join(t("cli.errorSeparator")) }));
 }
 
 
@@ -388,17 +368,68 @@ export async function loadPaseoWorkspaces(env: Record<string, string | undefined
     return rows.filter(row => !row.archivedAt).map(({ projectId, cwd }) => ({ projectId, cwd }));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw new CliError(`无法读取 Paseo 工作区归属：${(error as Error).message}。请用 --project 指定项目 ID。`);
+    throw new CliError(t("cli.workspacesReadFailed", { error: (error as Error).message }));
   }
 }
 
+/** Read only bounded regular files, so a malformed locale never blocks a terminal command. */
+async function localeJson(file: string, maxBytes: number): Promise<unknown> {
+  const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) return null;
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null);
+      if (!bytesRead) break;
+      total += bytesRead;
+    }
+    return total > maxBytes ? null : JSON.parse(buffer.toString("utf8", 0, total));
+  } finally { await handle.close(); }
+}
+
+/** The standalone CLI follows the plugin's saved setting, then its most recent device language. */
+export async function loadCliLanguage(env: Record<string, string | undefined>): Promise<string> {
+  const base = path.join(paseoHome(env), "plugin-data", "project-notes");
+  const builtins: Readonly<Record<string, readonly Catalog[]>> = BUILTIN_CATALOGS;
+  const english = builtins.en!, chinese = builtins["zh-CN"]!;
+  const reference = assembleCatalog([...english, ...chinese]);
+  const state = await localeJson(path.join(base, "i18n-state.json"), 16 * 1024).catch(() => null);
+  const saved = state && typeof state === "object" ? state as { setting?: unknown; device?: unknown } : {};
+  const setting = typeof saved.setting === "string" && saved.setting.length <= 40 ? saved.setting : undefined;
+  const device = normalizeLanguage(saved.device);
+  const folder = path.join(base, "locales"), filePattern = /^([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})\.json$/;
+  const files = (await readdir(folder).catch(() => [])).filter(file => filePattern.test(file)).sort().slice(0, 40);
+  const customs = new Map<string, Catalog>();
+  for (const file of files) {
+    const code = normalizeLanguage(filePattern.exec(file)![1]);
+    if (!code || customs.has(code)) continue;
+    const raw = await localeJson(path.join(folder, file), 2 * 1024 * 1024).catch(() => null);
+    const checked = checkCatalog(raw, reference);
+    if (checked.translated > 0) customs.set(code, checked.catalog);
+  }
+  const language = resolveLanguage(setting, device, [...new Set([...Object.keys(builtins), ...customs.keys()])]);
+  const custom = customs.get(language);
+  const layers: Catalog[] = [], languages: string[] = [];
+  const add = (from: string, catalogs: readonly Catalog[]) => { for (const catalog of catalogs) { layers.push(catalog); languages.push(from); } };
+  if (custom) add(language, [custom]);
+  add(language, builtins[language] ?? []);
+  add("en", english);
+  add("zh-CN", chinese);
+  const catalog = assembleCatalog(layers, undefined, { language, languages });
+  bindTranslator(createTranslator(language, [catalog]));
+  return language;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
+  await loadCliLanguage(process.env);
   const deps: CliDeps = {
     store: new BoardStore(defaultStorageRoot()),
     loadProjects: () => loadPaseoProjects(process.env),
     loadWorkspaces: () => loadPaseoWorkspaces(process.env),
     stdout: text => process.stdout.write(text),
-    readStdin: maxBytes => readLimited(process.stdin, maxBytes, "标准输入"),
+    readStdin: maxBytes => readLimited(process.stdin, maxBytes, t("cli.stdin")),
     cwd: process.cwd(),
     env: process.env,
   };
@@ -407,7 +438,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   try { process.exitCode = await runCli(argv, deps); }
   catch (error) {
     if (error instanceof CliError) fail(error.message, error.exitCode);
-    else if (error instanceof z.ZodError) fail(`参数不合法：${describeZodError(error)}`, 2);
+    else if (error instanceof z.ZodError) fail(t("cli.invalidArguments", { error: describeZodError(error) }), 2);
     else fail((error as Error).message ?? String(error), 1);
   }
 }

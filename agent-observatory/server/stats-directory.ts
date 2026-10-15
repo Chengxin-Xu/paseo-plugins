@@ -1,3 +1,5 @@
+import { translator } from "../shared/i18n";
+import { t } from "../shared/text";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { PaseoApi, PaseoAgentListResult } from "./paseo-types";
@@ -6,10 +8,11 @@ import type { StatsDirectoryAgent } from "./stats-types";
 const text = (value: string | null | undefined, max: number): string | null => value?.trim().slice(0, max) || null;
 const count = (value: number | undefined): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
 function descriptor({ agent, project }: PaseoAgentListResult["entries"][number]): StatsDirectoryAgent {
-  const cwdName = basename(agent.cwd).slice(0, 1024) || "未知";
+  const cwdName = basename(agent.cwd).slice(0, 1024);
   return { id: agent.id, createdAt: agent.createdAt, provider: text(agent.provider, 1024) ?? "unknown",
     model: text(agent.model, 1024), parentAgentId: text(agent.labels?.["paseo.parent-agent-id"], 256),
-    projectKey: text(project?.projectKey, 1024) ?? cwdName, projectName: text(project?.projectName, 240) ?? cwdName.slice(0, 240),
+    // i18n-ignore: Legacy fallback project key is persisted and must not depend on the display language.
+    projectKey: text(project?.projectKey, 1024) ?? (cwdName || "未知"), projectName: text(project?.projectName, 240) ?? (cwdName.slice(0, 240) || t("serverStatsDirectory.m001")),
     status: agent.status, archivedAt: agent.archivedAt ?? null, title: text(agent.title, 240),
     requiresAttention: !!agent.requiresAttention, attentionReason: agent.attentionReason ?? null,
     pendingPermissions: agent.pendingPermissions?.length ?? 0, activeTurn: !!agent.activeTurn, lastUserMessageAt: agent.lastUserMessageAt ?? null, updatedAt: agent.updatedAt ?? null,
@@ -26,12 +29,15 @@ export class StatsDirectory {
   loaded = false;
   refreshedAt = -Infinity;
   private expiresAt = -Infinity;
+  private textKey = "";
   private pending: Promise<void> | null = null;
   constructor(private readonly now: () => number = Date.now) {}
 
   refresh(paseo: PaseoApi): Promise<void> {
     if (this.pending) return this.pending;
-    if (this.now() < this.expiresAt) return Promise.resolve();
+    const textKey = `${translator().language}:${translator().hash}`;
+    if (this.textKey === textKey && this.now() < this.expiresAt) return Promise.resolve();
+    this.textKey = textKey;
     this.pending = this.walk(paseo).catch(() => {}).finally(() => {
       this.expiresAt = this.now() + 60_000;
       this.pending = null;
@@ -52,7 +58,7 @@ export class StatsDirectory {
         result = await Promise.race([
           paseo.agents.list({ filter: { includeArchived: true },
             sort: [{ key: "created_at", direction: "desc" }], page: { limit: 200, ...(cursor ? { cursor } : {}) }, timeout: 15_000 }),
-          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("统计目录读取超时")), Math.max(0, deadline - performance.now())); timer.unref?.(); }),
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(t("serverStatsDirectory.m002"))), Math.max(0, deadline - performance.now())); timer.unref?.(); }),
         ]);
       } finally { if (timer) clearTimeout(timer); }
       for (const entry of result.entries) agents.set(entry.agent.id, descriptor(entry));

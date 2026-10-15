@@ -1,12 +1,15 @@
+import { t } from "./text";
 import { z } from "zod";
 
 /**
  * Board data shapes, shared by the plugin, its RPC contracts (shared/board.ts) and the CLI (server/cli.ts).
- * Only zod: the CLI bundle is built on install with production dependencies, without the Paseo SDK.
+ * Zod and pure text helpers: the CLI builds with production dependencies, without the Paseo SDK.
  */
 export const INBOX_PROJECT_ID = "__inbox__";
 /** The inbox has no folder. Where a project shows its path, the inbox shows this, in the RPCs, the dashboard and the CLI. */
+// i18n-ignore: Legacy exported fixture kept for tests and consumers; production display uses getInboxDescription().
 export const INBOX_DESCRIPTION = "暂不归入项目的想法";
+export const getInboxDescription = () => t("schema.inboxDescription");
 /** Longest note body, in UTF-16 code units (what `string.length` and zod count). */
 export const BODY_MAX_LENGTH = 32000;
 /** Largest board file. Writes beyond it are refused; a board file over it (edited by hand) is left out of the overview. */
@@ -21,7 +24,7 @@ export const kindSchema = z.enum(["task", "prompt", "idea"]);
 export const statusSchema = z.enum(["todo", "doing", "done"]);
 export const fieldsSchema = z.object({
   kind: kindSchema,
-  title: z.string().trim().min(1, "请填写标题").max(160),
+  title: z.string().trim().min(1, { error: () => t("schema.titleRequired") }).max(160),
   body: z.string().max(BODY_MAX_LENGTH),
   status: statusSchema,
   priority: z.enum(["normal", "high"]),
@@ -50,6 +53,7 @@ export const projectSchema = z.object({
   id: z.string(),
   name: z.string(),
   path: z.string(),
+  retired: z.boolean().optional(),
 });
 /**
  * A board the overview left out instead of failing: `file` when the board alone is over BOARD_FILE_LIMIT_BYTES, `total`
@@ -63,6 +67,7 @@ export const unavailableBoardSchema = z.object({
 });
 export const dashboardSchema = z.object({
   projects: z.array(projectSchema),
+  retiredProjectIds: z.array(z.string()).optional(),
   boards: z.array(snapshotSchema),
   unavailable: z.array(unavailableBoardSchema).optional(),
 });

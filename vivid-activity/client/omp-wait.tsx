@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import React from "react";
 import { View } from "react-native";
@@ -21,17 +22,17 @@ type DetailProps = {
 };
 
 const JOB_STATUS_LABELS: Record<string, string> = {
-  running: "运行中",
-  completed: "已完成",
-  done: "已完成",
-  failed: "失败",
-  error: "失败",
-  canceled: "已取消",
-  cancelled: "已取消",
+  get running() { return t("ui.running"); },
+  get completed() { return t("ui.completed"); },
+  get done() { return t("ui.completed"); },
+  get failed() { return t("ui.failed"); },
+  get error() { return t("ui.failed"); },
+  get canceled() { return t("ui.canceled"); },
+  get cancelled() { return t("ui.canceled"); },
 };
 
 function displayStatus(status: string | undefined): string {
-  if (!status) return "等待中";
+  if (!status) return t("ui.waiting");
   return JOB_STATUS_LABELS[status] ?? status;
 }
 
@@ -41,7 +42,7 @@ export function OmpWaitToolDetail({ output, palette, styles }: DetailProps) {
   return (
     <View style={styles.paseoStack}>
       {jobs.length > 0 ? (
-        <Section title="Agent" styles={styles}>
+        <Section title={t("ui.agent")} styles={styles}>
           <PaseoFields
             fields={jobs.map((job) => [
               job.label ?? job.id,
@@ -51,7 +52,7 @@ export function OmpWaitToolDetail({ output, palette, styles }: DetailProps) {
                 job.model,
               ]
                 .filter(Boolean)
-                .join(" · "),
+                .join(t("ui.metaSeparator")),
             ])}
             palette={palette}
             styles={styles}

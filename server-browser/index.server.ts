@@ -1,3 +1,5 @@
+import { createLocaleService } from './server/i18n-server';
+import { BUILTIN_CATALOGS } from './server/locales';
 import { registerClientChunks } from "./server/ui-chunk";
 import type { PluginServerContext, PluginHandlerContext } from '@getpaseo/plugin/server';
 import { actionRpc, agentRpc, deleteOrphanRpc, diagnosticsRpc, frameRpc, inputRpc, optionsRpc, orphanRpc, overviewRpc, readPageRpc, servicesRpc, startRpc, stateRpc, stopOrphanRpc, type BrowserSession } from './shared/browser';
@@ -8,6 +10,7 @@ import { BrowserOverviewService } from './server/overview';
 type Paseo=PluginHandlerContext['paseo'];
 
 export default function contribute(server:PluginServerContext,deps:{manager?:BrowserManager;directory?:WorkspaceDirectory}={}){
+ const locales=createLocaleService(server,{pluginId:'server-browser',builtins:BUILTIN_CATALOGS});
  registerClientChunks(server);
  const manager=deps.manager??new BrowserManager(),directory=deps.directory??new WorkspaceDirectory(),agentDirectory=new BrowserAgentDirectory(),agents=new BrowserAgentService(manager,agentDirectory),overview=new BrowserOverviewService(manager,paseo=>directory.list(paseo),agentDirectory);
  let restoreTask:Promise<void>|undefined;
@@ -22,12 +25,14 @@ export default function contribute(server:PluginServerContext,deps:{manager?:Bro
   if(!restoreTask)restoreTask=directory.list(paseo).then(workspaces=>{
    for(const workspace of workspaces)remember(workspace);
    // Restore in the background: a slow site must not stall every panel RPC or Agent startup.
+   // i18n-ignore: daemon log only.
    void manager.restore(workspaces.map(item=>item.id)).catch(()=>console.warn('部分服务器浏览器未能恢复，请查看对应工作区的状态与诊断。'));
   }).catch(error=>{restoreTask=undefined;throw error;});
   return restoreTask;
  };
  // Lifecycle hooks only start restoration. The daemon awaits before-hooks and aborts the session open when one throws,
  // so an Agent never waits on (or fails because of) the workspace listing; the MCP bridge waits for a restoring browser itself.
+ // i18n-ignore: daemon log only.
  const restoreSoon=(paseo:Paseo)=>{void restore(paseo).catch(()=>console.warn('服务器浏览器暂时无法核对工作区，将在下次面板或 Agent 活动时重试恢复。'));};
  const validate=async(paseo:Paseo,workspaceId:string)=>{remember(await directory.require(paseo,workspaceId));await restore(paseo);};
  const linkedState=async(paseo:Paseo,session:BrowserSession)=>{
@@ -60,5 +65,5 @@ export default function contribute(server:PluginServerContext,deps:{manager?:Bro
  server.on('agent.created',({agent})=>{invalidateAgent(agent.workspaceId);});
  server.on('workspace.created',()=>{directory.invalidate();overview.invalidate();});
  server.on('workspace.archived',async({workspace})=>{directory.retire(workspace.id);agentDirectory.invalidate(workspace.id);overview.invalidate();await manager.retireWorkspace(workspace.id);});
- return()=>manager.close();
+ return async()=>{locales.dispose();await manager.close();};
 }

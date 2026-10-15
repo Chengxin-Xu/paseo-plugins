@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.16.0 · 2026-10-15
+
+Added English, Simplified Chinese, and user language files, with Follow system as the default. Language can be changed in Observation settings or Paseo plugin settings. Interface text, accessibility labels, feedback, and server messages use shared catalogs. New analyses request the selected language; stored reports keep their original text.
+
+
 ## 2.15.2 — 2026-10-14
 
 Privacy fixes for what the observatory writes, sends and shows. Saved data carries over; what older versions kept that is no longer kept is cleaned when it is read.

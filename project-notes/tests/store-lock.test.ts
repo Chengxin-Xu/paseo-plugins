@@ -136,6 +136,8 @@ describe("bin/notes.mjs processes and the plugin store", () => {
 
   it("keeps history out of default CLI JSON and fetches it only for show --history", async () => {
     const home = await temp("project-notes-cli-history-");
+    await mkdir(join(home, "plugin-data/project-notes"), { recursive: true });
+    await writeFile(join(home, "plugin-data/project-notes/i18n-state.json"), JSON.stringify({ setting: "zh-CN", device: "zh-CN" }));
     const env = { ...process.env, PASEO_HOME: home, PATH: `${bin}:${process.env.PATH}` };
     const json = async (...args: string[]) => JSON.parse((await run(process.execPath, [cli, ...args, "--json"], { env })).stdout);
     const created = await json("add", "--project", "inbox", "--title", "命令行历史", "--body", "原来的完整正文");
@@ -158,6 +160,8 @@ describe("bin/notes.mjs processes and the plugin store", () => {
 
   it("serializes concurrent CLI processes and in-process writes, and the dashboard sees every CLI write", async () => {
     const home = await temp("project-notes-cli-home-");
+    await mkdir(join(home, "plugin-data/project-notes"), { recursive: true });
+    await writeFile(join(home, "plugin-data/project-notes/i18n-state.json"), JSON.stringify({ setting: "zh-CN", device: "zh-CN" }));
     const env = { ...process.env, PASEO_HOME: home, PATH: `${bin}:${process.env.PATH}` };
     const store = new BoardStore(join(home, "plugin-data", "project-notes", "boards"));
     const projects = { projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} } };
@@ -188,6 +192,8 @@ describe("bin/notes.mjs processes and the plugin store", () => {
 
   it("lets CLI processes and plugin writes that all find a crashed writer's lock land every write", async () => {
     const home = await temp("project-notes-cli-home-");
+    await mkdir(join(home, "plugin-data/project-notes"), { recursive: true });
+    await writeFile(join(home, "plugin-data/project-notes/i18n-state.json"), JSON.stringify({ setting: "zh-CN", device: "zh-CN" }));
     const env = { ...process.env, PASEO_HOME: home, PATH: `${bin}:${process.env.PATH}` };
     const boards = join(home, "plugin-data", "project-notes", "boards");
     const store = new BoardStore(boards);

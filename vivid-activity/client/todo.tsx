@@ -1,3 +1,5 @@
+import { joinList } from "../shared/i18n";
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import React from "react";
@@ -50,10 +52,10 @@ function TodoTaskRow({
         : theme.colors.foregroundMuted;
   const meta = [
     task.status === "in_progress" ? task.activeForm : undefined,
-    task.blockedBy.length > 0 ? `等待 ${task.blockedBy.map((id) => `#${id}`).join("、")} 完成` : undefined,
+    task.blockedBy.length > 0 ? t("ui.waitingForToFinish", { tasks: joinList(task.blockedBy.map((id) => `#${id}`)) }) : undefined,
   ]
     .filter(Boolean)
-    .join(" · ");
+    .join(t("ui.metaSeparator"));
 
   return (
     <View style={styles.paseoListItem}>
@@ -93,7 +95,7 @@ export function TodoToolDetail({ input, output, theme, palette, styles }: Detail
         </Text>
       ) : null}
       {model.tasks.length > 1 ? (
-        <Section title={`任务（${model.tasks.length}）`} styles={styles}>
+        <Section title={t("ui.tasks", { count: model.tasks.length })} styles={styles}>
           <View style={styles.paseoList}>
             {model.tasks.map((task) => (
               <TodoTaskRow

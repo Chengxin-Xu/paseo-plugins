@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import { Platform } from 'react-native';
 import { splitText } from './input-queue';
 
@@ -72,7 +73,7 @@ function slotFor(node: DomElement): Slot | null {
   const document = node.ownerDocument;
   if (!document || typeof node.appendChild !== 'function') return null;
   const sink = document.createElement('textarea');
-  for (const [name, value] of [['aria-label', '在网页画面中输入'], ['autocomplete', 'off'], ['autocapitalize', 'off'], ['autocorrect', 'off'], ['spellcheck', 'false'], ['tabindex', '-1'], ['data-testid', 'server-browser-ime']]) sink.setAttribute(name, value);
+  for (const [name, value] of [['aria-label', t("browserWeb.typeInThePageView")], ['autocomplete', 'off'], ['autocapitalize', 'off'], ['autocorrect', 'off'], ['spellcheck', 'false'], ['tabindex', '-1'], ['data-testid', 'server-browser-ime']]) sink.setAttribute(name, value);
   Object.assign(sink.style, { position: 'absolute', left: '0px', top: '0px', width: '1px', height: '1px', padding: '0', border: '0', margin: '0', opacity: '0', resize: 'none', overflow: 'hidden', pointerEvents: 'none', caretColor: 'transparent', zIndex: '-1' });
   node.appendChild(sink);
   const slot: Slot = { sink, touch: !!(globalThis as { matchMedia?: (query: string) => { matches: boolean } }).matchMedia?.('(hover: none) and (pointer: coarse)').matches, pressing: false, composition: null };

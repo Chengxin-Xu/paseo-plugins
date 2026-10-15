@@ -138,7 +138,7 @@ describe("turn starts of closed Agents (0.5.0)", () => {
     const handlers = new Map<string, (event: unknown) => void>();
     const removed: string[] = [];
     const server = {
-      registerSettings: () => ({}),
+      registerSettings: () => ({ read: async () => ({ status: "ready", values: { language: "zh-CN" } }), subscribe: () => () => undefined }),
       handle: () => undefined,
       on: (name: string, handler: (event: unknown) => void) => {
         handlers.set(name, handler);

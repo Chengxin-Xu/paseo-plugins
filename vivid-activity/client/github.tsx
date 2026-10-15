@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import React, { type ReactNode } from "react";
 import { Text, View } from "react-native";
@@ -69,7 +70,7 @@ function fieldArray(record: JsonRecord | null, ...keys: string[]): unknown[] {
 
 function scalarText(value: unknown): string {
   if (value === undefined || value === null || value === "") return "—";
-  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "boolean") return value ? t("ui.yes") : t("ui.no");
   if (typeof value === "string" || typeof value === "number") return String(value);
   return formatUnknownValue(value);
 }
@@ -119,9 +120,9 @@ function GithubList({
   styles: ActivityStyles;
 }) {
   return (
-    <Section title={`${title}（${items.length}）`} styles={styles}>
+    <Section title={t("ui.listTitle", { title, count: items.length })} styles={styles}>
       {items.length === 0 ? (
-        <Text style={styles.empty}>没有返回结果。</Text>
+        <Text style={styles.empty}>{t("ui.noResultsReturned")}</Text>
       ) : (
         <View style={styles.paseoList}>
           {items.map((item) => (
@@ -138,14 +139,14 @@ function GithubList({
 function RepositoryList({ items, styles }: { items: unknown[]; styles: ActivityStyles }) {
   return (
     <GithubList
-      title="仓库"
+      title={t("ui.repository")}
       items={items}
       styles={styles}
       renderItem={(repository) => (
         <>
           <View style={styles.paseoListItemHeader}>
             <Text selectable numberOfLines={1} style={styles.paseoListItemTitle}>
-              {fieldString(repository, "full_name", "fullName", "name") ?? "仓库"}
+              {fieldString(repository, "full_name", "fullName", "name") ?? t("ui.repository")}
             </Text>
             {fieldString(repository, "language") ? (
               <Text style={styles.paseoListItemMeta}>{fieldString(repository, "language")}</Text>
@@ -164,7 +165,7 @@ function RepositoryList({ items, styles }: { items: unknown[]; styles: ActivityS
             ]
               .filter((value) => value !== undefined)
               .map(String)
-              .join(" · ")}
+              .join(t("ui.metaSeparator"))}
           </Text>
           {fieldString(repository, "html_url", "htmlUrl", "url") ? (
             <Text selectable numberOfLines={1} style={styles.paseoListItemMeta}>
@@ -180,7 +181,7 @@ function RepositoryList({ items, styles }: { items: unknown[]; styles: ActivityS
 function CodeResultList({ items, styles }: { items: unknown[]; styles: ActivityStyles }) {
   return (
     <GithubList
-      title="代码结果"
+      title={t("ui.codeResults")}
       items={items}
       styles={styles}
       renderItem={(result) => {
@@ -189,14 +190,14 @@ function CodeResultList({ items, styles }: { items: unknown[]; styles: ActivityS
           <>
             <View style={styles.paseoListItemHeader}>
               <Text selectable numberOfLines={1} style={styles.paseoListItemTitle}>
-                {fieldString(result, "path", "name") ?? "代码结果"}
+                {fieldString(result, "path", "name") ?? t("ui.codeResults")}
               </Text>
               <Icon name="Code2" color={styles.paseoListItemTitle.color} size={12} />
             </View>
             <Text style={styles.paseoListItemMeta}>
               {fieldString(repository, "full_name", "fullName", "name") ??
                 fieldString(result, "repository_url", "repositoryUrl") ??
-                "仓库不可用"}
+                t("ui.repositoryUnavailable")}
             </Text>
             {fieldString(result, "html_url", "htmlUrl", "url") ? (
               <Text selectable numberOfLines={1} style={styles.paseoListItemMeta}>
@@ -235,7 +236,7 @@ function PullRequestDetail({
   if (Array.isArray(result)) {
     return (
       <GithubList
-        title={method === "get_files" ? "改动的文件" : method === "get_commits" ? "提交" : "PR 结果"}
+        title={method === "get_files" ? t("ui.changedFiles") : method === "get_commits" ? t("ui.commits") : t("ui.pRResult")}
         items={result}
         styles={styles}
         renderItem={(item) => <RecordFields record={item} palette={palette} styles={styles} />}
@@ -243,29 +244,29 @@ function PullRequestDetail({
     );
   }
   if (typeof result === "string") {
-    return <PaseoCodeBlock code={result} language={method === "get_diff" ? "diff" : "markdown"} label="输出" theme={theme} styles={styles} />;
+    return <PaseoCodeBlock code={result} language={method === "get_diff" ? "diff" : "markdown"} label={t("ui.output")} theme={theme} styles={styles} />;
   }
   return (
     <View style={styles.paseoStack}>
       <PaseoFields
         fields={[
-          ["仓库", notInHeader(repositoryName(inputRecord), headerSummary)],
+          [t("ui.repository"), notInHeader(repositoryName(inputRecord), headerSummary)],
           ["PR", notInHeader(scalarField(inputRecord, "pullNumber", "pull_number"), headerSummary)],
-          ["方式", method],
-          ["标题", fieldString(resultRecord, "title")],
-          ["状态", fieldString(resultRecord, "state")],
-          ["作者", fieldString(asRecord(resultRecord?.user), "login") ?? fieldString(resultRecord, "author")],
-          ["目标分支", fieldString(asRecord(resultRecord?.base), "ref") ?? fieldString(resultRecord, "base")],
-          ["来源分支", fieldString(asRecord(resultRecord?.head), "ref") ?? fieldString(resultRecord, "head")],
-          ["改动的文件", fieldValue(resultRecord, "changed_files", "changedFiles")],
-          ["新增行", fieldValue(resultRecord, "additions")],
-          ["删除行", fieldValue(resultRecord, "deletions")],
-          ["网址", fieldString(resultRecord, "html_url", "htmlUrl", "url")],
+          [t("ui.method"), method],
+          [t("ui.title"), fieldString(resultRecord, "title")],
+          [t("ui.status"), fieldString(resultRecord, "state"), "status"],
+          [t("ui.author"), fieldString(asRecord(resultRecord?.user), "login") ?? fieldString(resultRecord, "author")],
+          [t("ui.targetBranch"), fieldString(asRecord(resultRecord?.base), "ref") ?? fieldString(resultRecord, "base")],
+          [t("ui.sourceBranch"), fieldString(asRecord(resultRecord?.head), "ref") ?? fieldString(resultRecord, "head")],
+          [t("ui.changedFiles"), fieldValue(resultRecord, "changed_files", "changedFiles")],
+          [t("ui.addedLines"), fieldValue(resultRecord, "additions")],
+          [t("ui.deletedLines"), fieldValue(resultRecord, "deletions")],
+          [t("ui.uRL"), fieldString(resultRecord, "html_url", "htmlUrl", "url")],
         ]}
         palette={palette}
         styles={styles}
       />
-      {fieldString(resultRecord, "body") ? <PaseoCodeBlock code={fieldString(resultRecord, "body")!} language="markdown" label="说明" theme={theme} styles={styles} /> : null}
+      {fieldString(resultRecord, "body") ? <PaseoCodeBlock code={fieldString(resultRecord, "body")!} language="markdown" label={t("ui.description")} theme={theme} styles={styles} /> : null}
       {method === "get_reviews" || method === "get_review_comments" || method === "get_comments" ? (
         <RecordFields record={resultRecord} excluded={["body"]} palette={palette} styles={styles} />
       ) : null}
@@ -296,11 +297,11 @@ function ActionsDetail({
     return (
       <View style={styles.paseoStack}>
         <PaseoFields
-          fields={[["仓库", repositoryName(inputRecord)], ["作业", notInHeader(scalarField(inputRecord, "jobId", "job_id"), headerSummary)], ["资源", notInHeader(scalarField(inputRecord, "resource_id"), headerSummary)]]}
+          fields={[[t("ui.repository"), repositoryName(inputRecord)], [t("ui.job"), notInHeader(scalarField(inputRecord, "jobId", "job_id"), headerSummary)], [t("ui.resource"), notInHeader(scalarField(inputRecord, "resource_id"), headerSummary)]]}
           palette={palette}
           styles={styles}
         />
-        {logs ? <PaseoCodeBlock code={logs} language="ansi" label="日志" theme={theme} styles={styles} /> : <RecordFields record={asRecord(result)} palette={palette} styles={styles} />}
+        {logs ? <PaseoCodeBlock code={logs} language="ansi" label={t("ui.log")} theme={theme} styles={styles} /> : <RecordFields record={asRecord(result)} palette={palette} styles={styles} />}
       </View>
     );
   }
@@ -309,10 +310,10 @@ function ActionsDetail({
       <View style={styles.paseoStack}>
         <PaseoFields
           fields={[
-            ["仓库", repositoryName(inputRecord)],
-            ["工作流", notInHeader(scalarField(inputRecord, "workflowId", "workflow_id", "workflow", "resource_id"), headerSummary)],
-            ["引用", fieldString(inputRecord, "ref")],
-            ["输入参数", fieldValue(inputRecord, "inputs")],
+            [t("ui.repository"), repositoryName(inputRecord)],
+            [t("ui.workflow"), notInHeader(scalarField(inputRecord, "workflowId", "workflow_id", "workflow", "resource_id"), headerSummary)],
+            [t("ui.reference"), fieldString(inputRecord, "ref")],
+            [t("ui.inputParameters"), fieldValue(inputRecord, "inputs")],
           ]}
           palette={palette}
           styles={styles}
@@ -326,14 +327,14 @@ function ActionsDetail({
     ? result
     : fieldArray(record, "workflows", "workflow_runs", "workflowRuns", "jobs", "artifacts", "runs");
   const title = fieldValue(record, "workflows") !== undefined
-    ? "工作流"
+    ? t("ui.workflow")
     : fieldValue(record, "workflow_runs", "workflowRuns", "runs") !== undefined
-      ? "工作流运行"
+      ? t("ui.workflowRun")
       : fieldValue(record, "jobs") !== undefined
-        ? "作业"
+        ? t("ui.job")
         : fieldValue(record, "artifacts") !== undefined
-          ? "产物"
-          : kind === "actions-get" ? "Actions 详情" : "Actions 结果";
+          ? t("ui.artifacts")
+          : kind === "actions-get" ? t("ui.actionsDetails") : t("ui.actionsResult");
   return (
     <View style={styles.paseoStack}>
       {record && !items.length ? <RecordFields record={record} palette={palette} styles={styles} /> : null}
@@ -346,12 +347,12 @@ function ActionsDetail({
             <>
               <View style={styles.paseoListItemHeader}>
                 <Text selectable numberOfLines={1} style={styles.paseoListItemTitle}>
-                  {fieldString(item, "name", "display_title", "displayTitle", "path", "id") ?? "GitHub Actions 条目"}
+                  {fieldString(item, "name", "display_title", "displayTitle", "path", "id") ?? t("ui.gitHubActionsItem")}
                 </Text>
                 {fieldString(item, "status", "conclusion", "state") ? <StatusPill value={fieldString(item, "status", "conclusion", "state")!} palette={palette} styles={styles} /> : null}
               </View>
               <Text style={styles.paseoListItemMeta}>
-                {[fieldString(item, "head_branch", "headBranch", "branch"), fieldString(item, "event"), fieldString(item, "actor") ?? fieldString(asRecord(item?.actor), "login"), fieldString(item, "html_url", "htmlUrl", "url")].filter(Boolean).join(" · ")}
+                {[fieldString(item, "head_branch", "headBranch", "branch"), fieldString(item, "event"), fieldString(item, "actor") ?? fieldString(asRecord(item?.actor), "login"), fieldString(item, "html_url", "htmlUrl", "url")].filter(Boolean).join(t("ui.metaSeparator"))}
               </Text>
             </>
           )}
@@ -378,7 +379,7 @@ export function GithubToolDetail({
     const record = asRecord(result);
     return (
       <View style={styles.paseoStack}>
-        <PaseoFields fields={[["查询", notInHeader(fieldString(inputRecord, "query"), headerSummary)], ["总数", fieldValue(record, "total_count", "totalCount")]]} palette={palette} styles={styles} />
+        <PaseoFields fields={[[t("ui.query2"), notInHeader(fieldString(inputRecord, "query"), headerSummary)], [t("ui.total"), fieldValue(record, "total_count", "totalCount")]]} palette={palette} styles={styles} />
         <RepositoryList items={fieldArray(record, "items", "repositories")} styles={styles} />
       </View>
     );
@@ -387,7 +388,7 @@ export function GithubToolDetail({
     const record = asRecord(result);
     return (
       <View style={styles.paseoStack}>
-        <PaseoFields fields={[["查询", notInHeader(fieldString(inputRecord, "query"), headerSummary)], ["总数", fieldValue(record, "total_count", "totalCount")]]} palette={palette} styles={styles} />
+        <PaseoFields fields={[[t("ui.query2"), notInHeader(fieldString(inputRecord, "query"), headerSummary)], [t("ui.total"), fieldValue(record, "total_count", "totalCount")]]} palette={palette} styles={styles} />
         <CodeResultList items={fieldArray(record, "items", "results")} styles={styles} />
       </View>
     );
@@ -398,8 +399,8 @@ export function GithubToolDetail({
     const content = fieldString(record, "content") ?? (typeof result === "string" ? result : githubOutputText(output));
     return (
       <View style={styles.paseoStack}>
-        <PaseoFields fields={[["仓库", repositoryName(inputRecord)], ["路径", notInHeader(path, headerSummary)], ["大小", fieldValue(record, "size")], ["SHA", fieldString(record, "sha")], ["编码", fieldString(record, "encoding")], ["网址", fieldString(record, "html_url", "htmlUrl", "download_url", "downloadUrl")]]} palette={palette} styles={styles} />
-        {content ? <PaseoCodeBlock code={content} language={languageForFilePath(path) ?? "text"} label="内容" theme={theme} styles={styles} /> : <RecordFields record={record} palette={palette} styles={styles} />}
+        <PaseoFields fields={[[t("ui.repository"), repositoryName(inputRecord)], [t("ui.path2"), notInHeader(path, headerSummary)], [t("ui.size"), fieldValue(record, "size")], [t("ui.sha"), fieldString(record, "sha")], [t("ui.encoding"), fieldString(record, "encoding")], [t("ui.uRL"), fieldString(record, "html_url", "htmlUrl", "download_url", "downloadUrl")]]} palette={palette} styles={styles} />
+        {content ? <PaseoCodeBlock code={content} language={languageForFilePath(path) ?? "text"} label={t("ui.content")} theme={theme} styles={styles} /> : <RecordFields record={record} palette={palette} styles={styles} />}
       </View>
     );
   }

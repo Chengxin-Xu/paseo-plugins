@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { blockedHostResolverRules } from './navigation';
@@ -7,9 +8,9 @@ export function defaultRuntimeRoot(env:NodeJS.ProcessEnv=process.env):string{ret
 /** Optional proxy for the shared Chromium only. Without it Chromium follows the daemon's HTTP(S)_PROXY / ALL_PROXY variables. */
 export function browserProxy(env:NodeJS.ProcessEnv=process.env):string|undefined{
  const value=env.PASEO_SERVER_BROWSER_PROXY?.trim();if(!value)return undefined;
- if(/[\s\u0000-\u001f]/.test(value))throw new Error('PASEO_SERVER_BROWSER_PROXY 格式无效：应为 host:port 或 scheme://host:port。');
+ if(/[\s\u0000-\u001f]/.test(value))throw new Error(t('runtime.invalidProxy'));
  // The value becomes a Chromium argument, which every local account can read in the process list.
- if(value.includes('@'))throw new Error('PASEO_SERVER_BROWSER_PROXY 不能包含账号密码：它会出现在 Chromium 的命令行里。请改用不需要认证的代理地址。');
+ if(value.includes('@'))throw new Error(t('runtime.proxyCredentials'));
  return value;
 }
 /**
@@ -41,5 +42,5 @@ export function chromiumEnvironment(env:NodeJS.ProcessEnv,options:{libDirectory?
  if(options.fontsConf)environment.FONTCONFIG_FILE=options.fontsConf;
  return environment;
 }
-export const missingRuntime=(root:string)=>`服务器浏览器运行时未准备：${root} 中没有 Playwright。请在 daemon 主机运行插件目录里的 scripts/setup-runtime.mjs，或用 PASEO_SERVER_BROWSER_RUNTIME 指定运行时目录。`;
-export const missingChromium='找不到 Chromium：请为运行时安装 Playwright 的 chromium-headless-shell，或用 PASEO_SERVER_BROWSER_EXECUTABLE 指定 Chromium 可执行文件。';
+export const missingRuntime=(root:string)=>t('runtime.playwrightMissing',{root});
+export const missingChromium=()=>t('runtime.chromiumMissing');

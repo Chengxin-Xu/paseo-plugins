@@ -1,3 +1,6 @@
+import { TextParts } from "./core-text";
+import { currentLanguage } from "../shared/i18n";
+import { t } from "../shared/text";
 import { memo, useEffect, useMemo, useRef } from "react";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -19,10 +22,10 @@ function Pulse({ theme, events, now, telemetry }: { theme: PluginTheme; events: 
   const bar = hue(theme, "orange");
   return <View style={{ paddingHorizontal: space.md, paddingTop: space.md, paddingBottom: space.sm, gap: space.sm }}>
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-      <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}>近 60 分钟 <Text style={{ fontVariant: ["tabular-nums"], fontWeight: "400" }}>{total} 次</Text></Text>
-      <InfoButton theme={theme} title="关于事件记录" lines={[telemetry ? `记录始于 ${new Date(telemetry.startedAt).toLocaleString("zh-CN")}。` : "正在连接事件记录。", "只保留最近 500 条生命周期事件，按当前筛选显示。", "每根柱子代表 2.5 分钟；完整历史对话在会话详情的时间线中查看。"]} />
+      <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: "500" }}><TextParts id="coreActivityFeed.recentEvents" values={{ count: <Text style={{ fontVariant: ["tabular-nums"], fontWeight: "400" }}>{t("coreActivityFeed.events", { count: total })}</Text> }} /></Text>
+      <InfoButton theme={theme} title={t("coreActivityFeed.aboutEventHistory")} lines={[telemetry ? t("coreActivityFeed.recordingStarted", { value1: new Date(telemetry.startedAt).toLocaleString(currentLanguage()) }) : t("coreActivityFeed.connectingToEventHistory"), t("coreActivityFeed.keepsTheLatest500LifecycleEventsShown"), t("coreActivityFeed.eachBarCovers25MinutesSee")]} />
     </View>
-    <View accessibilityLabel={`近一小时 ${total} 次事件，每柱两分半钟`} style={{ flexDirection: "row", alignItems: "flex-end", gap: 3, height: 28, borderBottomWidth: hairline, borderBottomColor: theme.colors.border }}>
+    <View accessibilityLabel={t("coreActivityFeed.eventsInTheLastHourTwoAnd", { value1: total })} style={{ flexDirection: "row", alignItems: "flex-end", gap: 3, height: 28, borderBottomWidth: hairline, borderBottomColor: theme.colors.border }}>
       {bins.map((bin, index) => <View key={index} style={{ flex: 1, height: bin ? Math.max(3, bin / peak * 26) : 0, borderTopLeftRadius: 2, borderTopRightRadius: 2, backgroundColor: bar, opacity: 0.85 }} />)}
     </View>
   </View>;
@@ -32,10 +35,10 @@ function Pulse({ theme, events, now, telemetry }: { theme: PluginTheme; events: 
 const EventRow = memo(function EventRow({ event, theme, time, selected, fresh, onSelect }: { event: TelemetryEvent; theme: PluginTheme; time: string; selected: boolean; fresh: boolean; onSelect: (agentId: string) => void }) {
   // Events stored before 2.13 carry English labels; the type names them (gemini-F9).
   const label = eventLabel(event);
-  return <Enter active={fresh}><Row theme={theme} title={label} titleLines={1} selected={selected} onPress={() => onSelect(event.agentId)} accessibilityLabel={`查看 ${event.agentTitle || "未命名 Agent"}，${label}`}
+  return <Enter active={fresh}><Row theme={theme} title={label} titleLines={1} selected={selected} onPress={() => onSelect(event.agentId)} accessibilityLabel={t("coreActivityFeed.view", { value1: event.agentTitle || t("coreActivityFeed.untitledAgent"), value2: label })}
     leading={<EventGlyph theme={theme} type={event.type} />}
     trailing={<Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"] }}>{time}</Text>}
-    subtitle={<MetaLine theme={theme} parts={[event.agentTitle || event.agentId, event.durationMs !== undefined ? `用时 ${shortDuration(event.durationMs)}` : null]} />} /></Enter>;
+    subtitle={<MetaLine theme={theme} parts={[event.agentTitle || event.agentId, event.durationMs !== undefined ? t("coreActivityFeed.took", { value1: shortDuration(event.durationMs) }) : null]} />} /></Enter>;
 });
 
 /** On phones the swimlane scrolls with the feed; wide layouts show it above the split view instead (`swimlane` false). */
@@ -50,6 +53,6 @@ export function ActivityFeed({ events, theme, telemetry, onSelect, now, selected
       {swimlane && events.length ? <Swimlane theme={theme} events={events} agents={agents} now={now} compact onSelect={onSelect} /> : null}
       <Pulse theme={theme} events={events} now={now} telemetry={telemetry} />
     </View>}
-    ListEmptyComponent={<EmptyState theme={theme} icon="Activity" title="还没有执行事件" message="任务开始、完成、失败和审批会记录在这里" />}
+    ListEmptyComponent={<EmptyState theme={theme} icon="Activity" title={t("coreActivityFeed.noExecutionEventsYet")} message={t("coreActivityFeed.taskStartsCompletionsFailuresAndApprovalsAppear")} />}
     renderItem={({ item }) => <EventRow event={item} theme={theme} time={relativeTime(item.at, now)} selected={item.agentId === selectedId} fresh={!!known.current && !known.current.has(item.id)} onSelect={onSelect} />} />;
 }

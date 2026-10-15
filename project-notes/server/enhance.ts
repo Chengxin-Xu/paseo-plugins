@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,9 +26,9 @@ async function hasLock(root: string, name: string) {
 }
 
 export async function probeProject(projectId: string, paseo: PluginHandlerContext["paseo"], projects: ProjectDirectory): Promise<ProjectEnvironment> {
-  if (projectId === INBOX_PROJECT_ID) return { languages: [], testCommands: [], notices: ["随手记没有项目目录，请填写范围和测试命令。"] };
+  if (projectId === INBOX_PROJECT_ID) return { languages: [], testCommands: [], notices: [t("serverEnhance.inboxNoDirectory")] };
   const project = (await projects.list(paseo)).find(value => value.projectId === projectId);
-  if (!project) throw new Error("项目已移除，请重新选择项目。");
+  if (!project) throw new Error(t("serverEnhance.projectRemoved"));
   const files = ["package.json", "tsconfig.json", "pyproject.toml", "Cargo.toml", "go.mod"];
   const [values, locks] = await Promise.all([
     Promise.all(files.map(name => manifest(project.projectRootPath, name))),
@@ -43,11 +44,11 @@ export async function probeProject(projectId: string, paseo: PluginHandlerContex
         const manager = typeof parsed.packageManager === "string" ? parsed.packageManager.split("@")[0] : pnpm ? "pnpm" : yarn ? "yarn" : bun || bunBinary ? "bun" : "npm";
         testCommands.push(`${["npm", "pnpm", "yarn", "bun"].includes(manager) ? manager : "npm"} run test`);
       }
-    } catch { notices.push("package.json 无法解析，未推断测试命令。"); }
+    } catch { notices.push(t("serverEnhance.invalidManifest")); }
   } else if (ts !== null) languages.push("TypeScript");
   if (python !== null) { languages.push("Python"); if (/^\s*\[tool\.pytest(?:\.|\])/m.test(python!)) testCommands.push("python -m pytest"); }
   if (rust !== null) { languages.push("Rust"); testCommands.push("cargo test"); }
   if (go !== null) { languages.push("Go"); testCommands.push("go test ./..."); }
-  if (!testCommands.length) notices.push("未识别到测试命令，请填写并核对验收方式。");
+  if (!testCommands.length) notices.push(t("serverEnhance.noTestCommands"));
   return { languages, testCommands, notices };
 }

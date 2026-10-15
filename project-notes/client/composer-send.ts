@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import type { PaseoApi } from "./paseo-types";
 import { deferOffer, type DeferredSendResult } from "../shared/deferred-rpc";
 import { confirmOffer } from "./deferred-state";
@@ -14,6 +15,8 @@ export type SendCheck = {
   offer: { label: string; note: string } | null;
   text: string;
   messageId: string;
+  /** Stable note identity captured with the text, independent of the translated provenance wrapper. */
+  key?: string;
 };
 export type PromptCapabilities = { steerableProviders: readonly string[]; slashSteerableProviders?: readonly string[]; bases?: Readonly<Record<string, string>> };
 
@@ -27,20 +30,20 @@ export async function checkPromptSend(paseo: PaseoApi, agentId: string, text: st
   const agent = response?.agent;
   const target = usableTarget(agent) ? { ...agent, pendingPermissions: agent.pendingPermissions?.length ?? 0 } : null;
   const plan = sendPlan(target, {
-    what: "提示词", text, steerable: capabilities.steerableProviders, slashSteerable: capabilities.slashSteerableProviders, bases: capabilities.bases,
+    what: t("composer.prompt"), text, steerable: capabilities.steerableProviders, slashSteerable: capabilities.slashSteerableProviders, bases: capabilities.bases,
   });
   const pendingIds = agent?.pendingPermissions?.map(permission => permission.id) ?? [];
   return { plan, consent: consentFor(plan, pendingIds, agent?.activeTurn), offer: deferOffer(target, plan), text, messageId };
 }
 
 /** The server's confirmation of a send: the same message again, with the consent it names. */
-export function serverCheck(check: Pick<SendCheck, "text" | "messageId">, result: Extract<DeferredSendResult, { status: "confirm" }>): SendCheck {
-  return { plan: { kind: "confirm", ...result.plan }, consent: result.consent, offer: confirmOffer(result.consent), text: check.text, messageId: check.messageId };
+export function serverCheck(check: Pick<SendCheck, "text" | "messageId" | "key">, result: Extract<DeferredSendResult, { status: "confirm" }>): SendCheck {
+  return { plan: { kind: "confirm", ...result.plan }, consent: result.consent, offer: confirmOffer(result.consent), text: check.text, messageId: check.messageId, ...(check.key === undefined ? {} : { key: check.key }) };
 }
 
 /** How the queue names a prompt: by its title, well inside the queue's 200-character limit. */
 export function promptSource(title: string): string {
   const chars = Array.from(title.replace(/\s+/g, " ").trim());
-  if (!chars.length) return "提示词";
-  return `提示词「${chars.length > 60 ? `${chars.slice(0, 60).join("")}…` : chars.join("")}」`;
+  if (!chars.length) return t("composer.prompt");
+  return t("composer.source", { title: chars.length > 60 ? t("composer.truncatedTitle", { title: chars.slice(0, 60).join("") }) : chars.join("") });
 }

@@ -1,3 +1,4 @@
+import { t } from "./text";
 /**
  * 本地补丁（0.6.0，opus-F53）：时刻按设备时区显示。纯函数，客户端与单元测试共用。
  *
@@ -70,12 +71,13 @@ function calendarDays(at: number, now: number): number {
 /** 今天 / 明天 / 昨天, 10月14日 in the year of `now`, else 2027年1月3日: the device-local date of `at`. */
 export function dayLabel(at: number, now: number): string {
   const days = calendarDays(at, now);
-  if (days === 0) return "今天";
-  if (days === 1) return "明天";
-  if (days === -1) return "昨天";
+  if (days === 0) return t("clock.today");
+  if (days === 1) return t("clock.tomorrow");
+  if (days === -1) return t("clock.yesterday");
   const date = new Date(at);
-  const monthDay = `${date.getMonth() + 1}月${date.getDate()}日`;
-  return date.getFullYear() === new Date(now).getFullYear() ? monthDay : `${date.getFullYear()}年${monthDay}`;
+  return t(date.getFullYear() === new Date(now).getFullYear() ? "clock.monthDay" : "clock.yearMonthDay", {
+    year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate(),
+  });
 }
 
 /** 09:05 on the device's clock. */
@@ -88,14 +90,13 @@ export function clockOf(at: number): string {
 export function relativeLabel(at: number, now: number): string | null {
   const span = Math.abs(at - now);
   const future = at >= now;
-  const suffix = future ? "后" : "前";
-  if (span < MINUTE) return future ? "即将" : "刚刚";
+  if (span < MINUTE) return future ? t("clock.soon") : t("clock.justNow");
   const minutes = Math.round(span / MINUTE);
-  if (minutes < 60) return `${minutes} 分钟${suffix}`;
+  if (minutes < 60) return t(future ? "clock.minutesAhead" : "clock.minutesAgo", { count: minutes });
   const hours = Math.round(span / HOUR);
   const days = Math.abs(calendarDays(at, now));
-  if (hours < 48 || days < 2) return `${hours} 小时${suffix}`;
-  return days > RELATIVE_DAYS ? null : `${days} 天${suffix}`;
+  if (hours < 48 || days < 2) return t(future ? "clock.hoursAhead" : "clock.hoursAgo", { count: hours });
+  return days > RELATIVE_DAYS ? null : t(future ? "clock.daysAhead" : "clock.daysAgo", { count: days });
 }
 
 export interface InstantParts {
@@ -122,5 +123,5 @@ export function instantParts(value: unknown, now = Date.now()): InstantParts | n
 export function instantText(value: unknown, now = Date.now()): string | null {
   const parts = instantParts(value, now);
   if (!parts) return null;
-  return `${parts.day} ${parts.clock}${parts.relative ? `（${parts.relative}）` : ""}`;
+  return t(parts.relative ? "clock.instantRelative" : "clock.instant", { day: parts.day, clock: parts.clock, relative: parts.relative });
 }

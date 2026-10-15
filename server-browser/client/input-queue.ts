@@ -1,3 +1,4 @@
+import { t } from '../shared/text';
 import type { BrowserInputEvent, BrowserInputResult, BrowserTarget } from '../shared/browser';
 import { sameTarget } from './input-target';
 
@@ -84,9 +85,9 @@ export function dropAll(queue: QueuedInput[]): QueuedInput[] {
 export function droppedMessage(dropped: readonly QueuedInput[], cause: 'page' | 'dialog' = 'page'): string | null {
   const typed = dropped.reduce((total, entry) => total + (entry.event.kind === 'text' ? Array.from(entry.event.text).length : entry.event.kind === 'key' ? 1 : 0), 0);
   if (cause === 'dialog') {
-    if (typed) return `网页弹出了对话框，刚才的 ${typed} 个字或按键没有发送。请先处理对话框，再看清页面后输入。`;
-    return dropped.some((entry) => entry.event.kind === 'click') ? '网页弹出了对话框，这次点击没有执行。请先处理对话框。' : null;
+    if (typed) return t("browserInput.aPageDialogOpenedYourLastCharacters", { count: typed });
+    return dropped.some((entry) => entry.event.kind === 'click') ? t("browserInput.aPageDialogOpenedThisClickWas") : null;
   }
-  if (dropped.some((entry) => entry.event.kind === 'click')) return '画面已经变化，这次点击没有执行。请在新画面上再点一次。';
-  return typed ? `页面已经变化，刚才的 ${typed} 个字或按键没有发送。请看清当前页面后再输入。` : null;
+  if (dropped.some((entry) => entry.event.kind === 'click')) return t("browserInput.theViewChangedThisClickWasNot");
+  return typed ? t("browserInput.thePageChangedYourLastCharactersOr", { count: typed }) : null;
 }

@@ -1,3 +1,5 @@
+import { translator } from "../shared/i18n";
+import { t } from "../shared/text";
 import type { PaseoApi } from "./paseo-types";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { getAgentResult, type AgentResult, type AgentResultResponse, type ResultExcerpt } from "../shared/results";
@@ -22,11 +24,11 @@ type ExpectedSource = { expectedLastUserMessageAt?: string | null; expectedAtten
 function verifySource(source: Record<string, unknown>, expected: ExpectedSource) {
   if (expected.expectedLastUserMessageAt !== undefined && (string(source.lastUserMessageAt) || null) !== expected.expectedLastUserMessageAt
     || expected.expectedAttentionTimestamp !== undefined && (string(source.attentionTimestamp) || null) !== expected.expectedAttentionTimestamp) {
-    throw new Error("会话结果版本已变化，请刷新当前 Agent 后重新读取，避免确认尚未查看的新结果。");
+    throw new Error(t("serverResults.m001"));
   }
 }
 function excerpt(agentId: string, row: TimelineRow): ResultExcerpt {
-  const full = string(row.item.text) || string(row.item.message) || "（这条指令包含非文本内容，请在原会话查看）";
+  const full = string(row.item.text) || string(row.item.message) || t("serverResults.m002");
   const clipped = excerptText(full, 60_000);
   return { ...clipped, ref: reference(agentId, row), at: finiteTime(row.timestamp) === null ? null : row.timestamp };
 }
@@ -84,7 +86,7 @@ export function recognizeTestCommands(command: string): { command: string; safeS
 export async function fetchAgentResult(paseo: PaseoApi, agentId: string, observed?: AgentTelemetry | null, expected: ExpectedSource = {}, onReply?: (reply: ReplyObservation) => void): Promise<AgentResult> {
   const handle = paseo.agents.ref(agentId);
   const initial = await handle.refresh();
-  if (!initial?.agent) throw new Error("此 Agent 已不在当前宿主中");
+  if (!initial?.agent) throw new Error(t("serverResults.m003"));
   verifySource(object(initial.agent), expected);
   let [headRaw, tailRaw] = await Promise.all([
     handle.timeline.refetch({ direction: "after", limit: 100, projection: "projected" }),
@@ -95,7 +97,7 @@ export async function fetchAgentResult(paseo: PaseoApi, agentId: string, observe
     [headRaw, tailRaw] = await Promise.all([handle.timeline.refetch({ direction: "after", limit: 100, projection: "projected" }), handle.timeline.refetch({ direction: "tail", limit: 100, projection: "projected" })]);
     head = normalizeTimelinePage(headRaw); tail = normalizeTimelinePage(tailRaw);
   }
-  if (head.epoch !== tail.epoch) throw new Error("会话历史正在替换，请稍后刷新结果");
+  if (head.epoch !== tail.epoch) throw new Error(t("serverResults.m004"));
   let headRows = head.rows, tailRows = tail.rows, pages = 2;
   let first = headRows.find(row => row.item.type === "user_message");
   const cursors = new Set<string>();
@@ -172,7 +174,7 @@ export async function fetchAgentResult(paseo: PaseoApi, agentId: string, observe
     metrics: { tools: tools.length, failedTools: tools.filter(row => row.item.status === "failed").length,
       changedFiles: artifacts.filter(item => item.kind === "file").length, userTurns: tailRows.filter(row => row.item.type === "user_message").length },
     coverage: { firstInputConfirmed, truncated, rows: tailRows.length, hasOlder: tail.hasOlder,
-      reason: !firstInputConfirmed ? "仅能确认宿主保留历史的首条输入，不能证明是会话原始起点" : tail.hasOlder ? "最新结果和指标来自最近的有限执行窗口" : null } };
+      reason: !firstInputConfirmed ? t("serverResults.m005") : tail.hasOlder ? t("serverResults.m006") : null } };
 }
 
 export function registerResults(server: PluginServerContext, telemetry?: (agentId: string) => Promise<AgentTelemetry | null>, onReply?: (agentId: string, reply: ReplyObservation) => void): () => void {
@@ -182,13 +184,13 @@ export function registerResults(server: PluginServerContext, telemetry?: (agentI
   const removers = [server.on("agent.turn_started", ({ agent }) => { invalidate(agent.id); }),
     server.on("agent.turn_ended", ({ agent }) => { invalidate(agent.id); })];
   const read = async (input: { agentId: string; expectedLastUserMessageAt?: string | null; expectedAttentionTimestamp?: string | null }, paseo: PaseoApi) => {
-    if (closed) throw new Error("结果读取通道已关闭");
+    if (closed) throw new Error(t("serverResults.m007"));
     const { agentId } = input;
     const observed = await (telemetry?.(agentId) ?? null);
-    if (closed) throw new Error("结果读取通道已关闭");
+    if (closed) throw new Error(t("serverResults.m008"));
     // The latest turn the plugin observed is part of what a result is read for: a heartbeat's turn leaves the host's tokens (this
     // request) as they were, so a result read for the turn before is never served for it (codex-obs-attn-F1).
-    const key = JSON.stringify([input, observed?.turnStartedAt ?? null, observed?.turnEndedAt ?? null]);
+    const key = JSON.stringify([translator().language, translator().hash, input, observed?.turnStartedAt ?? null, observed?.turnEndedAt ?? null]);
     const previous = cache.get(key);
     if (previous && previous.until > Date.now()) return previous.value;
     const value = fetchAgentResult(paseo, agentId, observed, input, onReply && (reply => onReply(agentId, reply))).catch(error => { if (cache.get(key)?.value === value) cache.delete(key); throw error; });

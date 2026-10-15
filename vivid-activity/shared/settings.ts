@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -20,21 +21,21 @@ export const DEFAULT_TAKEOVER: TakeoverScope = "all";
  * 其余只展开最新一行。`hidden` 的项仍在存储结构里，但对应的行已交还 Paseo，设置页不再列出。
  */
 export const EXPANSION_TARGETS = [
-  { key: "thinking", label: "思考", default: "latest" },
-  { key: "read", label: "读取文件", default: "never" },
-  { key: "edit", label: "编辑文件", default: "never" },
-  { key: "write", label: "写入文件", default: "never" },
-  { key: "shell", label: "命令", default: "never" },
-  { key: "search", label: "搜索", default: "latest" },
-  { key: "fetch", label: "抓取网页", default: "latest" },
-  { key: "worktree_setup", label: "工作树准备", default: "latest" },
-  { key: "sub_agent", label: "子 Agent", default: "latest" },
-  { key: "plain_text", label: "纯文本结果", default: "latest" },
-  { key: "plan", label: "计划", default: "latest", hidden: true },
-  { key: "ask", label: "提问", default: "never" },
-  { key: "speak", label: "朗读", default: "latest" },
-  { key: "todo", label: "任务清单工具", default: "latest" },
-  { key: "unknown", label: "其他工具", default: "latest" },
+  { key: "thinking", get label() { return t("ui.thinking"); }, default: "latest" },
+  { key: "read", get label() { return t("settings.readFile"); }, default: "never" },
+  { key: "edit", get label() { return t("settings.editFile"); }, default: "never" },
+  { key: "write", get label() { return t("settings.writeFile"); }, default: "never" },
+  { key: "shell", get label() { return t("ui.command"); }, default: "never" },
+  { key: "search", get label() { return t("settings.search"); }, default: "latest" },
+  { key: "fetch", get label() { return t("settings.fetchPage"); }, default: "latest" },
+  { key: "worktree_setup", get label() { return t("settings.worktreeSetup"); }, default: "latest" },
+  { key: "sub_agent", get label() { return t("settings.subagent"); }, default: "latest" },
+  { key: "plain_text", get label() { return t("settings.plainTextResults"); }, default: "latest" },
+  { key: "plan", get label() { return t("settings.plan"); }, default: "latest", hidden: true },
+  { key: "ask", get label() { return t("settings.ask"); }, default: "never" },
+  { key: "speak", get label() { return t("settings.readAloud"); }, default: "latest" },
+  { key: "todo", get label() { return t("settings.taskListTools"); }, default: "latest" },
+  { key: "unknown", get label() { return t("settings.otherTools"); }, default: "latest" },
 ] as const satisfies readonly { key: string; label: string; default: ExpansionMode; hidden?: boolean }[];
 
 export type ExpansionTarget = (typeof EXPANSION_TARGETS)[number]["key"];

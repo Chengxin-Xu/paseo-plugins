@@ -1,3 +1,6 @@
+import { translator } from "../shared/i18n";
+import { useI18n } from "./i18n-client";
+import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useAgent, useSettings } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
@@ -925,14 +928,13 @@ function SubAgentProgress({
             <Icon name="Brain" color={styles.subAgentLineSummary.color} size={11} />
           </View>
           <Text numberOfLines={1} style={styles.subAgentLineLabel}>
-            思考
-          </Text>
+            {t("ui.thinking")}</Text>
           <Text numberOfLines={1} style={styles.subAgentLineSummary}>
             {thinking}
           </Text>
         </View>
       ) : null}
-      {hiddenActionCount > 0 ? <Text style={styles.subAgentMore}>还有 {hiddenActionCount} 步…</Text> : null}
+      {hiddenActionCount > 0 ? <Text style={styles.subAgentMore}>{t("ui.moreSteps", { count: hiddenActionCount })}</Text> : null}
       {visibleActions.map((action) => {
         const presentation = resolveSubAgentActionPresentation(action.toolName, action.summary);
         return (
@@ -1069,7 +1071,7 @@ function ActivityHeader({
   }
   return (
     <Pressable
-      accessibilityLabel={`${expanded ? "收起" : "展开"} ${title}`}
+      accessibilityLabel={expanded ? t("ui.collapseTitle", { title }) : t("ui.expandTitle", { title })}
       accessibilityRole="button"
       {...aria({ expanded })}
       onPress={onPress}
@@ -1087,6 +1089,7 @@ export function ColorfulReasoning({
   timestamp,
   layout,
 }: PluginTimelineItemProps<ReasoningItemData>) {
+  useI18n();
   const { ReasoningText } = useActivityDetails();
   const palette = usePalette(theme);
   const metrics = densityMetrics(useDensity(), layout.compact, layout.platform !== "web");
@@ -1112,7 +1115,7 @@ export function ColorfulReasoning({
         splitReasoningSteps(item.data.text).length,
         estimateReasoningTokens(item.data.text),
       ),
-    [item.data.text],
+    [item.data.text, translator()],
   );
   const toggle = useCallback(() => {
     setUserExpanded(!expanded);
@@ -1123,7 +1126,7 @@ export function ColorfulReasoning({
       <ActivityHeader
         icon="Sparkles"
         iconColor={palette.categoryColors.reasoning}
-        title={isStreaming ? (thinkTime ? `思考中… ${thinkTime}` : "思考中…") : thinkTime ? `思考了 ${thinkTime}` : "思考"}
+        title={isStreaming ? (thinkTime ? t("ui.thinking3", { time: thinkTime }) : t("ui.thinking2")) : thinkTime ? t("ui.thoughtFor", { time: thinkTime }) : t("ui.thinking")}
         summary={palette.mode === "vivid" ? undefined : meta}
         expanded={expanded}
         onPress={toggle}
@@ -1144,9 +1147,10 @@ export function ColorfulReasoning({
  * now (it is also retried by itself, client/transform.ts). Resident, so it works whether or not the details chunk loaded.
  */
 export function PiReaderRetry({ theme }: { theme: Theme }) {
+  useI18n();
   return (
     <View style={{ alignItems: "flex-start", paddingTop: 6 }}>
-      <Button theme={theme} size="sm" icon="RefreshCw" label="重新读取" accessibilityLabel="重新读取 Pi 通知" onPress={retryPiNotices} />
+      <Button theme={theme} size="sm" icon="RefreshCw" label={t("ui.readAgain")} accessibilityLabel={t("ui.readPiNoticesAgain")} onPress={retryPiNotices} />
     </View>
   );
 }
@@ -1158,6 +1162,7 @@ export function ColorfulToolCall({
   timestamp,
   layout,
 }: PluginTimelineItemProps<ToolCallItemData>) {
+  useI18n();
   const { DetailBody } = useActivityDetails();
   const palette = usePalette(theme);
   const metrics = densityMetrics(useDensity(), layout.compact, layout.platform !== "web");
@@ -1224,21 +1229,21 @@ export function ColorfulToolCall({
   const pi = item.data.pi;
   const look = pi ? pi.look : lookFor(item.data.name, detail, item.data.presentation);
   const mcp = look === "mcp" ? mcpParts(item.data.name) : null;
-  const vividTitle = mcp ? "MCP" : zh(item.data.presentation.label);
-  const vividSummary = mcp ? [`${mcp.server} · ${mcp.tool}`, headerSummary].filter(Boolean).join("  ") : headerSummary;
+  const vividTitle = mcp ? t("ui.mcp") : zh(item.data.presentation.label);
+  const vividSummary = mcp ? [t("ui.mcpSummary", { server: mcp.server, tool: mcp.tool }), headerSummary].filter(Boolean).join("  ") : headerSummary;
   // 0.6.0: a notice says how it ended in its own words; a reminder or an event (info) carries no state mark.
   const notice = item.data.notice;
   const noticeRaw = notice && detail?.type === "plain_text" ? detail.text : undefined;
   const noticeTime = useMemo(() => {
     const ms = noticeRaw ? noticeSections(noticeRaw).usage?.durationMs : null;
     return ms != null ? formatDuration(ms) : null;
-  }, [noticeRaw]);
+  }, [noticeRaw, translator()]);
   // 0.6.0 (opus-B30): a Pi notice too; one that reports work still going on (仍在运行) gets no spinner, the work is elsewhere.
   const headerStatus: RowStatus | undefined = notice?.state === "info" || pi?.state === "info" || pi?.state === "running" ? undefined : rowStatus;
   const statusText = notice
-    ? notice.state === "blocked" ? "卡住了" : notice.state === "stopped" ? "已停止" : undefined
+    ? notice.state === "blocked" ? t("ui.blocked") : notice.state === "stopped" ? t("ui.stopped") : undefined
     : pi
-      ? pi.state === "stopped" ? "已停止" : undefined
+      ? pi.state === "stopped" ? t("ui.stopped") : undefined
       : rowStatus === "failed" ? failureText(detail, item.data.errorText) : undefined;
   const vivid = palette.mode === "vivid";
   return (
@@ -1273,7 +1278,7 @@ export function ColorfulToolCall({
             {pi?.reader === "failed" ? <PiReaderRetry theme={theme} /> : null}
             {item.data.errorText && !(detail?.type === "shell" && !detail.output) ? (
               <View style={styles.section}>
-                <Text style={styles.detailLabel}>错误</Text>
+                <Text style={styles.detailLabel}>{t("ui.error")}</Text>
                 <Text selectable style={{ ...styles.detailText, color: palette.statusColors.failed }}>{stripAnsi(item.data.errorText)}</Text>
               </View>
             ) : null}
@@ -1283,4 +1288,3 @@ export function ColorfulToolCall({
     </View>
   );
 }
-

@@ -1,3 +1,4 @@
+import { t } from "../../shared/text";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentTimelineItem } from "../paseo-types";
@@ -55,7 +56,7 @@ export function compactRow(row: TimelineRow, cwd: string, projected = row.seqSta
     }
     if (detail.type === "search" && typeof detail.query === "string") patch.target = excerpt(detail.query, 80);
     if (detail.type === "fetch" && typeof detail.url === "string") {
-      try { patch.target = new URL(string(detail.url)).host; } catch { patch.target = "网页"; }
+      try { patch.target = new URL(string(detail.url)).host; } catch { patch.target = t("serverDigestFold.m001"); }
     }
     if (detail.type === "sub_agent" && (typeof detail.description === "string" || typeof detail.subAgentType === "string")) {
       patch.target = excerpt(string(detail.description) || string(detail.subAgentType), 160);
@@ -128,7 +129,7 @@ export function foldRows(state: FoldState, rows: readonly CompactRow[]): FoldSta
       turn.error = true; if (latest) turn.tail = "error";
       state.events.push({ type: "error", at: row.at, turn: turn.index, seq: row.seq, detail: row.text ?? "" });
     } else if (row.type === "compaction") {
-      if (!turn.compactionOpen) state.events.push({ type: "compaction", at: row.at, turn: turn.index, seq: row.seq, detail: "上下文已压缩" });
+      if (!turn.compactionOpen) state.events.push({ type: "compaction", at: row.at, turn: turn.index, seq: row.seq, detail: t("serverDigestFold.m002") });
       turn.compactionOpen = !row.completed;
     } else if (row.type === "reasoning" && latest) turn.tail = row.type;
     if ((row.type === "assistant_message" || row.type === "reasoning") && row.start !== undefined && row.start < row.at) {

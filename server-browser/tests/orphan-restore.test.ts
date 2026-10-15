@@ -16,7 +16,7 @@ for(const cleanup of ['delete','stop'] as const)test(`a workspace restored after
   const dataRoot=await mkdtemp(path.join(tmpdir(),'sb-orphan-restore-')),manager=new BrowserManager({dataRoot});
   await mkdir(path.join(dataRoot,'restorable','profile'),{recursive:true,mode:0o700});await writeFile(path.join(dataRoot,'restorable','profile','sentinel'),'login');
   const handlers=new Map<string,Handler>();
-  const server={handle:(contract:{name:string},handler:Handler)=>{handlers.set(contract.name,handler);},on:()=>()=>{},before:()=>()=>{},registerSettings(){},registerProvider(){}} as unknown as PluginServerContext;
+  const server={handle:(contract:{name:string},handler:Handler)=>{handlers.set(contract.name,handler);},on:()=>()=>{},before:()=>()=>{},registerSettings(){return {read:async()=>({status:'ready',revision:'r1',values:{language:'zh-CN'}}),subscribe:()=>()=>{}};},registerProvider(){}} as unknown as PluginServerContext;
   let entries:PaseoWorkspace[]=[];
   const paseo={workspaces:{list:async()=>({entries,pageInfo:{hasMore:false}})}};
   const stop=contribute(server,{manager,directory:new WorkspaceDirectory()});

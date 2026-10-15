@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -37,8 +38,8 @@ export function fitInsightReport(job: InsightJob): InsightJob {
     bounded.evidence = bounded.evidence?.map(row => ({ ...row, text: excerptText(row.text, limit).text }));
   }
   while (bytes({ version: 1, job: bounded }) > MAX_REPORT_BYTES && bounded.evidence?.length) bounded.evidence.pop();
-  if (bounded.report) bounded.report.limitations = [...bounded.report.limitations.slice(0, 7), "存储容量有限，部分引用片段已压缩；可跳转原始时间线核对。"];
-  if (bytes({ version: 1, job: bounded }) > MAX_REPORT_BYTES) throw new Error("单份报告超过存储容量，其他报告不受影响。");
+  if (bounded.report) bounded.report.limitations = [...bounded.report.limitations.slice(0, 7), t("serverInsightStorage.m001")];
+  if (bytes({ version: 1, job: bounded }) > MAX_REPORT_BYTES) throw new Error(t("serverInsightStorage.m002"));
   return bounded;
 }
 /** Status noise has its own budget and can never evict a successful report. */
@@ -94,20 +95,20 @@ export class InsightStorage {
       if (saved.version === 1) { settings = { ...settings, autoEnabled: false, runner: { kind: "grok" } }; settingsMigrated = true; }
       else this.savedSettings = JSON.stringify(settings);
     } }
-    catch { settingsBroken = true; settings.autoEnabled = false; this.error = "分析设置无法恢复，自动分析已安全关闭；可在设置中重新开启。"; await this.backup(config); }
+    catch { settingsBroken = true; settings.autoEnabled = false; this.error = t("serverInsightStorage.m003"); await this.backup(config); }
     const result: InsightStoredState = { settings, jobs: [], cooldowns: {}, activity: {}, revision: 1 };
     let imported = false;
     try {
       const raw = await this.read(index, MAX_INDEX_BYTES);
       if (raw !== undefined) {
         const saved = indexSchema.parse(raw); result.cooldowns = saved.cooldowns; result.activity = saved.activity; result.revision = saved.revision;
-        if (!settingsKnown && !settingsBroken) { result.settings.autoEnabled = false; this.error = "分析设置缺失，自动分析保持关闭。"; }
+        if (!settingsKnown && !settingsBroken) { result.settings.autoEnabled = false; this.error = t("serverInsightStorage.m004"); }
         for (const summary of saved.jobs) {
           let job: InsightJob = insightJobSchema.parse({ ...summary, report: null });
           if (summary.reportAvailable) try {
             const stored = reportSchema.parse(await this.read(join(this.reports, filename(summary.id)), MAX_REPORT_BYTES));
             if (stored.job.id !== summary.id) throw new Error("report ID mismatch"); job = stored.job;
-          } catch { await rename(join(this.reports, filename(summary.id)), join(this.directory, "insight-report.corrupt.backup")).catch(() => {}); job = { ...job, status: "failed", stage: "报告文件暂不可用", error: "这份报告无法读取，其他报告与设置已保留。" }; this.error = "部分报告无法读取，其他报告与分析设置不受影响。"; }
+          } catch { await rename(join(this.reports, filename(summary.id)), join(this.directory, "insight-report.corrupt.backup")).catch(() => {}); job = { ...job, status: "failed", stage: t("serverInsightStorage.m005"), error: t("serverInsightStorage.m006") }; this.error = t("serverInsightStorage.m007"); }
           result.jobs.push(job);
         }
       } else {
@@ -118,8 +119,8 @@ export class InsightStorage {
           imported = true; const saved = old as Record<string, unknown>;
           if (!settingsKnown && !settingsBroken) { const parsed = insightSettingsSchema.safeParse(saved.settings); result.settings = { ...(parsed.success ? parsed.data : defaults), autoEnabled: false, runner: { kind: "grok" } }; }
           if (Array.isArray(saved.jobs)) for (const value of saved.jobs) {
-            const parsed = insightJobSchema.safeParse(value); if (!parsed.success) { this.error = "部分旧分析记录无效，已保留其余报告。"; continue; }
-            try { result.jobs.push(fitInsightReport(parsed.data)); } catch { this.error = "部分旧报告超出单份容量，其余报告已迁移。"; }
+            const parsed = insightJobSchema.safeParse(value); if (!parsed.success) { this.error = t("serverInsightStorage.m008"); continue; }
+            try { result.jobs.push(fitInsightReport(parsed.data)); } catch { this.error = t("serverInsightStorage.m009"); }
           }
           const fingerprints = saved.fingerprints && typeof saved.fingerprints === "object" ? saved.fingerprints as Record<string, unknown> : {};
           for (const job of [...result.jobs].sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt))) if (job.status === "completed") result.cooldowns[job.agentId] = {
@@ -128,7 +129,7 @@ export class InsightStorage {
       }
     } catch {
       if (!settingsKnown) result.settings.autoEnabled = false;
-      this.error = "分析索引无法恢复，原文件已保留；已保存的独立设置仍然有效。";
+      this.error = t("serverInsightStorage.m010");
       await this.backup(index); await this.backup(legacy);
       result.jobs = await this.recoverReports();
     }
@@ -144,7 +145,7 @@ export class InsightStorage {
     this.writes = this.writes.then(async () => {
       if (this.savedSettings === signature) return;
       try { await this.atomic(join(this.directory, "insight-settings.json"), { version: 2, settings: snapshot }); this.savedSettings = signature; }
-      catch { this.error = "分析设置暂时无法保存，当前选择保留在内存。"; }
+      catch { this.error = t("serverInsightStorage.m011"); }
     });
     await this.writes;
   }
@@ -166,7 +167,7 @@ export class InsightStorage {
         this.lastSaveSucceeded = true;
         const retained = new Set(snapshot.jobs.filter(job => job.report).map(job => filename(job.id)));
         for (const name of await readdir(this.reports)) if (/^[a-f0-9]{64}\.json$/.test(name) && !retained.has(name)) await unlink(join(this.reports, name)).catch(() => {});
-      } catch { this.error = "部分分析数据暂时无法保存，已保留内存状态与原有文件。"; }
+      } catch { this.error = t("serverInsightStorage.m012"); }
     });
     return this.writes;
   }

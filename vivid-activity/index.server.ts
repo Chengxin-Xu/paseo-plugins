@@ -1,3 +1,5 @@
+import { createLocaleService } from "./server/i18n-server";
+import { BUILTIN_CATALOGS } from "./server/locales";
 import { getUiChunk } from "./server/ui-chunk";
 import { getClientChunk } from "./shared/ui-chunk";
 import { handleChildSummary } from "./server/child-summary";
@@ -12,6 +14,7 @@ import { readImageRpc } from "./shared/read-image.js";
 import { activitySettings } from "./shared/settings";
 
 export default function contribute(server: PluginServerContext) {
+  const locales = createLocaleService(server, { pluginId: "vivid-activity", builtins: BUILTIN_CATALOGS });
   server.handle(getClientChunk, getUiChunk);
   server.registerSettings(activitySettings);
   server.handle(childSummaryRpc, handleChildSummary);
@@ -25,6 +28,7 @@ export default function contribute(server: PluginServerContext) {
   // 0.5.0：Agent 关闭（归档、删除、从归档恢复、daemon 停止）后丢掉它的轮次开始时间（Paseo 0.11 的 `agent.closed`）。
   const stopClosed = server.on("agent.closed", (event) => forgetAgentTurns(event.agent.id));
   return () => {
+    locales.dispose();
     stopTurns();
     stopClosed();
   };

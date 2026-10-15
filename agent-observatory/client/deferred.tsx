@@ -1,3 +1,5 @@
+import { deferredSourceLabel } from "./deferred-state";
+import { t } from "../shared/text";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -89,15 +91,15 @@ function DeferredRow({ theme, view, busy, compact, onCancel, onResume }: { theme
   const { colors } = theme;
   const badge = deferredBadge(view), changed = useChangeCount(view.state), waiting = isOnItsWay(view);
   const mark = <Badge theme={theme} label={badge.label} tone={badge.tone} icon={ICONS[view.state]} />;
-  const name = view.source || view.preview;
+  const name = deferredSourceLabel(view.source) || view.preview;
   // One being sent right now cannot be taken back: it has no buttons.
   const actions = view.state === "queued" || view.state === "held" ? <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", gap: space.sm, marginLeft: "auto" }}>
-    {view.state === "held" ? <Button theme={theme} size="sm" label="仍然发送" icon="Send" tone="orange" busy={busy} accessibilityLabel={`仍然发送：${name}`} onPress={onResume} /> : null}
-    <Button theme={theme} size="sm" label={view.state === "queued" ? "取消排队" : "取消"} icon="X" variant="ghost" disabled={busy} accessibilityLabel={`${view.state === "queued" ? "取消排队" : "取消"}：${name}`} onPress={onCancel} />
+    {view.state === "held" ? <Button theme={theme} size="sm" label={t("coreDeferred.sendAnyway")} icon="Send" tone="orange" busy={busy} accessibilityLabel={t("coreDeferred.sendAnyway2", { value1: name })} onPress={onResume} /> : null}
+    <Button theme={theme} size="sm" label={view.state === "queued" ? t("coreDeferred.cancelQueue") : t("coreDeferred.cancel")} icon="X" variant="ghost" disabled={busy} accessibilityLabel={t("coreDeferred.message", { value1: view.state === "queued" ? t("coreDeferred.cancelQueue") : t("coreDeferred.cancel"), value2: name })} onPress={onCancel} />
   </View> : null;
   // 已送达 says it all; a note is worth a line when it explains or asks.
   const note = view.note && view.note !== badge.label && !(compact && view.state === "queued") ? view.note : null;
-  return <View accessibilityLabel={`${badge.label}：${name}`} {...aria({ live: "polite" })}
+  return <View accessibilityLabel={t("coreDeferred.message", { value1: badge.label, value2: name })} {...aria({ live: "polite" })}
     style={{ overflow: "hidden", gap: space.xs + 2, padding: compact ? space.sm : space.sm + 2, borderRadius: radius.md, borderWidth: hairline, borderColor: toneColor(theme, badge.tone, "line"), backgroundColor: toneColor(theme, badge.tone, "soft") }}>
     <Flash count={changed} color={withAlpha(toneColor(theme, badge.tone, "mark"), 0.35)} radius={radius.md} />
     <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.sm }}>

@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -210,7 +211,7 @@ export class TelemetryStore {
     }
     const at = this.now();
     const task = this.mutations.then(() => this.apply(metadata, at) ?? null).catch(() => {
-      this.setError("有一条事件没能记录，会话的实时状态不受影响。");
+      this.setError(t("serverTelemetry.m001"));
       return null;
     });
     this.mutations = task.then(() => {});
@@ -262,7 +263,7 @@ export class TelemetryStore {
       this.dirty = true;
       this.scheduleWrite();
     }).catch(() => {
-      this.setError("有一条用量记录没能处理，其他事件照常记录。");
+      this.setError(t("serverTelemetry.m002"));
     });
     return this.mutations;
   }
@@ -344,7 +345,7 @@ export class TelemetryStore {
       this.dirty = true;
       this.scheduleWrite();
     }).catch(() => {
-      this.setError("有一条回复记录没能处理，其他事件照常记录。");
+      this.setError(t("serverTelemetry.m003"));
     });
     return this.mutations;
   }
@@ -436,13 +437,13 @@ export class TelemetryStore {
       } catch (error) {
         this.dirty ||= durable;
         this.coverageDirty = true;
-        this.setError(`事件暂时无法写入磁盘（${errorCode(error)}），仍在内存里继续记录。`);
+        this.setError(t("serverTelemetry.m004", { value1: errorCode(error) }));
       } finally {
         await unlink(temporary).catch(() => {});
       }
     }).catch(() => {
       this.dirty = true;
-      this.setError("事件暂时无法写入磁盘，仍在内存里继续记录。");
+      this.setError(t("serverTelemetry.m005"));
     });
     return this.writes;
   }
@@ -478,7 +479,7 @@ export class TelemetryStore {
       content = await readFile(this.file, "utf8");
     } catch (error) {
       if (errorCode(error) !== "ENOENT") {
-        this.persistenceError = `已保存的事件历史无法读取（${errorCode(error)}），已重新开始记录。`;
+        this.persistenceError = t("serverTelemetry.m006", { value1: errorCode(error) });
       }
       return;
     }
@@ -489,7 +490,7 @@ export class TelemetryStore {
       for (const state of ordered) this.agents.set(state.summary.agentId, state);
       this.events = saved.events.slice(0, this.maxEvents);
       if (saved.analytics !== undefined && !this.analytics.restore(saved.analytics)) {
-        this.persistenceError = "已保存的统计数据无法读取，已重新开始统计；会话事件历史保留不变。";
+        this.persistenceError = t("serverTelemetry.m007");
       }
       this.lastWrittenDigest = createHash("sha256").update(content).digest("base64");
     } catch {
@@ -498,7 +499,7 @@ export class TelemetryStore {
   }
 
   private async recoverInvalidFile(quarantine = true): Promise<void> {
-    this.persistenceError = quarantine ? "已保存的事件历史无法读取，已重新开始记录；原文件另存了一份备份。" : "已保存的事件历史超过 64 MB，无法读取，已重新开始记录。";
+    this.persistenceError = quarantine ? t("serverTelemetry.m008") : t("serverTelemetry.m009");
     // A single quarantine file replaces the previous one, keeping recovery disk use bounded.
     if (quarantine) await rename(this.file, `${this.file}.corrupt`).catch(() => {});
     else await unlink(this.file).catch(() => {});
@@ -572,7 +573,7 @@ export class TelemetryStore {
         // A replayed creation should not clear already-observed lifecycle information.
         if (this.events.some((event) => event.agentId === agent.id && event.type === "created")) return;
         type = "created";
-        label = "新建 Agent";
+        label = t("serverTelemetry.m010");
         break;
       case "turn_started": {
         const key = identifierKey(observation.turnId, "turn");
@@ -590,7 +591,7 @@ export class TelemetryStore {
         state.summary.replyNudge = null;
         state.summary.stop = null;
         type = "turn_started";
-        label = "开始一轮";
+        label = t("serverTelemetry.m011");
         break;
       }
       case "turn_ended": {
@@ -629,7 +630,7 @@ export class TelemetryStore {
           state.pendingPermissions = [];
         }
         type = `turn_${observation.outcome}`;
-        label = observation.outcome === "completed" ? "完成一轮" : observation.outcome === "failed" ? "一轮失败" : "一轮被取消";
+        label = observation.outcome === "completed" ? t("serverTelemetry.m012") : observation.outcome === "failed" ? t("serverTelemetry.m013") : t("serverTelemetry.m014");
         break;
       }
       case "permission_requested": {
@@ -639,7 +640,7 @@ export class TelemetryStore {
         state.pendingPermissions.push({ key, at });
         state.pendingPermissions = state.pendingPermissions.slice(-MAX_PERMISSIONS);
         type = "permission_requested";
-        label = "等你审批或回答";
+        label = t("serverTelemetry.m015");
         break;
       }
       case "permission_resolved": {
@@ -651,14 +652,14 @@ export class TelemetryStore {
         remember(state.resolvedPermissions, key, MAX_PERMISSION_HISTORY);
         if (state.pendingPermissions.length === 0) this.finishPermissionWait(state, at);
         type = "permission_resolved";
-        label = observation.allowed ? "请求已批准" : "请求被拒绝或撤销";
+        label = observation.allowed ? t("serverTelemetry.m016") : t("serverTelemetry.m017");
         break;
       }
       case "archived":
         this.finishPermissionWait(state, at);
         state.pendingPermissions = [];
         type = "archived";
-        label = "已归档";
+        label = t("serverTelemetry.m018");
         break;
       case "closed": {
         // Closing ends the session; turns still open will never report an end. Mark the latest one as stopped mid-way
@@ -680,10 +681,11 @@ export class TelemetryStore {
     const event: TelemetryEvent = {
       id: randomUUID(),
       agentId: agent.id,
-      agentTitle: (agent.title?.trim() || "未命名 Agent").slice(0, 160),
+      agentTitle: (agent.title?.trim() || t("serverTelemetry.m019")).slice(0, 160),
       at: stamp,
       type,
-      label,
+      label, localized: true,
+      ...(observation.type === "permission_resolved" ? { permissionAllowed: observation.allowed } : {}),
       ...(durationMs === undefined ? {} : { durationMs }),
     };
     this.events.unshift(event);

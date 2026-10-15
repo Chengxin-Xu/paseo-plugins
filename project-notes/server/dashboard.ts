@@ -1,6 +1,7 @@
+import { t } from "../shared/text";
 import { createHash } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { INBOX_DESCRIPTION, INBOX_PROJECT_ID, type BoardProject, type DashboardUpdate, type UnavailableBoard } from "../shared/board";
+import { getInboxDescription, INBOX_PROJECT_ID, type BoardProject, type DashboardUpdate, type UnavailableBoard } from "../shared/board";
 import type { BoardStore } from "./store";
 
 type Paseo = PluginHandlerContext["paseo"];
@@ -39,7 +40,7 @@ export class ProjectDirectory {
     if (!fresh && this.value && now() - this.value.at < (this.options.ttlMs ?? 30_000)) return Promise.resolve(this.value.projects);
     if (!fresh && this.pending) return this.pending;
     const generation = this.generation, stale = this.value;
-    const task = withTimeout(paseo.projects.list(), this.options.timeoutMs ?? 8_000, "读取 Paseo 项目列表超时，请稍后刷新。")
+    const task = withTimeout(paseo.projects.list(), this.options.timeoutMs ?? 8_000, t("serverStore.projectsTimeout"))
       .then(result => {
         if (generation === this.generation) this.value = { at: now(), projects: result.projects };
         return result.projects;
@@ -52,7 +53,7 @@ export class ProjectDirectory {
 }
 
 export function boardProjects(projects: readonly PaseoProject[]): BoardProject[] {
-  return [{ id: INBOX_PROJECT_ID, name: "随手记", path: INBOX_DESCRIPTION }, ...projects.map(p => ({ id: p.projectId, name: p.projectDisplayName, path: p.projectRootPath }))];
+  return [{ id: INBOX_PROJECT_ID, name: t("serverStore.inbox"), path: getInboxDescription() }, ...projects.map(p => ({ id: p.projectId, name: p.projectDisplayName, path: p.projectRootPath }))];
 }
 
 /**
@@ -68,10 +69,12 @@ export class DashboardService {
     const [listed, { entries, unavailable: skipped }] = await Promise.all([this.projects.list(paseo), this.store.readEntries()]);
     const projects = boardProjects(listed);
     const knownIds = new Set(projects.map(p => p.id));
+    const retiredProjectIds: string[] = [];
     // Notes of a removed project stay visible under a stand-in name.
     const keep = (projectId: string) => {
       if (knownIds.has(projectId)) return;
-      projects.push({ id: projectId, name: `历史项目 · ${projectId.slice(-8)}`, path: "项目已移除，手记仍保留" });
+      projects.push({ id: projectId, name: t("serverStore.historicalProject", { id: projectId.slice(-8) }), path: t("serverStore.removedProject") });
+      retiredProjectIds.push(projectId);
       knownIds.add(projectId);
     };
     for (const { snapshot } of entries) keep(snapshot.projectId);
@@ -89,11 +92,12 @@ export class DashboardService {
     const refresh = new Set(refreshProjectIds);
     if (known === revision && !refresh.size) return { unchanged: true, revision };
     const base = known ? this.history.get(known) : undefined;
-    if (!base) return { mode: "full", revision, projects, boards: entries.map(e => e.snapshot), unavailable };
+    if (!base) return { mode: "full", revision, projects, boards: entries.map(e => e.snapshot), unavailable, ...(retiredProjectIds.length ? { retiredProjectIds } : {}) };
     return {
       mode: "delta", baseRevision: known,
       removedProjectIds: [...new Set([...base.keys(), ...refresh])].filter(key => !key.startsWith("\u0000") && !tokens.has(key)),
       revision, ...(base.get(PROJECTS_KEY) === tokens.get(PROJECTS_KEY) ? {} : { projects }),
+      ...(retiredProjectIds.length ? { retiredProjectIds } : {}),
       boards: entries.filter(e => refresh.has(e.snapshot.projectId) || base.get(e.snapshot.projectId) !== e.token).map(e => e.snapshot), unavailable,
     };
   }

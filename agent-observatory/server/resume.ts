@@ -1,12 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { onTextChange } from "../shared/i18n";
+import { t } from "../shared/text";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import type { PaseoApi } from "./paseo-types";
 import type { ProviderBridge } from "./provider-subagents";
-import { PENDING_RESUME, RESUME_BUSY_RETRY_MS, RESUME_LEDGER_LIMIT, RESUME_MISSED_GRACE_MS, RESUME_MISSED_RETRY_MS, RESUME_PROMPT, RESUME_WINDOW_MS, RESUME_WINDOW_TEXT, cancelResume, getResumes,
-  isResumeName, resumeCadenceSchema, resumeCron, resumeEntrySchema, resumeName, sameMinute, scheduleResume, type CancelResumeResult, type ResumeCadence, type ResumeEntry,
+import { LEGACY_RESUME_NAME, LEGACY_RESUME_PROMPT, PENDING_RESUME, RESUME_BUSY_RETRY_MS, RESUME_LEDGER_LIMIT, RESUME_MISSED_GRACE_MS, RESUME_MISSED_RETRY_MS, RESUME_PROMPT, RESUME_WINDOW_MS, RESUME_WINDOW_TEXT, cancelResume, getResumes,
+  resumeCadenceSchema, resumeCron, resumeEntrySchema, resumeName, sameMinute, scheduleResume, type CancelResumeResult, type ResumeCadence, type ResumeEntry,
   type ResumeReason, type ResumesResponse, type ResumeStatus, type ScheduleResumeResult } from "../shared/resume";
 import { getProviderBases } from "../shared/provider-bases";
 import { object, string } from "../shared/timeline";
@@ -32,7 +34,7 @@ const KEEP_FINISHED_MS = 7 * DAY;
  * one), and before adopting one (codex-obs-resume-recheck6-F2). A heartbeat made in time is kept (or undone, at a wrong minute).
  */
 const CANCEL_START_MS = 15_000, SCHEDULE_START_MS = 6_000;
-const SCHEDULE_TOO_LATE = "观测台正忙，这次请求等得太久，没有安排续跑；请再试一次。";
+let SCHEDULE_TOO_LATE = t("serverResume.m001");
 /** The ledger file, at most: a larger one is not read (and is set aside), so nothing is ever written past it. */
 export const LEDGER_MAX_BYTES = 1024 * 1024;
 /**
@@ -60,7 +62,7 @@ export function wallLabel(at: number, zone: string | null | undefined, now = Dat
     return { day: Date.UTC(Number(part("year")), Number(part("month")) - 1, Number(part("day"))), month: Number(part("month")), date: Number(part("day")), clock: `${part("hour").padStart(2, "0")}:${part("minute")}` };
   };
   const wake = parts(at), days = Math.round((wake.day - parts(now).day) / DAY);
-  return days === 0 ? wake.clock : days === 1 ? `明天 ${wake.clock}` : `${wake.month}月${wake.date}日 ${wake.clock}`;
+  return days === 0 ? wake.clock : days === 1 ? t("serverResume.m002", { value1: wake.clock }) : t("serverResume.m003", { value1: wake.month, value2: wake.date, value3: wake.clock });
 }
 
 /**
@@ -120,7 +122,9 @@ function sameRule(cron: HeartbeatCron | null, kept: ResumeCadence | null | undef
  * (schedule/list and schedule/inspect both carry them). A copy the user made recurring in 计划 keeps the name, so the name
  * alone never adopts, replaces, deletes or cancels one.
  */
-const ownResume = (heartbeat: Heartbeat, agentId: string) => isResumeName(heartbeat.name) && heartbeat.agentId === agentId && heartbeat.maxRuns === 1 && heartbeat.prompt === RESUME_PROMPT;
+const resumeIdentity = (name: string | null, prompt: string | null): string => createHash("sha256").update(JSON.stringify([name, prompt])).digest("hex");
+const legacyResumeIdentity = (name: string | null, prompt: string | null): boolean => !!name?.startsWith(LEGACY_RESUME_NAME) && prompt === LEGACY_RESUME_PROMPT;
+const generatedIdentity = (name: string, prompt: string): string | undefined => legacyResumeIdentity(name, prompt) ? undefined : resumeIdentity(name, prompt);
 /**
  * How the host failed a run, read only from its own whole wording (daemon 0.11.1 schedule/service.js, agent-manager.js) with
  * this Agent's id where it writes one (codex-obs-resume-recheck2-F1). Once the prompt went in, the host fails a run with the
@@ -151,7 +155,7 @@ async function inspectHeartbeat(bridge: Bridge, id: string): Promise<Heartbeat |
   try { response = await bridge.request({ type: "schedule/inspect", scheduleId: id }, "schedule/inspect/response"); }
   catch (error) { if (notFound(error)) return null; throw error; }
   const heartbeat = heartbeatOf(response.schedule);
-  if (!heartbeat) throw new Error("宿主返回了无法识别的心跳");
+  if (!heartbeat) throw new Error(t("serverResume.m004"));
   return heartbeat;
 }
 /**
@@ -183,17 +187,17 @@ type Made = { ok: true; id: string; nextRunAt: number } | { ok: false; message: 
  * One one-off heartbeat at `at` (a UTC cron, `maxRuns` 1, expiring with the retry window). Kept only when the host's own
  * `nextRunAt` is the minute asked for (codex-F7): a heartbeat at any other time is deleted again and reported.
  */
-async function createHeartbeat(bridge: Bridge, input: { agentId: string; at: number; name: string; expiresAt: number }, zone: string | null | undefined, now: number): Promise<Made> {
-  const response = await bridge.request({ type: "schedule/create", prompt: RESUME_PROMPT, name: input.name, cadence: { type: "cron", ...resumeCron(input.at) },
+async function createHeartbeat(bridge: Bridge, input: { agentId: string; at: number; name: string; prompt: string; expiresAt: number }, zone: string | null | undefined, now: number): Promise<Made> {
+  const response = await bridge.request({ type: "schedule/create", prompt: input.prompt, name: input.name, cadence: { type: "cron", ...resumeCron(input.at) },
     target: { type: "agent", agentId: input.agentId }, maxRuns: 1, expiresAt: iso(input.expiresAt) }, "schedule/create/response", 15_000);
   const schedule = object(response.schedule), id = string(schedule.id);
-  if (!id) return { ok: false, message: `宿主没有建立续跑：${string(response.error) || "未返回任务"}` };
+  if (!id) return { ok: false, message: t("serverResume.m005", { value1: string(response.error) || t("serverResume.m006") }) };
   const next = Date.parse(string(schedule.nextRunAt));
   if (sameMinute(next, input.at)) return { ok: true, id, nextRunAt: next };
   // Never keep a wake at a time the user did not confirm.
   const removed = await removeHeartbeat(bridge, id).then(() => true, () => false);
-  const host = Number.isFinite(next) ? `宿主算出的唤醒时间是 ${wallLabel(next, zone, now)}，` : "宿主没有给出唤醒时间，";
-  return { ok: false, message: `${host}和确认的 ${wallLabel(input.at, zone, now)} 不一致，${removed ? "已撤销，没有安排续跑。" : `撤销失败，请在 Paseo 的「计划」里删除「${input.name}」。`}` };
+  const host = Number.isFinite(next) ? t("serverResume.m007", { value1: wallLabel(next, zone, now) }) : t("serverResume.m008");
+  return { ok: false, message: t("serverResume.m009", { host: host, value2: wallLabel(input.at, zone, now), value3: removed ? t("serverResume.m010") : t("serverResume.m011", { value1: input.name }) }) };
 }
 /**
  * The wake minutes of all Agents' resumes, as the ledger hands them out (`ResumeLedger.hold`, codex-obs-resume-F1): `hold` picks
@@ -214,34 +218,34 @@ export interface WakeMinutes { hold(asked: number): number; release(at: number):
  * heartbeat's own rule.
  */
 export async function createResume(paseo: PaseoApi, bridge: Bridge, input: { agentId: string; at: string; title?: string; timeZone?: string }, now = Date.now(), zone?: string | null,
-  taken: ReadonlySet<number> | WakeMinutes = new Set(), late: () => boolean = () => false): Promise<ScheduleResumeResult & { name?: string; at?: number }> {
+  taken: ReadonlySet<number> | WakeMinutes = new Set(), late: () => boolean = () => false): Promise<ScheduleResumeResult & { name?: string; at?: number; identity?: string }> {
   const failed = (message: string): ScheduleResumeResult => ({ status: "failed", scheduleId: null, runAt: null, message });
   const asked = Date.parse(input.at), words = zone ?? input.timeZone;
-  if (!Number.isFinite(asked) || asked < now + 30_000 || asked > now + 8 * DAY) return failed("唤醒时间已过或太远，请刷新后重试。");
+  if (!Number.isFinite(asked) || asked < now + 30_000 || asked > now + 8 * DAY) return failed(t("serverResume.m012"));
   const minutes = "hold" in taken ? taken : null, at = minutes ? minutes.hold(asked) : freeMinute(asked, taken as ReadonlySet<number>);
   let made = false;
   try {
     const current = await paseo.agents.ref(input.agentId).refresh();
     if (late()) return failed(SCHEDULE_TOO_LATE);
-    if (!current?.agent) return failed("当前宿主找不到这个 Agent。");
-    if (current.agent.archivedAt) return failed("这个 Agent 已归档，先恢复会话再安排续跑。");
-    const name = resumeName(input.title ?? current.agent.title);
-    const moved = sameMinute(at, asked) ? "" : `（${wallLabel(asked, words, now)} 已有别的定时任务，顺延 ${Math.max(1, Math.round((at - asked) / MINUTE))} 分钟）`;
+    if (!current?.agent) return failed(t("serverResume.m013"));
+    if (current.agent.archivedAt) return failed(t("serverResume.m014"));
+    const name = resumeName(input.title ?? current.agent.title), prompt = RESUME_PROMPT, identity = generatedIdentity(name, prompt);
+    const moved = sameMinute(at, asked) ? "" : t("serverResume.m015", { value1: wallLabel(asked, words, now), value2: Math.max(1, Math.round((at - asked) / MINUTE)) });
     let created: Made;
-    try { created = await createHeartbeat(bridge, { agentId: input.agentId, at, name, expiresAt: at + RESUME_WINDOW_MS }, words, now); }
+    try { created = await createHeartbeat(bridge, { agentId: input.agentId, at, name, prompt, expiresAt: at + RESUME_WINDOW_MS }, words, now); }
     catch (error) {
       // No answer: the host may have made it all the same. Never made twice: recorded as a resume to confirm, which the ledger's
       // checks look for (`ResumeLedger.made`, codex-obs-resume-recheck12).
       made = true;
-      return { status: "scheduled", scheduleId: null, runAt: iso(Math.floor(at / MINUTE) * MINUTE), name, at,
-        message: `安排续跑时宿主没有回话（${errorText(error).replaceAll("子任务", "续跑").replace(/[。.]$/, "")}），还不知道续跑建好没有。已记下 ${wallLabel(at, words, now)} 的续跑${moved}：观测台会在下一分钟核对，确认不了时，停下卡片上会请你到 Paseo 的「计划」里查看。` };
+      return { status: "scheduled", scheduleId: null, runAt: iso(Math.floor(at / MINUTE) * MINUTE), name, at, ...(identity ? { identity } : {}),
+        message: t("serverResume.m016", { value1: errorText(error).replaceAll(t("serverResume.m017"), t("serverResume.m018")).replace(/[。.]$/, ""), value2: wallLabel(at, words, now), moved: moved }) };
     }
     if (!created.ok) return failed(created.message);
     made = true;
-    return { status: "scheduled", scheduleId: created.id, runAt: iso(created.nextRunAt), name, at,
-      message: `已安排 ${wallLabel(created.nextRunAt, words, now)} 续跑${moved}。到点时它正忙或宿主不在线，${RESUME_WINDOW_TEXT}内会自动再试；可以在停下卡片上取消。` };
+    return { status: "scheduled", scheduleId: created.id, runAt: iso(created.nextRunAt), name, at, ...(identity ? { identity } : {}),
+      message: t("serverResume.m019", { value1: wallLabel(created.nextRunAt, words, now), moved: moved, RESUME_WINDOW_TEXT: RESUME_WINDOW_TEXT }) };
   } catch (error) {
-    return failed(`安排续跑失败：${errorText(error).replaceAll("子任务", "续跑")}`);
+    return failed(t("serverResume.m020", { value1: errorText(error).replaceAll(t("serverResume.m021"), t("serverResume.m022")) }));
   } finally {
     if (!made) minutes?.release(at);
   }
@@ -279,7 +283,7 @@ interface AgentState { missing: boolean; archived: boolean; userAt: number | nul
 /** Schedule and run ids as the host makes them (8 hex digits, a UUID): the only ids put into a marker looked for in a log. */
 const HOST_ID = /^[\w-]{1,128}$/;
 /** A heartbeat kept to delete, as the ledger file holds it (`tidy`). */
-const tidySchema = z.object({ id: z.string().regex(HOST_ID), agentId: z.string().min(1).max(256) });
+const tidySchema = z.object({ identity: z.string().regex(/^[a-f0-9]{64}$/).optional(), id: z.string().regex(HOST_ID), agentId: z.string().min(1).max(256) });
 /**
  * Whether an ended resume's heartbeat may still be owed a delete: not one cancelled here (deleted then), deleted in Paseo, or the
  * user's (changed or paused there).
@@ -336,6 +340,14 @@ export class ResumeLedger {
    * TIDY_HARD_LIMIT.
    */
   private tidy = new Map<string, string>();
+  /** Fingerprints for localized heartbeats still waiting for cleanup after their entry was replaced. */
+  private tidyIdentities = new Map<string, string>();
+  private owns(heartbeat: Heartbeat, agentId: string): boolean {
+    if (heartbeat.agentId !== agentId || heartbeat.maxRuns !== 1) return false;
+    const entry = this.entries.get(agentId);
+    const identity = this.tidyIdentities.get(heartbeat.id) ?? (entry && (!entry.scheduleId || entry.scheduleId === heartbeat.id) ? entry.identity : undefined);
+    return identity ? resumeIdentity(heartbeat.name, heartbeat.prompt) === identity : legacyResumeIdentity(heartbeat.name, heartbeat.prompt);
+  }
   /** 安排续跑 requests under way (in memory only): each adds one waiting resume at most, and one heartbeat to delete (`put`). */
   private scheduling = 0;
   /** Wake minutes held for heartbeats being created, whatever the Agent (whole minutes since the epoch; in memory only, `hold`). */
@@ -416,11 +428,11 @@ export class ResumeLedger {
       const refused = (message: string): ScheduleResumeResult => ({ status: "failed", scheduleId: null, runAt: null, message });
       const tooLate = () => refused(SCHEDULE_TOO_LATE);
       // Full: nothing new is taken on, and nothing already owed is dropped for it (codex-obs-resume-recheck9-F2).
-      if (this.tidy.size >= TIDY_LIMIT) return refused(`还有 ${this.tidy.size} 条续跑心跳等着删除（它们的运行还没结束，或者宿主暂时删不掉），删掉之前先不安排新的续跑；请稍后再试。`);
+      if (this.tidy.size >= TIDY_LIMIT) return refused(t("serverResume.m023", { value1: this.tidy.size }));
       // Requests under way count as waiting: however many come at once, the waiting resumes stay within the limit, and the
       // heartbeats kept to delete within TIDY_HARD_LIMIT.
       const waiting = this.pending().length + this.scheduling;
-      if (waiting >= RESUME_LEDGER_LIMIT) return refused(`已经有 ${waiting} 个 Agent 的续跑在等（含正在安排的），观测台最多同时跟进 ${RESUME_LEDGER_LIMIT} 个；等其中一些送达或取消后再安排。`);
+      if (waiting >= RESUME_LEDGER_LIMIT) return refused(t("serverResume.m024", { waiting: waiting, RESUME_LEDGER_LIMIT: RESUME_LEDGER_LIMIT }));
       if (late()) return tooLate();
       this.scheduling++;
       try {
@@ -430,7 +442,7 @@ export class ResumeLedger {
         if (late()) return tooLate();
         let adopted: ResumeEntry | null = null;
         try { adopted = listed ? await this.adopt(listed, input.agentId, input.stopAt ?? null, now, late) : null; }
-        catch (error) { return { status: "failed", scheduleId: null, runAt: null, message: `读不到这个 Agent 已有的续跑心跳，没有安排续跑：${errorText(error).replaceAll("子任务", "续跑")}` }; }
+        catch (error) { return { status: "failed", scheduleId: null, runAt: null, message: t("serverResume.m025", { value1: errorText(error).replaceAll(t("serverResume.m026"), t("serverResume.m027")) }) }; }
         if (adopted) return this.existing(adopted, zone, now);
         if (late()) return tooLate();
         const result = await createResume(paseo, this.bridge, input, now, zone, this.minutes(listed ?? [], input.agentId), late);
@@ -441,11 +453,11 @@ export class ResumeLedger {
         // then included (codex-obs-resume-recheck11-F1); never made again (codex-obs-resume-recheck12).
         const at = result.at;
         const entry: ResumeEntry = { agentId: input.agentId, scheduleId: result.scheduleId, stopAt: input.stopAt ?? null, plannedAt: iso(Math.floor(at / MINUTE) * MINUTE), wakeAt: result.runAt,
-          attempt: 1, status: "scheduled", reason: null, createdAt: iso(now), updatedAt: iso(now), deliveredAt: null, cadence: resumeCron(at) };
+          attempt: 1, status: "scheduled", reason: null, createdAt: iso(now), updatedAt: iso(now), deliveredAt: null, cadence: resumeCron(at), ...(result.identity ? { identity: result.identity } : {}) };
         // The waiting entry holds the minute from here on. Recorded whatever other Agents have left to delete meanwhile (`put`):
         // past this point the heartbeat exists, or may.
         try { await this.put(entry); } finally { this.release(at); }
-        const { name: _name, at: _at, ...reply } = result;
+        const { name: _name, at: _at, identity: _identity, ...reply } = result;
         return { ...reply, entry: { ...entry } };
       } finally { this.scheduling--; }
     });
@@ -464,7 +476,7 @@ export class ResumeLedger {
       const entry = this.entries.get(input.agentId);
       let waiting = entry && PENDING_RESUME.has(entry.status) ? entry : null;
       const failed = (message: string): CancelResumeResult => ({ status: "failed", message, entry: entry ? { ...entry } : null });
-      const tooLate = () => failed("观测台正忙，这次请求等得太久，没有取消续跑；请再试一次。");
+      const tooLate = () => failed(t("serverResume.m028"));
       if (late()) return tooLate();
       let id = waiting ? waiting.scheduleId : input.scheduleId ?? null;
       // One still to be confirmed (its create's answer lost, or the create failed): the host may have made it all the same, and that
@@ -472,26 +484,26 @@ export class ResumeLedger {
       if (waiting && !id) {
         let made: Heartbeat | "absent" | "ambiguous";
         try { made = this.made(waiting, await listHeartbeats(this.bridge)); }
-        catch (error) { return failed(`读不到续跑的心跳，没有取消：${errorText(error).replaceAll("子任务", "续跑")}`); }
+        catch (error) { return failed(t("serverResume.m029", { value1: errorText(error).replaceAll(t("serverResume.m030"), t("serverResume.m031")) })); }
         if (late()) return tooLate();
-        if (made === "ambiguous") return failed("分不清哪条心跳是这次的续跑，没有取消；请到 Paseo 的「计划」里核实。");
+        if (made === "ambiguous") return failed(t("serverResume.m032"));
         // None made yet: no more looking or making. A create the host is still writing may land all the same, so no promise.
-        if (made === "absent") return { status: "canceled", message: "已停止核对和补建。如果之后在 Paseo 的「计划」里出现这条续跑，请删除它。",
+        if (made === "absent") return { status: "canceled", message: t("serverResume.m033"),
           entry: await this.update(waiting, { status: "canceled", reason: "user" }) };
         id = made.id; waiting = { ...waiting, scheduleId: id };
       }
-      if (!id) return failed("这个 Agent 没有在等的续跑。");
+      if (!id) return failed(t("serverResume.m034"));
       let heartbeat: Heartbeat | null;
-      try { heartbeat = await inspectHeartbeat(this.bridge, id); } catch (error) { return failed(`读不到续跑的心跳，没有取消：${errorText(error).replaceAll("子任务", "续跑")}`); }
+      try { heartbeat = await inspectHeartbeat(this.bridge, id); } catch (error) { return failed(t("serverResume.m035", { value1: errorText(error).replaceAll(t("serverResume.m036"), t("serverResume.m037")) })); }
       if (late()) return tooLate();
-      if (!heartbeat) return { status: "canceled", message: "续跑的心跳已经不在了，已标记为取消。", entry: waiting ? await this.update(waiting, { status: "canceled", reason: "user" }) : entry ?? null };
-      if (!ownResume(heartbeat, input.agentId)) {
-        if (!waiting) return failed("这不是这个 Agent 的「恢复后续跑」心跳，没有删除。");
+      if (!heartbeat) return { status: "canceled", message: t("serverResume.m038"), entry: waiting ? await this.update(waiting, { status: "canceled", reason: "user" }) : entry ?? null };
+      if (!this.owns(heartbeat, input.agentId)) {
+        if (!waiting) return failed(t("serverResume.m039"));
         // The ledger's own heartbeat, changed in Paseo since (codex-obs-resume-F4): the user's now, kept as they made it.
-        return { status: "failed", message: "续跑的心跳在 Paseo 里被改过，观测台不再管理它，也没有删除它；要停掉它，请到 Paseo 的「计划」里处理。",
+        return { status: "failed", message: t("serverResume.m040"),
           entry: await this.update(waiting, { status: "canceled", reason: "edited" }) };
       }
-      if (heartbeat.runs.some(run => run.status === "running")) return failed("续跑正在唤醒它，提示可能已经送进会话，现在取消不了。");
+      if (heartbeat.runs.some(run => run.status === "running")) return failed(t("serverResume.m041"));
       // A run whose prompt surely went in (the host says so, or its session's log has it), which the next check would find too.
       // The log is read for every failed run, as the check reads it first: an error that looks like one from before the prompt
       // may be the Agent's own reply (codex-obs-resume-recheck2-F1).
@@ -502,17 +514,17 @@ export class ResumeLedger {
       if (late()) return tooLate();
       if (went) {
         if (waiting) await this.deliver(waiting, heartbeat, went.startedAt);
-        return { status: "failed", message: "续跑已经送进会话，不需要取消。", entry: waiting ? { ...this.entries.get(input.agentId)! } : entry ?? null };
+        return { status: "failed", message: t("serverResume.m042"), entry: waiting ? { ...this.entries.get(input.agentId)! } : entry ?? null };
       }
       // A delete whose answer was lost and that went through is the cancel done (`removeHeartbeat`).
-      try { await removeHeartbeat(this.bridge, id); } catch (error) { return failed(`取消续跑失败：${errorText(error).replaceAll("子任务", "续跑")}`); }
+      try { await removeHeartbeat(this.bridge, id); } catch (error) { return failed(t("serverResume.m043", { value1: errorText(error).replaceAll(t("serverResume.m044"), t("serverResume.m045")) })); }
       const now = this.now(), wake = heartbeat.nextRunAt ?? now;
       const base: ResumeEntry = waiting ?? { agentId: input.agentId, scheduleId: id, stopAt: null, plannedAt: iso(wake), wakeAt: iso(wake), attempt: 1, status: "scheduled", reason: null,
         createdAt: iso(now), updatedAt: iso(now), deliveredAt: null, cadence: ruleOf(heartbeat.cron) };
       // A heartbeat the ledger did not know, cancelled: its record would replace the Agent's last one, whose heartbeat may still be
       // owed a delete. With no room to keep that, the last record stays (still naming it) and this one is not kept.
-      if (!waiting && !this.room(this.replaced(base))) return { status: "canceled", message: "已取消续跑，到点不会唤醒它。", entry: entry ? { ...entry } : null };
-      return { status: "canceled", message: "已取消续跑，到点不会唤醒它。", entry: await this.update(base, { status: "canceled", reason: "user" }) };
+      if (!waiting && !this.room(this.replaced(base))) return { status: "canceled", message: t("serverResume.m046"), entry: entry ? { ...entry } : null };
+      return { status: "canceled", message: t("serverResume.m047"), entry: await this.update(base, { status: "canceled", reason: "user" }) };
     });
   }
 
@@ -524,11 +536,11 @@ export class ResumeLedger {
       this.lastCheckAt = this.now();
       for (const entry of this.pending()) {
         if (this.closed) return;
-        await this.withAgent(entry.agentId, () => this.checkOne(entry.agentId)).catch(error => this.log(`[agent-observatory] 续跑核对失败：${errorText(error)}`));
+        await this.withAgent(entry.agentId, () => this.checkOne(entry.agentId)).catch(error => this.log(t("serverResume.m048", { value1: errorText(error) })));
       }
       for (const [id, agentId] of [...this.tidy]) {
         if (this.closed) return;
-        await this.withAgent(agentId, () => this.tidyOne(id, agentId)).catch(error => this.log(`[agent-observatory] 续跑心跳清理失败：${errorText(error)}`));
+        await this.withAgent(agentId, () => this.tidyOne(id, agentId)).catch(error => this.log(t("serverResume.m049", { value1: errorText(error) })));
       }
     })().finally(() => { this.checking = null; this.arm(); });
     return this.checking;
@@ -546,9 +558,9 @@ export class ResumeLedger {
   private pending(): ResumeEntry[] { return [...this.entries.values()].filter(entry => PENDING_RESUME.has(entry.status)); }
 
   private existing(entry: ResumeEntry, zone: string | null | undefined, now: number): ScheduleResumeResult {
-    const wake = wallLabel(Date.parse(entry.wakeAt), zone, now), nth = entry.attempt > 1 ? `（第 ${entry.attempt} 次）` : "";
+    const wake = wallLabel(Date.parse(entry.wakeAt), zone, now), nth = entry.attempt > 1 ? t("serverResume.m050", { value1: entry.attempt }) : "";
     return { status: "scheduled", scheduleId: entry.scheduleId, runAt: entry.wakeAt, existing: true, entry: { ...entry },
-      message: `${entry.scheduleId ? `已在 ${wake} 安排续跑${nth}` : `已记下 ${wake} 的续跑${nth}，正在核对它建好没有`}，没有重复安排。要换时间，先取消这一次。` };
+      message: t("serverResume.m051", { value1: entry.scheduleId ? t("serverResume.m052", { wake: wake, nth: nth }) : t("serverResume.m053", { wake: wake, nth: nth }) }) };
   }
 
   /** The minutes other heartbeats (of any kind), the other waiting resumes and the heartbeats being created wake in (F2). */
@@ -606,10 +618,10 @@ export class ResumeLedger {
     const entry = this.entries.get(agentId), ended = entry && !PENDING_RESUME.has(entry.status) ? entry.scheduleId : null;
     let found: (Heartbeat & { wake: number }) | null = null;
     for (const candidate of listed) {
-      if (candidate.nextRunAt === null || candidate.status !== "active" || !ownResume(candidate, agentId)) continue;
+      if (candidate.nextRunAt === null || candidate.status !== "active" || !this.owns(candidate, agentId)) continue;
       const heartbeat = await inspectHeartbeat(this.bridge, candidate.id);
       if (late()) break;
-      if (!heartbeat || heartbeat.status !== "active" || heartbeat.nextRunAt === null || !ownResume(heartbeat, agentId) || heartbeat.runs.some(run => run.status === "running")) continue;
+      if (!heartbeat || heartbeat.status !== "active" || heartbeat.nextRunAt === null || !this.owns(heartbeat, agentId) || heartbeat.runs.some(run => run.status === "running")) continue;
       const wake = heartbeat.nextRunAt;
       if (!found && !heartbeat.runs.length && heartbeat.id !== ended && !this.tidy.has(heartbeat.id) && wake >= now - RESUME_MISSED_GRACE_MS && wake <= latest) { found = { ...heartbeat, wake }; continue; }
       await deleteHeartbeat(this.bridge, heartbeat.id).catch(() => {});
@@ -645,7 +657,7 @@ export class ResumeLedger {
     if (!heartbeat) { await this.update(entry, { status: "canceled", reason: "deleted" }); return; }
     // Changed in Paseo's 计划 since (another prompt, more runs, another Agent or name; codex-obs-resume-F4): no longer a resume, so
     // never taken as one going in, tried again or deleted. The user's to keep as they made it; the ledger lets go of it.
-    if (!ownResume(heartbeat, agentId)) { await this.update(entry, { status: "canceled", reason: "edited" }); return; }
+    if (!this.owns(heartbeat, agentId)) { await this.update(entry, { status: "canceled", reason: "edited" }); return; }
     if (heartbeat.name) this.names.set(agentId, heartbeat.name);
     const done = heartbeat.runs.find(run => run.status === "succeeded");
     if (done) { await this.deliver(entry, heartbeat, done.startedAt); return; }
@@ -772,7 +784,7 @@ export class ResumeLedger {
     // Kept as one to create, from this pass on (`attemptAt`: a heartbeat made before it is not this attempt's, `made`): the next check
     // tries again until the window is over. Its wake stays the time last asked of the host, where a heartbeat whose answer was lost
     // would wake it (so that turn still counts, noteTurn).
-    const later = (at: number) => this.update(entry, { ...state, scheduleId: null, attempt, wakeAt: iso(at), attemptAt: iso(now) });
+    const later = (at: number, identity: string | null = entry.identity ?? null) => this.update(entry, { ...state, scheduleId: null, attempt, wakeAt: iso(at), attemptAt: iso(now), ...(identity === null && entry.identity === undefined ? {} : { identity: identity ?? undefined }) });
     // One schedule/list serves the rest: the heartbeat the host made for this one while its answer was lost, this Agent's own
     // one still waiting, and the minutes other heartbeats wake in (F2). A list that fails, or a heartbeat of this Agent's that
     // cannot be read, leaves it to the next check.
@@ -785,7 +797,7 @@ export class ResumeLedger {
       // leaves it as it is, still to be confirmed and its attempt's start kept, for the next check.
       let made: Heartbeat | "absent" | "ambiguous", current: Heartbeat | null = null;
       try { listed = await listHeartbeats(this.bridge); made = this.made(entry, listed); if (typeof made === "object") current = await inspectHeartbeat(this.bridge, made.id); }
-      catch (error) { this.log(`[agent-observatory] 续跑核对读不到心跳：${errorText(error)}`); return; }
+      catch (error) { this.log(t("serverResume.m054", { value1: errorText(error) })); return; }
       if (typeof made === "object") { await this.judge(await this.update(entry, { ...state, scheduleId: made.id, attempt, cadence: resumeCron(Date.parse(entry.wakeAt)) }), current, now); return; }
       // None yet: the host lists no create still being written to its store, which a timeout leaves going
       // (codex-obs-resume-recheck11-F3). So it is looked for again for a while: a first one's two minutes from its request, a
@@ -813,7 +825,7 @@ export class ResumeLedger {
     // never one with a run going, such as an earlier resume's still running after its delivery, whose prompt is not this retry's.
     let claimed: (Heartbeat & { wake: number }) | null;
     try { listed ??= await listHeartbeats(this.bridge); claimed = await this.waitingOwn(listed.filter(other => other.id !== heartbeat?.id), entry.agentId, now, windowEnd); }
-    catch (error) { this.log(`[agent-observatory] 续跑重试没建成：${errorText(error)}`); await later(entry.scheduleId ? base : Date.parse(entry.wakeAt)); return; }
+    catch (error) { this.log(t("serverResume.m055", { value1: errorText(error) })); await later(entry.scheduleId ? base : Date.parse(entry.wakeAt)); return; }
     if (claimed) {
       if (claimed.name) this.names.set(entry.agentId, claimed.name);
       await this.update(entry, { ...state, scheduleId: claimed.id, attempt, wakeAt: iso(claimed.wake), cadence: ruleOf(claimed.cron) });
@@ -824,14 +836,15 @@ export class ResumeLedger {
     const at = this.hold(base, listed, entry.agentId);
     try {
       if (at > windowEnd - MINUTE) { await expired(); return; }
-      const name = resumeName(null, attempt), known = this.names.get(entry.agentId)?.replace(/（第 \d+ 次）$/, "");
-      const title = known ? `${known}${attempt > 1 ? `（第 ${attempt} 次）` : ""}` : name;
+      const name = resumeName(null, attempt), known = this.names.get(entry.agentId)?.replace(/(?:（第 \d+ 次）| \(attempt \d+\))$/, ""); // i18n-ignore: Match original Chinese provider/user text; this is parser data.
+      const title = known ? `${known}${attempt > 1 ? t("serverResume.m056", { attempt: attempt }) : ""}` : name;
       // On disk before the create goes out, its attempt's start with it (codex-obs-resume-recheck13-F2): its answer lost, or the
       // plugin reloaded meanwhile, the next check finds what it made by that time (`made`).
-      const sent = await later(at);
-      const created = await createHeartbeat(this.bridge, { agentId: entry.agentId, at, name: title, expiresAt: Math.max(windowEnd, at + 10 * MINUTE) }, this.zone(), now)
+      const prompt = RESUME_PROMPT, identity = generatedIdentity(title, prompt);
+      const sent = await later(at, identity ?? null);
+      const created = await createHeartbeat(this.bridge, { agentId: entry.agentId, at, name: title, prompt, expiresAt: Math.max(windowEnd, at + 10 * MINUTE) }, this.zone(), now)
         .catch((error): { ok: false; message: string } => ({ ok: false, message: errorText(error) }));
-      if (!created.ok) { this.log(`[agent-observatory] 续跑重试没建成：${created.message}`); return; }
+      if (!created.ok) { this.log(t("serverResume.m057", { value1: created.message })); return; }
       this.names.set(entry.agentId, title);
       await this.update(sent, { scheduleId: created.id, wakeAt: iso(created.nextRunAt), cadence: resumeCron(at) });
     } finally { this.release(at); }
@@ -850,7 +863,7 @@ export class ResumeLedger {
   private made(entry: ResumeEntry, listed: readonly Heartbeat[]): Heartbeat | "absent" | "ambiguous" {
     const since = Date.parse(entry.attemptAt ?? entry.createdAt), known = entry.attemptAt !== undefined || entry.attempt === 1;
     const mine = listed.filter(heartbeat => heartbeat.agentId === entry.agentId && (heartbeat.createdAt ?? -Infinity) >= since);
-    return known && mine.length === 1 && ownResume(mine[0]!, entry.agentId) ? mine[0]! : mine.length ? "ambiguous" : "absent";
+    return known && mine.length === 1 && this.owns(mine[0]!, entry.agentId) ? mine[0]! : mine.length ? "ambiguous" : "absent";
   }
 
   /**
@@ -911,14 +924,18 @@ export class ResumeLedger {
     return true;
   }
   /** Keeps a heartbeat to delete, saved with the next write of the ledger. */
-  private keep(id: string, agentId: string): void { this.tidy.delete(id); this.tidy.set(id, agentId); }
+  private keep(id: string, agentId: string): void {
+    this.tidy.delete(id); this.tidy.set(id, agentId);
+    const entry = this.entries.get(agentId);
+    if (entry?.scheduleId === id && entry.identity) this.tidyIdentities.set(id, entry.identity);
+  }
   private async tidyOne(id: string, agentId: string): Promise<void> {
     if (!this.tidy.has(id)) return;
     let heartbeat: Heartbeat | null;
     try { heartbeat = await inspectHeartbeat(this.bridge, id); } catch { return; }
-    const done = () => { this.tidy.delete(id); return this.persist(); };
+    const done = () => { this.tidy.delete(id); this.tidyIdentities.delete(id); return this.persist(); };
     // Changed in Paseo since the ledger was done with it (codex-obs-resume-F4): the user's now, never deleted.
-    if (heartbeat && !ownResume(heartbeat, agentId)) return done();
+    if (heartbeat && !this.owns(heartbeat, agentId)) return done();
     if (heartbeat?.runs.some(run => run.status === "running")) return;
     if (heartbeat && heartbeat.status !== "paused") { try { await deleteHeartbeat(this.bridge, id); } catch { return; } }
     return done();
@@ -948,7 +965,7 @@ export class ResumeLedger {
     return result;
   }
 
-  private async update(entry: ResumeEntry, patch: Partial<Pick<ResumeEntry, "scheduleId" | "attempt" | "status" | "reason" | "wakeAt" | "deliveredAt" | "cadence" | "attemptAt">>): Promise<ResumeEntry> {
+  private async update(entry: ResumeEntry, patch: Partial<Pick<ResumeEntry, "scheduleId" | "attempt" | "status" | "reason" | "wakeAt" | "deliveredAt" | "cadence" | "attemptAt" | "identity">>): Promise<ResumeEntry> {
     const next: ResumeEntry = { ...entry, ...patch, updatedAt: iso(this.now()) };
     await this.put(next);
     return { ...next };
@@ -1016,14 +1033,14 @@ export class ResumeLedger {
         if (!previous || Date.parse(entry.updatedAt) > Date.parse(previous.updatedAt)) this.entries.set(entry.agentId, entry);
       }
       // Every item: a broken one is skipped, never the ledger, and none is dropped past TIDY_LIMIT (codex-obs-resume-recheck9-F2).
-      if (Array.isArray(data.tidy)) for (const raw of data.tidy) { const parsed = tidySchema.safeParse(raw); if (parsed.success) this.tidy.set(parsed.data.id, parsed.data.agentId); }
+      if (Array.isArray(data.tidy)) for (const raw of data.tidy) { const parsed = tidySchema.safeParse(raw); if (parsed.success) { this.tidy.set(parsed.data.id, parsed.data.agentId); if (parsed.data.identity) this.tidyIdentities.set(parsed.data.id, parsed.data.identity); } }
       // A file from before 2.14.0's reload fix keeps none: an ended resume's heartbeat may still be there (its run went on, or its
       // delete failed, and a reload lost that), so each one's is kept to delete before old records leave (`trim`); `tidyOne`
       // reads it first, and one gone, deleted or the user's leaves again.
-      else for (const entry of this.entries.values()) if (owesDelete(entry)) this.tidy.set(entry.scheduleId!, entry.agentId);
+      else for (const entry of this.entries.values()) if (owesDelete(entry)) this.keep(entry.scheduleId!, entry.agentId);
       this.trim();
     } catch (error) {
-      if ((error as { code?: string }).code !== "ENOENT") { this.corrupt = true; this.error = "续跑记录无法读取，已重新开始记录；原文件会在下次保存时留作备份。"; }
+      if ((error as { code?: string }).code !== "ENOENT") { this.corrupt = true; this.error = t("serverResume.m058"); }
     }
   }
   /**
@@ -1032,19 +1049,19 @@ export class ResumeLedger {
    * fails is made good by the next one (codex-obs-resume-recheck13-F1).
    */
   private persist(): Promise<void> {
-    const serialized = JSON.stringify({ version: 1, entries: [...this.entries.values()], tidy: [...this.tidy].map(([id, agentId]) => ({ id, agentId })) });
+    const serialized = JSON.stringify({ version: 1, entries: [...this.entries.values()], tidy: [...this.tidy].map(([id, agentId]) => ({ id, agentId, ...(this.tidyIdentities.has(id) ? { identity: this.tidyIdentities.get(id) } : {}) })) });
     // Never a file `load` would refuse, which would start the ledger over and lose all it owes (codex-obs-resume-recheck9-F2). The
     // limits (RESUME_LEDGER_LIMIT Agents, TIDY_HARD_LIMIT heartbeats) keep what the ledger writes under it, three-byte text in every
     // field at its longest included (about 830 KB); text JSON escapes (six bytes a character), or a file read in past the limits,
     // could still pass it.
-    if (Buffer.byteLength(serialized) > LEDGER_MAX_BYTES) { this.error = "续跑记录超出了大小上限，这次没有写入磁盘，当前状态保留在内存里。"; return this.writes; }
+    if (Buffer.byteLength(serialized) > LEDGER_MAX_BYTES) { this.error = t("serverResume.m059"); return this.writes; }
     this.writes = this.writes.then(async () => {
       const temporary = `${this.file}.${randomUUID()}.tmp`;
       try {
         await ensurePrivateDirectory(this.directory);
         if (this.corrupt) { await rename(this.file, `${this.file}.backup`).catch(() => {}); this.corrupt = false; }
         await writeFile(temporary, serialized, { mode: 0o600 }); await rename(temporary, this.file); this.error = null;
-      } catch { this.error = "续跑记录暂时无法写入磁盘，当前状态保留在内存里。"; }
+      } catch { this.error = t("serverResume.m060"); }
       finally { await rm(temporary, { force: true }).catch(() => {}); }
     });
     return this.writes;
@@ -1077,3 +1094,8 @@ export function registerResume(server: PluginServerContext, bridge: Bridge, opti
 }
 
 export type { ResumeStatus };
+
+// Refresh module-level display text when the selected language changes.
+onTextChange(() => {
+  SCHEDULE_TOO_LATE = t("serverResume.m001");
+});

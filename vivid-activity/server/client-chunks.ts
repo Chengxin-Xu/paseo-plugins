@@ -1,4 +1,8 @@
 import type { ClientChunkManifest } from "../shared/client-chunk";
+import { addDefaults, t } from "../shared/i18n";
+import { kitLazy } from "../shared/locales/kit/zh-CN.json";
+
+addDefaults({ kitLazy });
 
 // Leave 8 KiB for the host's RPC envelope. Count escaped JSON bytes, not source characters.
 export const CLIENT_CHUNK_REPLY_BYTES = 120 * 1024;
@@ -7,10 +11,14 @@ interface ChunkRequest { name: string; hash: string; part: number }
 
 /** JSON string bytes, excluding the two surrounding quotes. Keep surrogate pairs in the same part. */
 function splitChunk(chunk: ClientChunk): string[] {
-  const source = chunk.code, slices: string[] = [];
-  let start = 0, bytes = 0;
   // 1 KiB covers fixed keys, content hash, version, part counts and the enum name.
-  const budget = CLIENT_CHUNK_REPLY_BYTES - 1024 - Buffer.byteLength(JSON.stringify(chunk.name));
+  return splitReply(chunk.code, CLIENT_CHUNK_REPLY_BYTES - 1024 - Buffer.byteLength(JSON.stringify(chunk.name)));
+}
+
+/** Cuts `source` so each part, as a JSON string, stays within `budget` bytes. Also used for language catalogs. */
+export function splitReply(source: string, budget: number): string[] {
+  const slices: string[] = [];
+  let start = 0, bytes = 0;
   for (let index = 0; index < source.length;) {
     const character = source.charCodeAt(index);
     let size: number, units = 1;
@@ -45,7 +53,7 @@ export function createClientChunkHandler(chunks: readonly ClientChunk[]) {
     entry.slices ??= splitChunk(entry.chunk);
     if (part >= entry.slices.length) throw new Error("Unknown client chunk or part");
     // A stale stub can discover the current hash at part zero. Never splice two versions on reload.
-    if (part > 0 && hash !== entry.chunk.hash) throw new Error("界面版本已更新，请重试或重新连接");
+    if (part > 0 && hash !== entry.chunk.hash) throw new Error(t("kitLazy.updated"));
     return { name, hash: entry.chunk.hash, api: entry.chunk.api, part, parts: entry.slices.length, code: entry.slices[part]! };
   };
 }

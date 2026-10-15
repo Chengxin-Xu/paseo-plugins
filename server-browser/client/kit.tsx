@@ -2,6 +2,8 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent, type StyleProp, type TextInput as NativeTextInput, type ViewStyle } from "react-native";
+import { addDefaults, t } from "../shared/i18n";
+import { kitTime, kitUi } from "../shared/locales/kit/zh-CN.json";
 
 /**
  * Paseo-native UI kit. Every plugin in this collection carries an identical copy (plugins install
@@ -10,7 +12,10 @@ import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View, type La
  * Scales mirror the host app: 4-pt spacing, 12/13/14/16 type, 8 px control radius, 28/32 px controls,
  * regular-weight button text, one primary action per view. Surfaces, text and the primary button come from the
  * host theme; states and categories use the vivid palette below (`hue`, `toneColor`, `hueFor`).
+ * Words come from `../shared/i18n` (`kitUi`, `kitTime`): the plugin's language once it binds one, else Chinese.
  */
+addDefaults({ kitUi, kitTime });
+
 export const space = { xxs: 2, xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;
 export const fontSize = { meta: 12, small: 13, body: 14, content: 15, title: 16, heading: 18 } as const;
 export const radius = { sm: 6, md: 8, lg: 12, full: 999 } as const;
@@ -214,7 +219,7 @@ export function Chip({ theme, label, icon, count, tone, selected = false, onPres
     <Text numberOfLines={1} style={{ color: selected || tone ? colors.foreground : colors.foregroundMuted, fontSize: fontSize.small, fontWeight: selected ? "500" : "400" }}>{label}</Text>
     {count !== undefined ? <Text style={{ color: tone && tone !== "neutral" && count ? toneColor(theme, tone) : colors.foregroundMuted, fontSize: fontSize.meta, fontWeight: tone && count ? "600" : "400", fontVariant: ["tabular-nums"] }}>{count}</Text> : null}
   </>;
-  const remove = onRemove ? <Pressable accessibilityRole="button" accessibilityLabel={`移除 ${label}`} onPress={onRemove} hitSlop={8}><Icon name="X" size={12} color={colors.foregroundMuted} /></Pressable> : null;
+  const remove = onRemove ? <Pressable accessibilityRole="button" accessibilityLabel={t("kitUi.remove", { label })} onPress={onRemove} hitSlop={8}><Icon name="X" size={12} color={colors.foregroundMuted} /></Pressable> : null;
   const tinted = tone && tone !== "neutral";
   const style = (hovered = false): ViewStyle => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 1, minHeight: control.sm, paddingHorizontal: 10, borderRadius: radius.full, borderWidth: hairline,
     borderColor: selected ? tinted ? toneColor(theme, tone, "mark") : colors.foregroundMuted : tinted ? toneColor(theme, tone, "line") : colors.border,
@@ -257,7 +262,7 @@ export function ProjectMark({ theme, name, size = 18 }: { theme: PluginTheme; na
 
 /** "a · b · c" secondary line; falsy parts are skipped. */
 export function MetaLine({ theme, parts, numberOfLines = 1, selectable = false }: { theme: PluginTheme; parts: readonly (string | number | null | undefined | false)[]; numberOfLines?: number; selectable?: boolean }) {
-  const text = parts.filter(part => part !== null && part !== undefined && part !== false && part !== "").join(" · ");
+  const text = parts.filter(part => part !== null && part !== undefined && part !== false && part !== "").join(t("kitUi.metaSeparator"));
   return text ? <Text selectable={selectable} numberOfLines={numberOfLines} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{text}</Text> : null;
 }
 
@@ -295,7 +300,7 @@ export function SectionHeader({ theme, title, count, action, open, onToggle, ico
     {count !== undefined ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, fontVariant: ["tabular-nums"], opacity: 0.8 }}>{count}</Text> : null}
   </View>;
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32, paddingHorizontal: space.md, paddingTop: space.sm }}>
-    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={`${open ? "收起" : "展开"} ${title}`} accessibilityState={{ expanded: open }} {...aria({ expanded: open })} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
+    {onToggle ? <Pressable accessibilityRole="button" accessibilityLabel={t(open ? "kitUi.collapse" : "kitUi.expand", { title })} accessibilityState={{ expanded: open }} {...aria({ expanded: open })} onPress={onToggle} style={{ flex: 1 }}>{label}</Pressable> : label}
     {action}
   </View>;
 }
@@ -316,7 +321,7 @@ export function Banner({ theme, tone = "neutral", message, icon, action, onDismi
     <Icon name={glyph} size={16} color={tinted ? toneColor(theme, tone, "mark") : color} />
     <Text selectable style={{ flex: 1, color: colors.foreground, fontSize: fontSize.small, lineHeight: 19, fontWeight: tone === "danger" ? "500" : "400" }}>{message}</Text>
     {action ? <Button theme={theme} label={action.label} size="sm" variant="ghost" onPress={action.onPress} /> : null}
-    {onDismiss ? <IconButton theme={theme} icon="X" label="关闭提示" size="sm" onPress={onDismiss} /> : null}
+    {onDismiss ? <IconButton theme={theme} icon="X" label={t("kitUi.dismiss")} size="sm" onPress={onDismiss} /> : null}
   </View>;
 }
 
@@ -333,7 +338,7 @@ export function EmptyState({ theme, icon, title, message, action, tone = "info" 
 /** First-load placeholder shaped like `Row`s. Background refreshes must not show it. */
 export function Skeleton({ theme, rows = 4 }: { theme: PluginTheme; rows?: number }) {
   const bar = (width: `${number}%`, height: number) => <View style={{ width, height, borderRadius: 4, backgroundColor: theme.colors.surface2 }} />;
-  return <View accessibilityRole="progressbar" accessibilityLabel="加载中" style={{ gap: space.xs, paddingVertical: space.xs }}>
+  return <View accessibilityRole="progressbar" accessibilityLabel={t("kitUi.loading")} style={{ gap: space.xs, paddingVertical: space.xs }}>
     {Array.from({ length: rows }, (_, index) => <View key={index} style={{ flexDirection: "row", gap: 10, paddingVertical: 10, paddingHorizontal: space.md, opacity: 1 - index * 0.15 }}>
       <View style={{ width: 8, height: 8, marginTop: 6, borderRadius: 4, backgroundColor: theme.colors.surface2 }} />
       <View style={{ flex: 1, gap: 7 }}>{bar(`${88 - (index % 3) * 14}%`, 12)}{bar(`${46 + (index % 2) * 12}%`, 9)}</View>
@@ -344,7 +349,8 @@ export function Skeleton({ theme, rows = 4 }: { theme: PluginTheme; rows?: numbe
 /** Quiet sync state for toolbars: a dot plus optional short label ("同步中", "3 分钟前"). */
 export function SyncStatus({ theme, state, label }: { theme: PluginTheme; state: "live" | "syncing" | "stale" | "error"; label?: string }) {
   const tone: Tone = state === "live" ? "success" : state === "error" ? "danger" : state === "stale" ? "warning" : "neutral";
-  return <View accessibilityLabel={label ?? state} style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+  const spoken = label ?? t(state === "live" ? "kitUi.syncLive" : state === "syncing" ? "kitUi.syncSyncing" : state === "stale" ? "kitUi.syncStale" : "kitUi.syncError");
+  return <View accessibilityLabel={spoken} style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
     {state === "syncing" ? <ActivityIndicator size="small" color={theme.colors.foregroundMuted} /> : <StatusDot theme={theme} tone={tone} size={6} />}
     {label ? <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.meta }}>{label}</Text> : null}
   </View>;
@@ -365,7 +371,7 @@ export function useSettledFocus(enabled: boolean, delay = 350) {
 }
 
 /** `grow` fills a row. It keeps the content-sized basis: `flex: 1` (basis 0) collapses the field's parent on native, so whatever follows overlaps it. */
-export function SearchField({ theme, value, onChangeText, placeholder = "搜索", onSubmit, autoFocus = false, accessibilityLabel, grow = true }: {
+export function SearchField({ theme, value, onChangeText, placeholder = t("kitUi.search"), onSubmit, autoFocus = false, accessibilityLabel, grow = true }: {
   theme: PluginTheme; value: string; onChangeText: (value: string) => void; placeholder?: string; onSubmit?: () => void; autoFocus?: boolean; accessibilityLabel?: string; grow?: boolean;
 }) {
   const { colors } = theme, input = useSettledFocus(autoFocus);
@@ -373,7 +379,7 @@ export function SearchField({ theme, value, onChangeText, placeholder = "搜索"
     <Icon name="Search" size={14} color={colors.foregroundMuted} />
     <TextInput ref={input} accessibilityLabel={accessibilityLabel ?? placeholder} value={value} onChangeText={onChangeText} onSubmitEditing={onSubmit} placeholder={placeholder} placeholderTextColor={colors.foregroundMuted}
       autoCapitalize="none" autoCorrect={false} returnKeyType="search" style={{ flex: 1, minWidth: 0, color: colors.foreground, fontSize: fontSize.body, paddingVertical: 6 }} />
-    {value ? <IconButton theme={theme} icon="X" label="清除搜索" size="sm" onPress={() => onChangeText("")} /> : null}
+    {value ? <IconButton theme={theme} icon="X" label={t("kitUi.clearSearch")} size="sm" onPress={() => onChangeText("")} /> : null}
   </View>;
 }
 
@@ -431,32 +437,35 @@ export function SplitView({ theme, compact, showDetail, list, detail, listWidth 
   </View>;
 }
 
-/** 刚刚 / 5 分钟前 / 3 小时前 / 昨天 14:20 / 9月20日 / 2025年9月20日 */
+/** just now / 5 minutes ago / 3 hours ago / yesterday 14:20 / Sep 20 / Sep 20, 2025 (刚刚 / 5 分钟前 / … in Chinese) */
 export function relativeTime(value: string | number | Date | null | undefined, now = Date.now()): string {
   if (value === null || value === undefined || value === "") return "";
   const date = value instanceof Date ? value : new Date(value);
   const time = date.getTime();
   if (!Number.isFinite(time)) return "";
   const seconds = Math.round((now - time) / 1000);
-  if (seconds < 45) return "刚刚";
-  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} 分钟前`;
+  if (seconds < 45) return t("kitTime.justNow");
+  if (seconds < 3600) return t("kitTime.minutesAgo", { count: Math.max(1, Math.round(seconds / 60)) });
   const today = new Date(now), sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
   const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  if (sameDay(date, today)) return seconds < 6 * 3600 ? `${Math.round(seconds / 3600)} 小时前` : `今天 ${clock}`;
+  if (sameDay(date, today)) return seconds < 6 * 3600 ? t("kitTime.hoursAgo", { count: Math.round(seconds / 3600) }) : t("kitTime.todayAt", { time: clock });
   const yesterday = new Date(now - 86_400_000);
-  if (sameDay(date, yesterday)) return `昨天 ${clock}`;
-  return date.getFullYear() === today.getFullYear() ? `${date.getMonth() + 1}月${date.getDate()}日` : `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+  if (sameDay(date, yesterday)) return t("kitTime.yesterdayAt", { time: clock });
+  const month = t("kitTime.months").split("|")[date.getMonth()] ?? String(date.getMonth() + 1);
+  return date.getFullYear() === today.getFullYear()
+    ? t("kitTime.monthDay", { month, day: date.getDate() })
+    : t("kitTime.yearMonthDay", { year: date.getFullYear(), month, day: date.getDate() });
 }
 
-/** 42 秒 / 3 分 20 秒 / 2 小时 5 分 */
+/** 42s / 3m 20s / 2h 5m (42 秒 / 3 分 20 秒 / 2 小时 5 分 in Chinese) */
 export function formatDuration(milliseconds: number): string {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
   const seconds = Math.round(milliseconds / 1000);
-  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds < 60) return t("kitTime.seconds", { count: seconds });
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分${seconds % 60 ? ` ${seconds % 60} 秒` : ""}`;
+  if (minutes < 60) return seconds % 60 ? t("kitTime.minutesSeconds", { minutes, seconds: seconds % 60 }) : t("kitTime.minutes", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  return `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分` : ""}`;
+  return minutes % 60 ? t("kitTime.hoursMinutes", { hours, minutes: minutes % 60 }) : t("kitTime.hours", { count: hours });
 }
 
 /** 980 / 12.3k / 4.5M */

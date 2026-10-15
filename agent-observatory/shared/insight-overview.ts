@@ -1,3 +1,4 @@
+import { t } from "./text";
 /**
  * 智能分析 → 总览 (2.7). Two layers over the per-Agent reports of shared/insights.ts:
  * - `observatory.insights.overview`: a deterministic roll-up of recent reports (no model call), revisioned.
@@ -175,12 +176,12 @@ const signed = (minutes: number) => `${minutes < 0 ? "−" : "+"}${String(Math.f
  */
 export function suggestionWindowNote(window: Pick<SuggestionJob["window"], "timeZone" | "utcOffsetMinutes">): string | null {
   if (window.timeZone) return null;
-  return window.utcOffsetMinutes === undefined ? "按 UTC 日期" : `按 UTC${signed(window.utcOffsetMinutes)} 的日期`;
+  return window.utcOffsetMinutes === undefined ? t("sharedInsightOverview.m001") : t("sharedInsightOverview.m002", { value1: signed(window.utcOffsetMinutes) });
 }
 export interface OverviewState { revision: string; data: InsightOverview }
 export function mergeOverview(previous: OverviewState | undefined, response: InsightOverviewResponse): OverviewState {
   if (response.mode === "unchanged") {
-    if (!previous || previous.revision !== response.revision) throw new Error("总览缓存已失效，请刷新");
+    if (!previous || previous.revision !== response.revision) throw new Error(t("sharedInsightOverview.m003"));
     return previous;
   }
   const { mode: _mode, unchanged: _unchanged, revision, ...data } = response;

@@ -1,51 +1,54 @@
+import { t, type MessageId } from '../shared/text';
 import { randomUUID } from 'node:crypto';
 import type { BrowserActivity } from '../shared/browser';
 
-const actions:Record<string,string>={
- navigate:'打开网页',back:'返回上一页',forward:'前往下一页',reload:'刷新网页',demo:'打开体验页',
- stop:'停止浏览器',restart:'重启浏览器',newTab:'新建标签',tab:'切换标签',closeTab:'关闭标签',pin:'固定标签',
- click:'点击页面',scroll:'滚动页面',text:'输入文字',key:'按下按键',mode:'切换操作模式',viewport:'调整画面尺寸',devicePreset:'切换设备仿真',handleDialog:'处理网页对话框',fitWidth:'适应完整页面宽度',
- browser_navigate:'打开网页',browser_navigate_back:'返回上一页',browser_navigate_forward:'前往下一页',
- browser_click:'点击页面',browser_type:'输入文字',browser_fill_form:'填写表单',browser_press_key:'按下按键',
- browser_select_option:'选择选项',browser_hover:'移动鼠标',browser_drag:'拖动页面',browser_resize:'调整画面尺寸',
- browser_snapshot:'查看页面',browser_find:'查找页面元素',browser_wait_for:'等待页面',browser_take_screenshot:'截取页面',
- browser_console_messages:'查看控制台',browser_network_requests:'查看网络请求',browser_evaluate:'执行页面操作',
- browser_run_code:'执行浏览器操作',browser_file_upload:'上传文件',browser_handle_dialog:'处理网页对话框',
- browser_read_page:'阅读网页',browser_diagnostics:'查看页面诊断',browser_tabs:'查看标签列表',
- 'tabs:list':'查看标签列表','tabs:new':'新建标签','tabs:select':'切换标签','tabs:close':'关闭标签',
+const actions:Record<string,MessageId>={
+ navigate:'activity.navigate',back:'activity.back',forward:'activity.forward',reload:'activity.reload',demo:'activity.demo',
+ stop:'activity.stop',restart:'activity.restart',newTab:'activity.newTab',tab:'activity.tab',closeTab:'activity.closeTab',pin:'activity.pin',
+ click:'activity.click',scroll:'activity.scroll',text:'activity.text',key:'activity.key',mode:'activity.mode',viewport:'activity.viewport',devicePreset:'activity.devicePreset',handleDialog:'activity.handleDialog',fitWidth:'activity.fitWidth',
+ browser_navigate:'activity.navigate',browser_navigate_back:'activity.back',browser_navigate_forward:'activity.forward',
+ browser_click:'activity.click',browser_type:'activity.text',browser_fill_form:'activity.fillForm',browser_press_key:'activity.key',
+ browser_select_option:'activity.selectOption',browser_hover:'activity.hover',browser_drag:'activity.drag',browser_resize:'activity.viewport',
+ browser_snapshot:'activity.snapshot',browser_find:'activity.find',browser_wait_for:'activity.wait',browser_take_screenshot:'activity.screenshot',
+ browser_console_messages:'activity.console',browser_network_requests:'activity.network',browser_evaluate:'activity.evaluate',
+ browser_run_code:'activity.runCode',browser_file_upload:'activity.upload',browser_handle_dialog:'activity.handleDialog',
+ browser_read_page:'activity.read',browser_diagnostics:'activity.diagnostics',browser_tabs:'activity.tabs',
+ 'tabs:list':'activity.tabs','tabs:new':'activity.newTab','tabs:select':'activity.tab','tabs:close':'activity.closeTab',
 };
 export type ActivityPage={tabId:string|null;pageTitle:string;pageUrl:string};
-export function activityAction(name:unknown,tabAction?:unknown):string{
+function activityId(name:unknown,tabAction?:unknown):MessageId{
  if(name==='browser_tabs'&&typeof tabAction==='string'&&Object.hasOwn(actions,`tabs:${tabAction}`))return actions[`tabs:${tabAction}`];
- return typeof name==='string'&&Object.hasOwn(actions,name)?actions[name]:'浏览器操作';
+ return typeof name==='string'&&Object.hasOwn(actions,name)?actions[name]:'activity.operation';
 }
+export function activityAction(name:unknown,tabAction?:unknown):string{return t(activityId(name,tabAction));}
 export function activityUrl(raw:unknown):string{
  if(typeof raw!=='string'||!raw)return '';
+ // i18n-ignore: legacy protocol sentinel, translated by the client; never used as identity.
  try{const url=new URL(raw);return ['http:','https:'].includes(url.protocol)?`${url.origin}${url.pathname}`:'本地页面';}catch{return '';}
 }
 function safePage(page:ActivityPage):ActivityPage{
- return {tabId:page.tabId,pageTitle:page.pageTitle.replace(/https?:\/\/[^\s"'<>]+/gi,url=>activityUrl(url)).replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,160),pageUrl:activityUrl(page.pageUrl)};
+ return {tabId:page.tabId,pageTitle:page.pageTitle.replace(/https?:\/\/[^\s"'<>]+/gi,url=>activityUrl(url)).replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,160),pageUrl:/^[a-z][a-z0-9+.-]*:/i.test(page.pageUrl)&&!/^https?:/i.test(page.pageUrl)?'about:blank':activityUrl(page.pageUrl)};
 }
 /** Deliberately memory-only; actions never contain inputs, cookies, errors or tool arguments. */
 export class BrowserActivityLog{
- private entries:BrowserActivity[]=[];
+ private entries:(Omit<BrowserActivity,'action'>&{actionId:MessageId})[]=[];
  start(source:BrowserActivity['source'],name:unknown,page:ActivityPage,tabAction?:unknown):string{
-  const id=randomUUID();this.entries.unshift({id,source,action:activityAction(name,tabAction),status:'running',...safePage(page),startedAt:Date.now(),endedAt:null});this.entries=this.entries.slice(0,12);return id;
+  const id=randomUUID();this.entries.unshift({id,source,actionId:activityId(name,tabAction),status:'running',...safePage(page),startedAt:Date.now(),endedAt:null});this.entries=this.entries.slice(0,12);return id;
  }
  /** Typing or scrolling arrives in many small batches: one that follows the same kind on the same tab within windowMs extends that entry instead of pushing the history out. */
  continue(source:BrowserActivity['source'],name:unknown,page:ActivityPage,windowMs=10_000):string{
-  const latest=this.entries[0],action=activityAction(name);
-  if(latest&&latest.source===source&&latest.action===action&&latest.tabId===page.tabId&&latest.status==='completed'&&latest.endedAt!==null&&Date.now()-latest.endedAt<=windowMs){latest.status='running';latest.endedAt=null;return latest.id;}
+  const latest=this.entries[0],actionId=activityId(name);
+  if(latest&&latest.source===source&&latest.actionId===actionId&&latest.tabId===page.tabId&&latest.status==='completed'&&latest.endedAt!==null&&Date.now()-latest.endedAt<=windowMs){latest.status='running';latest.endedAt=null;return latest.id;}
   return this.start(source,name,page);
  }
  update(id:string,page:ActivityPage,tabAction?:string):void{
   const entry=this.entries.find(item=>item.id===id);if(!entry||entry.status!=='running')return;
-  Object.assign(entry,safePage(page));if(tabAction)entry.action=activityAction('browser_tabs',tabAction);
+  Object.assign(entry,safePage(page));if(tabAction)entry.actionId=activityId('browser_tabs',tabAction);
  }
  finish(id:string,failed:boolean,page?:ActivityPage):void{
   const entry=this.entries.find(item=>item.id===id);if(!entry||entry.status!=='running')return;
   if(page)Object.assign(entry,safePage(page));entry.status=failed?'failed':'completed';entry.endedAt=Date.now();
  }
- failRunning(preserveManualLifecycle=false):void{for(const entry of this.entries)if(entry.status==='running'&&!(preserveManualLifecycle&&entry.source==='manual'&&['停止浏览器','重启浏览器'].includes(entry.action)))this.finish(entry.id,true);}
- snapshot():BrowserActivity[]{return this.entries.map(entry=>({...entry}));}
+ failRunning(preserveManualLifecycle=false):void{for(const entry of this.entries)if(entry.status==='running'&&!(preserveManualLifecycle&&entry.source==='manual'&&['activity.stop','activity.restart'].includes(entry.actionId)))this.finish(entry.id,true);}
+ snapshot():BrowserActivity[]{return this.entries.map(({actionId,...entry})=>({...entry,actionId,action:t(actionId),pageUrl:activityUrl(entry.pageUrl)}));}
 }

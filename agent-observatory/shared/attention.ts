@@ -1,3 +1,4 @@
+import { t } from "./text";
 /**
  * 需要处理 in one sentence: what each waiting Agent wants from you (opus-B3), and the host-wide summary behind the sidebar
  * badge and its popover (opus-B1). No model is asked: the question and its choices, the plan's title and the command come
@@ -64,11 +65,11 @@ const two = (value: number) => String(value).padStart(2, "0");
 /** A reset or wake-up time on this device's clock: 「05:00」 today, 「明天 05:00」, else 「10月12日 05:00」. */
 export function clockLabel(value: string | number, now = Date.now()): string {
   const at = new Date(value), today = new Date(now);
-  if (!Number.isFinite(at.getTime())) return "时间未知";
+  if (!Number.isFinite(at.getTime())) return t("sharedAttention.m001");
   const time = `${two(at.getHours())}:${two(at.getMinutes())}`;
   const midnight = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
   const days = Math.round((midnight(at) - midnight(today)) / 86_400_000);
-  return days === 0 ? time : days === 1 ? `明天 ${time}` : days === -1 ? `昨天 ${time}` : `${at.getMonth() + 1}月${at.getDate()}日 ${time}`;
+  return days === 0 ? time : days === 1 ? t("sharedAttention.m002", { time: time }) : days === -1 ? t("sharedAttention.m003", { time: time }) : t("sharedAttention.m004", { value1: at.getMonth() + 1, value2: at.getDate(), time: time });
 }
 
 /** The one-line reason, rendered on the client (times use the device's clock). */
@@ -76,22 +77,22 @@ export function reasonText(input: ReasonInput, now = Date.now()): ReasonLine {
   const first = input.pending?.[0];
   switch (input.phase) {
     case "question": {
-      const options = first?.options.length ? `（${first.options.slice(0, 3).join(" / ")}${first.options.length > 3 ? " …" : ""}）` : "";
-      return { text: `问你：${first?.title ?? "有个问题等你回答"}${options}`, hue: "violet", icon: "MessageCircleQuestion" };
+      const options = first?.options.length ? t("sharedAttention.m005", { value1: first.options.slice(0, 3).join(" / "), value2: first.options.length > 3 ? " …" : "" }) : "";
+      return { text: t("sharedAttention.m006", { value1: first?.title ?? t("sharedAttention.m007"), options: options }), hue: "violet", icon: "MessageCircleQuestion" };
     }
-    case "plan": return { text: `计划待批：${first?.title ?? "等你批准计划"}`, hue: "amber", icon: "ClipboardList" };
+    case "plan": return { text: t("sharedAttention.m008", { value1: first?.title ?? t("sharedAttention.m009") }), hue: "amber", icon: "ClipboardList" };
     case "approval": {
       const tool = input.pending?.find(request => request.kind === "tool") ?? first, count = input.pendingCount ?? input.pending?.length ?? 0;
-      const what = tool?.detail ? `要执行：${tool.detail}` : tool?.title ? `要你批准：${tool.title}` : "有请求等你批准";
-      return { text: count > 1 ? `${what}（共 ${count} 项）` : what, hue: "amber", icon: "Hand" };
+      const what = tool?.detail ? t("sharedAttention.m010", { value1: tool.detail }) : tool?.title ? t("sharedAttention.m011", { value1: tool.title }) : t("sharedAttention.m012");
+      return { text: count > 1 ? t("sharedAttention.m013", { what: what, count: count }) : what, hue: "amber", icon: "Hand" };
     }
     // A reset the notice gave without a time zone is read in the device's zone: about then, not exactly (grok-F2).
-    case "quota": return { text: input.stop?.resetAt ? `额度用尽 · ${input.stop.resetGuessed ? "约 " : ""}${clockLabel(input.stop.resetAt, now)} 恢复${input.stop.resetGuessed ? "（推测）" : ""}` : "额度用尽 · 恢复时间未知", hue: "orange", icon: "BatteryWarning" };
-    case "error": return { text: `出错：${firstLine(input.lastError) ?? "这一轮失败了"}`, hue: "red", icon: "CircleX" };
-    case "silent": return { text: "空轮：这一轮没有任何输出", hue: "amber", icon: "CircleDashed" };
-    case "unfinished": return { text: input.stop?.closedMidTurn ? "可能未收尾：宿主关闭会话时这一轮还没结束" : "可能未收尾：停在工具调用之后，没有收尾回复", hue: "amber", icon: "CircleDotDashed" };
-    case "idle": return { text: input.note ? `在问你：${input.note}` : "在问你，等你回复", hue: "violet", icon: "MessageCircleMore" };
-    case "unread": return { text: input.note ? `完成：${input.note}` : "新结果等你查看", hue: "pink", icon: "Mail" };
+    case "quota": return { text: input.stop?.resetAt ? t("sharedAttention.m014", { value1: input.stop.resetGuessed ? t("sharedAttention.m015") : "", value2: clockLabel(input.stop.resetAt, now), value3: input.stop.resetGuessed ? t("sharedAttention.m016") : "" }) : t("sharedAttention.m017"), hue: "orange", icon: "BatteryWarning" };
+    case "error": return { text: t("sharedAttention.m018", { value1: firstLine(input.lastError) ?? t("sharedAttention.m019") }), hue: "red", icon: "CircleX" };
+    case "silent": return { text: t("sharedAttention.m020"), hue: "amber", icon: "CircleDashed" };
+    case "unfinished": return { text: input.stop?.closedMidTurn ? t("sharedAttention.m021") : t("sharedAttention.m022"), hue: "amber", icon: "CircleDotDashed" };
+    case "idle": return { text: input.note ? t("sharedAttention.m023", { value1: input.note }) : t("sharedAttention.m024"), hue: "violet", icon: "MessageCircleMore" };
+    case "unread": return { text: input.note ? t("sharedAttention.m025", { value1: input.note }) : t("sharedAttention.m026"), hue: "pink", icon: "Mail" };
   }
 }
 export function reasonLine(agent: AgentRecord, now = Date.now()): ReasonLine | null {
@@ -176,7 +177,7 @@ export type LiveExtrasResponse = z.infer<typeof getLiveExtras.output>;
 export interface LiveExtrasState { agents: LiveExtra[]; revision: string }
 export function mergeLiveExtras(previous: LiveExtrasState | undefined, response: LiveExtrasResponse): LiveExtrasState {
   if (response.mode === "full") return { agents: response.agents, revision: response.revision };
-  if (!previous) throw new Error("本地实时信息缓存已失效，正在重新读取。");
+  if (!previous) throw new Error(t("sharedAttention.m027"));
   return previous;
 }
 /**

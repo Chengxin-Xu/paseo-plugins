@@ -1,3 +1,4 @@
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import { mkdir, rename, open, unlink, chmod, readdir, readFile, readlink, stat } from "node:fs/promises";
@@ -22,8 +23,8 @@ const LOCK_WAIT_MS = 10_000;
 const LOCK_STALE_MS = 60_000;
 const READ_CONCURRENCY = 8;
 const BOARD_FILE = /^[a-f0-9]{64}\.json$/;
-const SINGLE = { invalid: "记录文件校验失败，已保留原文件；请先备份检查，不会自动清空。", tooLarge: "记录文件过大，请先备份整理后再继续。" };
-const OVERVIEW = { invalid: "某个项目的手记文件校验失败，已保留原文件；不会把读取失败当作空看板。", tooLarge: SINGLE.tooLarge };
+const SINGLE = { get invalid() { return t("serverStore.invalidFile"); }, get tooLarge() { return t("serverStore.fileTooLarge"); } };
+const OVERVIEW = { get invalid() { return t("serverStore.invalidOverviewFile"); }, get tooLarge() { return SINGLE.tooLarge; } };
 /** A board as last read from disk. `token` hashes the file bytes: every change, from any process or a manual edit, yields a new token. */
 export interface BoardEntry { snapshot: BoardSnapshot; token: string }
 /** A board the overview left out, with its file name (the SHA-256 of its project ID). */
@@ -152,11 +153,11 @@ export class BoardStore {
       const saved = historySchema.parse(JSON.parse(raw));
       if (saved.projectId !== projectId || saved.itemId !== itemId) throw new Error("history mismatch");
       return saved;
-    } catch { throw new Error("修改快照文件校验失败，已保留原文件和看板；请先备份检查。"); }
+    } catch { throw new Error(t("serverStore.invalidHistory")); }
   }
   private async history(projectId: string, itemId: string, expectedKeys: readonly string[] = []) {
     const { versions } = await this.historyData(projectId, itemId), present = new Set(versions.map(versionKey));
-    if (expectedKeys.some(key => !present.has(key))) throw new Error("修改快照文件缺失或不完整，已保留看板；请从同一份备份恢复历史文件。");
+    if (expectedKeys.some(key => !present.has(key))) throw new Error(t("serverStore.incompleteHistory"));
     return versions;
   }
   private async saveHistory(projectId: string, itemId: string, versions: NoteVersion[], owned: () => Promise<void>, options: { protect?: string[]; retain?: string[]; committed?: string[] } = {}) {
@@ -214,7 +215,7 @@ export class BoardStore {
       const saved = await this.historyData(doc.projectId, id);
       // New transactions redundantly carry their intended keys: losing the item fields must not acknowledge old keys.
       // A legacy marker without that intent is safe to finish only while the main file still carries its references.
-      if (typeof pending === "string" && (item.historyKeys === undefined || (item.historyKeys.length === 0 && saved.committedKeys?.length))) throw new Error("历史提交记录不完整，已保留全部快照；请恢复同一份完整看板备份后重试。");
+      if (typeof pending === "string" && (item.historyKeys === undefined || (item.historyKeys.length === 0 && saved.committedKeys?.length))) throw new Error(t("serverStore.incompleteCommit"));
       const keys = typeof pending === "string" ? item.historyKeys! : pending.keys;
       await this.saveHistory(doc.projectId, id, saved.versions, owned, { committed: keys });
       item.historyKeys = keys; item.historyCount = Math.min(10, keys.length);
@@ -222,12 +223,12 @@ export class BoardStore {
     delete doc.pendingHistory; await this.save(doc, owned, true);
   }
   async readHistory(projectId: string, itemId: string): Promise<{ versions: NoteVersion[]; missing: boolean; missingCount: number; itemRevision: number }> {
-    if (!projectId || projectId.length > 512 || !z.string().uuid().safeParse(itemId).success) throw new Error("无效手记");
+    if (!projectId || projectId.length > 512 || !z.string().uuid().safeParse(itemId).success) throw new Error(t("serverStore.invalidNote"));
     await this.queues.get(projectId)?.catch(() => {});
     return this.withLock(projectId, async owned => {
       const doc = await this.load(projectId); await this.drainRemovals(doc, owned); await this.drainHistory(doc, owned); await this.migrate(doc, owned);
       const item = doc.items.find(item => item.id === itemId);
-      if (!item) throw new Error("这条记录已不存在，请刷新。");
+      if (!item) throw new Error(t("serverStore.missingNote"));
       const { versions } = await this.historyData(projectId, itemId), present = new Set(versions.map(versionKey));
       const allKeys = item.historyKeys ?? [], keys = new Set(allKeys.slice(-10));
       const missingCount = allKeys.filter(key => !present.has(key)).length;
@@ -286,7 +287,7 @@ export class BoardStore {
     return this.cached(this.boardFile(projectId), messages);
   }
   async read(projectId: string): Promise<BoardSnapshot> {
-    if (!projectId || projectId.length > 512) throw new Error("无效项目");
+    if (!projectId || projectId.length > 512) throw new Error(t("serverStore.invalidProject"));
     return (await this.entry(projectId, SINGLE))?.snapshot ?? { projectId, revision: 0, items: [] };
   }
   /** Every board within the size limits; readEntries() also reports the ones left out. */
@@ -353,7 +354,7 @@ export class BoardStore {
       if (folder !== this.root) await this.syncDirectory(this.root);
     } finally { await handle?.close().catch(() => {}); await unlink(tmp).catch(() => {}); }
   }
-  private async save(doc: BoardDocument, owned: () => Promise<void>, cleanup = false, limitMessage = "此项目记录已达到存储上限，请先清空回收站或导出整理。"): Promise<void> {
+  private async save(doc: BoardDocument, owned: () => Promise<void>, cleanup = false, limitMessage = t("serverStore.storageLimit")): Promise<void> {
     doc.version = 2;
     // Compact main files hold only current content. Reserve enough room to trash every active note, even at the limit.
     const reserve = cleanup ? 0 : doc.items.filter(item => item.deletedAt === null).length * 32 + 384;
@@ -395,7 +396,7 @@ export class BoardStore {
       const seen = await inspect(lock);
       if (!seen) continue; // released meanwhile
       if (await this.reclaimable(seen) && await this.reclaim(lock)) continue;
-      if (Date.now() > deadline) throw new Error(`这个项目的记录正被另一个进程修改${seen.owner ? `（pid ${seen.owner.pid}）` : ""}，请稍后重试。`);
+      if (Date.now() > deadline) throw new Error(seen.owner ? t("serverStore.lockBusyPid", { pid: seen.owner.pid }) : t("serverStore.lockBusy"));
       await sleep(20 + Math.floor(Math.random() * 60));
     }
     try { return await fn(() => this.assertOwned(lock, token)); }
@@ -430,7 +431,7 @@ export class BoardStore {
   }
   /** Checked right before a board is committed: a writer whose lock was taken over must not overwrite the new holder's work. */
   private async assertOwned(lock: string, token: string): Promise<void> {
-    if ((await inspect(lock))?.owner?.token !== token) throw new Error("写入期间这个项目的锁被其他进程接管，这次修改没有保存，请刷新后重试。");
+    if ((await inspect(lock))?.owner?.token !== token) throw new Error(t("serverStore.lockLost"));
   }
   /** Removes the lock only while it is still this writer's: a lock taken over meanwhile belongs to another writer now. */
   private async release(lock: string, token: string): Promise<void> {
@@ -449,7 +450,7 @@ export class BoardStore {
     const stableHash = createHash("sha256").update(JSON.stringify(intent)).digest("hex");
     const receipt = doc.receipts.find(x => x.requestId === input.requestId);
     if (receipt) {
-      if (receipt.stableHash ? receipt.stableHash !== stableHash : receipt.hash !== hash) throw new Error("请求标识已用于另一项修改，请刷新后重试。");
+      if (receipt.stableHash ? receipt.stableHash !== stableHash : receipt.hash !== hash) throw new Error(t("serverStore.requestReused"));
       return { board: this.snapshot(doc), itemId: receipt.itemId, replayed: true };
     }
     const contentSize = () => Buffer.byteLength(JSON.stringify(doc.items.map(item => ({ ...fieldsSchema.parse(item), deletedAt: item.deletedAt }))));
@@ -457,21 +458,21 @@ export class BoardStore {
     const now = new Date().toISOString(), op = input.operation; let itemId: string;
     let removedIds: string[] = [];
     if (op.type === "create") {
-      if (doc.items.length >= 4000) throw new Error("此项目已达到 4000 条记录上限，请先导出整理。");
+      if (doc.items.length >= 4000) throw new Error(t("serverStore.noteLimit"));
       itemId = randomUUID(); doc.items.unshift(storedItemSchema.parse({ ...op.fields, id: itemId, projectId: input.projectId, revision: 1, createdAt: now, updatedAt: now, deletedAt: null, historyCount: 0, historyKeys: [] }));
     } else if (op.type === "emptyTrash") {
-      if (doc.revision !== op.expectedRevision) throw new Error("回收站已在另一台设备更新，请刷新后重新确认。");
+      if (doc.revision !== op.expectedRevision) throw new Error(t("serverStore.trashChanged"));
       removedIds = doc.items.filter(item => item.deletedAt !== null).map(item => item.id);
       itemId = ""; doc.items = doc.items.filter(item => item.deletedAt === null);
     } else {
       itemId = op.id; const index = doc.items.findIndex(x => x.id === op.id);
-      if (index < 0) throw new Error("这条记录已不存在，请刷新。");
+      if (index < 0) throw new Error(t("serverStore.missingNote"));
       const existing = doc.items[index]!;
-      if (existing.revision !== op.expectedRevision) throw new Error("这条记录已在另一台设备更新。你的草稿仍保留，请刷新记录后重新编辑。");
-      if (op.type !== "restore" && op.type !== "purge" && op.type !== "repairHistory" && existing.deletedAt) throw new Error("这条记录已在回收站，请先恢复。");
-      if (op.type === "restore" && !existing.deletedAt) throw new Error("这条记录已经恢复，请刷新。");
+      if (existing.revision !== op.expectedRevision) throw new Error(t("serverStore.noteChanged"));
+      if (op.type !== "restore" && op.type !== "purge" && op.type !== "repairHistory" && existing.deletedAt) throw new Error(t("serverStore.noteTrashed"));
+      if (op.type === "restore" && !existing.deletedAt) throw new Error(t("serverStore.alreadyRestored"));
       if (op.type === "purge") {
-        if (!existing.deletedAt) throw new Error("请先把这条记录移入回收站。");
+        if (!existing.deletedAt) throw new Error(t("serverStore.trashFirst"));
         removedIds.push(itemId); doc.items.splice(index, 1);
       } else if (op.type === "repairHistory") {
         const saved = await this.historyData(input.projectId, itemId), present = new Set(saved.versions.map(versionKey));
@@ -483,7 +484,7 @@ export class BoardStore {
         const keys = new Set(existing.historyKeys?.slice(-10));
         const versions = op.type === "restoreVersion" ? (await this.history(input.projectId, itemId, existing.historyKeys)).filter(entry => keys.has(versionKey(entry))).slice(-10) : [];
         const version = versions.find(entry => entry.revision === (op.type === "restoreVersion" ? op.revision : -1));
-        if (op.type === "restoreVersion" && !version) throw new Error("这个修改快照已不在最近 10 版中，请刷新。");
+        if (op.type === "restoreVersion" && !version) throw new Error(t("serverStore.versionMissing"));
         const changes = op.type === "update" ? op.fields : version ? fieldsSchema.parse(version) : { deletedAt: op.type === "delete" ? now : null };
         const contentChanged = ("title" in changes && changes.title !== existing.title) || ("body" in changes && changes.body !== existing.body) || ("kind" in changes && changes.kind !== existing.kind);
         if (contentChanged) {
@@ -501,7 +502,7 @@ export class BoardStore {
     }
     doc.revision++; doc.receipts.push({ requestId: input.requestId, hash, stableHash, itemId, ...(removedIds.length ? { removedIds } : {}) }); doc.receipts = doc.receipts.slice(-300);
     const cleanup = ["delete", "purge", "emptyTrash", "restore", "repairHistory"].includes(op.type) || (op.type !== "create" && contentSize() <= beforeContentBytes);
-    const limitMessage = op.type === "restore" ? "这条手记暂时无法恢复，请先导出整理其他手记后重试；它仍保留在回收站。" : undefined;
+    const limitMessage = op.type === "restore" ? t("serverStore.restoreLimit") : undefined;
     await this.save(doc, owned, cleanup, limitMessage);
     await this.drainHistory(doc, owned);
     if (removedIds.length) await this.drainRemovals(doc, owned);

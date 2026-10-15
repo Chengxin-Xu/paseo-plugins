@@ -1,5 +1,13 @@
 # 变更记录
 
+## 0.11.0 · 2026-10-15
+
+- Languages：内置英文和简体中文，默认跟随系统；新增 Settings → Plugins → Project Notes → Language，切换后打开的看板、提示词、编辑器和启动界面即时更新。
+- 用户翻译位于 `~/.paseo/plugin-data/project-notes/locales/`，从 `templates/en.json` 或 `templates/zh-CN.json` 复制，以语言代码命名，设置 `$meta.name` 并保留占位符；复数必须有 `other`。设置显示覆盖率和问题，缺失或无效条目回退英文。
+- 服务端消息与 CLI 使用相同语言；CLI 读取 `i18n-state.json` 中的固定设置或最近设备语言，原有手记和历史正文不翻译。
+- 新内置语言可通过 PR 添加 `shared/locales/<code>.json` 并在 `server/locales.ts` 注册。重建延迟界面包，保留首屏常驻体积预算。
+
+
 ## 0.10.4 · 2026-10-14
 
 - 从 Git 安装（市场安装同样如此）时，宿主只装生产依赖，客户端代码里对 `@getpaseo/client` 的类型导入解析不到，0.10.3 安装失败。现在这些类型经插件 SDK 的 `PluginClientContext` 推导（`client/paseo-types.ts`），行为不变；集合脚本新增检查，公开插件的客户端代码只导入生产依赖里的 Paseo 包。

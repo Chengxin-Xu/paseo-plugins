@@ -1,3 +1,5 @@
+import { translator } from "../shared/i18n";
+import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, renameSync, statSync } from "node:fs";
 import { open, rename, unlink } from "node:fs/promises";
@@ -239,7 +241,7 @@ export class StatsStore {
     // The zone actually applied (null: the fixed offset) and its local today are part of both the revision and the memo
     // key, so another zone, or the same zone past local midnight, never gets an earlier projection.
     const zone = statsZone(input.utcOffsetMinutes, input.timeZone, now), today = statsDayText(statsLocalDay(now, zone));
-    const revision = createHash("sha256").update(JSON.stringify([this.change, this.directoryCache.digest,
+    const revision = createHash("sha256").update(JSON.stringify([translator().language, translator().hash, this.change, this.directoryCache.digest,
       input.range, input.utcOffsetMinutes, zone.name, today, [...this.running.keys()].sort(), [...awaiting].sort(),
       [...background].sort(), [...ended].sort()])).digest("hex").slice(0, 24);
     if (input.revision === revision) return { mode: "unchanged", unchanged: true, revision };
@@ -412,7 +414,7 @@ export class StatsStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       // An inaccessible valid file is not corrupt, and must not be replaced by a fresh ledger.
       this.storageReadable = false;
-      console.warn("统计历史暂时无法读取；继续内存采集并保留原文件。");
+      console.warn(t("serverStatsStore.m001"));
       return;
     }
     try {

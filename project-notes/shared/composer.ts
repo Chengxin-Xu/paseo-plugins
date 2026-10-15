@@ -1,3 +1,4 @@
+import { t } from "./text";
 import { defineAttachmentSource, defineRpc, PluginAttachmentSearchPayloadSchema } from "@getpaseo/plugin";
 import { z } from "zod";
 import { deferredSendContracts } from "./deferred-rpc";
@@ -19,8 +20,8 @@ export const composerCapabilitiesRpc = defineRpc({
 });
 /** 「等这一轮结束再发」: a prompt the agent cannot take now waits in this plugin's queue (server/deferred-send.ts, kit). */
 export const notesDeferred = deferredSendContracts("project-notes");
-export const notesAttachmentSource = defineAttachmentSource({
-  id: "notes", title: "项目手记", icon: "NotebookPen", pickerTitle: "附加手记", searchPlaceholder: "搜索标题、正文或项目名", search: composerAttachmentsRpc,
+export const notesAttachmentSource = () => defineAttachmentSource({
+  id: "notes", title: t("boot.attachmentTitle"), icon: "NotebookPen", pickerTitle: t("boot.attachmentPickerTitle"), searchPlaceholder: t("boot.attachmentSearchPlaceholder"), search: composerAttachmentsRpc,
 });
 export type ComposerNote = z.infer<typeof composerSearchRpc.output>["items"][number];
 
@@ -35,11 +36,11 @@ export function interpolateTemplate(template: string, values: Readonly<Record<st
   return { text, missing, tooLong: text.length > BODY_MAX_LENGTH };
 }
 export function noteContext(note: Pick<ComposerNote, "id" | "title" | "body">, body = note.body) {
-  return `来源：手记 #${note.id}\n${note.title}${body ? `\n\n${body}` : ""}`;
+  return t("composer.noteContext", { id: note.id, title: note.title, body: body ? `\n\n${body}` : "" });
 }
 export function quickNoteFields(text: string) {
   const body = text.trim();
-  if (!body) throw new Error("请在 /notes 后填写要记下的文字。");
-  if (body.length > BODY_MAX_LENGTH) throw new Error(`随手记不能超过 ${BODY_MAX_LENGTH} 字符。`);
+  if (!body) throw new Error(t("boot.quickNoteEmpty"));
+  if (body.length > BODY_MAX_LENGTH) throw new Error(t("boot.quickNoteTooLong", { count: BODY_MAX_LENGTH }));
   return { kind: "idea" as const, title: body.split(/\r?\n/)[0]!.slice(0, 160), body, status: "todo" as const, priority: "normal" as const, pinned: false };
 }
