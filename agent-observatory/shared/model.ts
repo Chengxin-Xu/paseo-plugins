@@ -50,6 +50,8 @@ export interface PendingRequest {
   detail: string | null;
   /** A question's choices. */
   options: string[];
+  /** The host's request id, when it has one: one chime per request (shared/alerts.ts). */
+  requestId?: string;
 }
 /** What a waiting Agent waits for: a structured question, a plan to approve, or a tool approval. */
 export type WaitingKind = "question" | "plan" | "approval";
@@ -263,7 +265,11 @@ const clip = (value: unknown, max: number): string | null => typeof value === "s
 const REQUEST_KINDS: ReadonlySet<string> = new Set(["tool", "plan", "question", "mode", "other"]);
 /** One pending request in a few words: the question and its choices, the plan's first line, the command a tool wants to run. */
 export function summarizeRequest(value: unknown): PendingRequest {
-  const request = recordOf(value), input = recordOf(request.input), detail = recordOf(request.detail);
+  const request = recordOf(value), requestId = clip(request.id, 200);
+  return requestId ? { ...describeRequest(request), requestId } : describeRequest(request);
+}
+function describeRequest(request: Record<string, unknown>): PendingRequest {
+  const input = recordOf(request.input), detail = recordOf(request.detail);
   const kind = REQUEST_KINDS.has(String(request.kind)) ? request.kind as PendingRequest["kind"] : "tool";
   if (kind === "question") {
     const questions = Array.isArray(input.questions) ? input.questions.map(recordOf) : [], first = questions[0] ?? {};

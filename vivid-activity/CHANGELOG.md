@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.0 (2026-10-15)
+
+- **What a run changed**: fold rows end with `3 files +12 −4` and a five-block diffstat (green added, red removed; phones
+  leave out the file count). Expanded, they list each file with its lines added and removed and each failed command
+  with its first line and exit code before the steps. Only exact line counts are shown: writes, edits without a diff,
+  diffs Paseo cut short or too large to compare, deleted files of a patch, patches cut short or too long, and Codex
+  patches (Paseo keeps only their first file, so other files cannot be ruled out) count as changes without line
+  counts, shown as `1 more uncounted` and never added in or guessed. Whole patch texts are read strictly, section by
+  section (at most 200,000 characters, no regular expressions). Rows show their own `+N / −M` only when exact too. The
+  fold index adds only numbers (a short hash of each file's path, line counts, uncounted changes, exit codes); file
+  names and commands come from rows this device drew.
+  Adapted from `changeSummary` and `Diffstat` in [paseo-chat-polish](https://github.com/lthieu96/paseo-chat-polish)
+  by Hieu Le (MIT, see NOTICE).
+- **Turn tokens**: the last fold row of a turn shows the turn's input, cached and output tokens, read by the
+  provider's base (`extends` in the daemon config). Claude- and ACP-based providers show the turn's total when it
+  ends. Codex-based providers replace the figures after every request, so while such a turn runs the server part
+  subscribes inside the daemon to running agents' updates and adds up each request (the coin breathes until the turn
+  ends); cache hits are split out of the input. Pi, OpenCode and OMP show nothing. Only turns watched while they ran
+  show figures; they come with the fold index, with no extra request. Thanks to
+  [Beautiful Chat](https://github.com/ABorakati/beautiful-chat) and [TokenLedger](https://github.com/stv1024/token-ledger)
+  for the idea.
+- **Running animations**: a new Running animation setting next to Palette offers the spinner (default, unchanged),
+  a Claude Code style sparkle (· ✢ ✳ ✶ ✻ ✽), a breathing orb and a 3×3 dot grid as a snake or a twinkle, with live
+  previews. Web uses CSS keyframes and mobile uses native-driver `Animated` values; they pause in the background and
+  hold still under reduced motion. The idea comes from paseo-chat-polish; nothing is injected into the page.
+- The animations and the expanded change list are a third lazily loaded chunk, `fx` (49,304 bytes), fetched the
+  first time one is needed; the settings preview borrows the resident mark instead of carrying its own copy. The
+  resident bundle grows from 355,685 to 372,729 bytes; its test budget moves from 360 to 368 KiB.
+- A reloaded session counts its turns from the start again (`foreground-turn-1`, `codex-turn-0`, ...): a new history
+  drops the token figures of its old turn ids, and the server forgets a turn id's figures when that id starts again.
+
 ## 0.7.1 (2026-10-15)
 
 - Shared language layer update: one fewer duplicate catalog check on connect. Rows need the full catalog, so it still loads at once.

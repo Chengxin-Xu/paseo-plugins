@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Text, View } from "react-native";
 import { NotesSurface, NotesWorkspacePanel } from "../client/board";
 import { Icon, Toasts } from "./adapter.jsx";
+import { previewDirectory, previewQuick } from "./live.js";
 import { paseoDark, paseoLight } from "./themes.js";
 
 // ?theme=light|dark  ?scenario=…  ?panel=1 (workspace panel)  ?chrome=0 (hide the host title bar)  ?compact=1|0
@@ -28,7 +29,9 @@ const navigation = params.get("nav") === "0" ? undefined : {
   openAgent: input => globalThis.__notesNavigation.push({ type: "agent", ...input }),
   openWorkspace: input => globalThis.__notesNavigation.push({ type: "workspace", ...input }),
 };
-const props = { theme, host: { id: "fixture-host", label: "dev-server-01" }, layout: { compact, platform: "web" }, navigation };
+// ?live=0 drops the resident's live copies (agent directory, one-tap list), like an older plugin stub.
+const services = params.get("live") === "0" ? undefined : { directory: previewDirectory, quick: previewQuick };
+const props = { theme, host: { id: "fixture-host", label: "dev-server-01" }, layout: { compact, platform: "web" }, navigation, services, params: params.get("view") ? { view: params.get("view") } : {} };
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 
 /** The host's own title bar around a plugin surface (not part of the plugin). */

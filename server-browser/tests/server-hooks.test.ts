@@ -6,6 +6,7 @@ import contribute from '../index.server';
 import type { BrowserManager } from '../server/browser-manager';
 import { WorkspaceDirectory } from '../server/service';
 import type { BrowserSession } from '../shared/browser';
+import type { AgentPortService } from '../server/agent-ports';
 
 type Handler=(input:unknown,context:{paseo:unknown;signal?:AbortSignal})=>unknown;
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -140,4 +141,32 @@ test('an unchanged overview answers with its revision only',async()=>{
   assert(JSON.stringify(unchanged).length<100);
   const stale=await overview({revision:'another-revision'},{paseo}) as {items:unknown[]};
   assert(Array.isArray(stale.items),'a different revision receives the full summary');
+});
+
+test('ports of Agents: listed after workspace validation, unchanged lists cost a revision, and opening sends only a port',async()=>{
+  const {server,rpc,events,manager}=host();
+  const actions:unknown[][]=[],targets:unknown[][]=[],invalidated:(string|undefined)[]=[];
+  (manager as unknown as {action:(...args:unknown[])=>Promise<BrowserSession>}).action=async(id,action,target)=>{actions.push([id,action,target]);return session(id as string);};
+  const listed={supported:true,items:[{port:3000}],others:[],partial:false,uncertain:false,failed:false,scannedAt:5,revision:'r1'};
+  const ports={
+    list:async()=>listed,
+    target:async(_paseo:unknown,workspaceId:string,port:number)=>{targets.push([workspaceId,port]);if(port!==3000)throw new Error(`端口 ${port} 不在 Agent 开的端口列表里，没有打开。请刷新列表再试。`);return 'http://127.0.0.1:3000/';},
+    invalidateAgent:(id?:string)=>{invalidated.push(id);},
+  } as unknown as AgentPortService;
+  const paseo={workspaces:{list:async()=>({entries:[workspace('one')],pageInfo:{hasMore:false}})}};
+  contribute(server,{manager,directory:new WorkspaceDirectory(60_000),ports});
+  const list=rpc.get('browser.ports')!;
+  assert.deepEqual(await list({workspaceId:'one'},{paseo}),listed);
+  assert.deepEqual(await list({workspaceId:'one',revision:'r1'},{paseo}),{supported:true,unchanged:true,revision:'r1',scannedAt:5});
+  await assert.rejects(Promise.resolve(list({workspaceId:'gone'},{paseo})),/已不可用/,'an unknown workspace is refused before any scan');
+  const target={tabId:'t',viewRevision:'v'};
+  await rpc.get('browser.action')!({workspaceId:'one',action:{kind:'openPort',port:3000},target},{paseo});
+  assert.deepEqual(actions,[['one',{kind:'newTab',url:'http://127.0.0.1:3000/'},target]],'the server opens the address it found, as a manual new tab');
+  await assert.rejects(Promise.resolve(rpc.get('browser.action')!({workspaceId:'one',action:{kind:'openPort',port:9999},target},{paseo})),/端口 9999 不在/);
+  assert.equal(actions.length,1,'an unlisted port opens nothing');
+  assert.deepEqual(targets,[['one',3000],['one',9999]]);
+  events.get('agent.closed')!({agent:{id:'agent-7',workspaceId:'one'}},{paseo});
+  events.get('agent.archived')!({agent:{id:'agent-8',workspaceId:null}},{paseo});
+  events.get('agent.turn_started')!({agent:{id:'agent-9',workspaceId:'one'},turnId:null},{paseo});
+  assert.deepEqual(invalidated,['agent-7','agent-8','agent-9'],'lifecycle events drop the Agent\'s cached title and state');
 });

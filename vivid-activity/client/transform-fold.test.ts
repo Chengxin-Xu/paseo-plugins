@@ -86,7 +86,10 @@ describe("timeline transforms with folding", () => {
         type: "plugin",
         kind: "vivid-fold",
         version: 1,
-        data: { segment: "2", mode: "done", expanded: false, steps: 3, hidden: 3, counts: [["shell", 2], ["read", 1]], failed: 0, canceled: 0, durationMs: 3000 },
+        data: {
+          segment: "2", mode: "done", expanded: false, steps: 3, hidden: 3, counts: [["shell", 2], ["read", 1]], failed: 0, canceled: 0, durationMs: 3000,
+          files: 0, added: 0, removed: 0, uncounted: 0, changed: [], fails: [], turn: null, lastOfTurn: false,
+        },
       },
     ]);
     expect(transformToolCall({ item: b, phase: "complete" })).toEqual({ items: [] });

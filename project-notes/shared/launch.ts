@@ -45,6 +45,42 @@ export const launchStatusRpc = defineRpc({
   name: "project-notes.launch-status", input: z.object({ launchId: z.string().regex(/^[a-zA-Z0-9_-]{8,100}$/) }),
   output: launchReceiptSchema.nullable(),
 });
+/**
+ * What a launch record says, for task cards and the note's detail: the stage reached, what it created, when. Live agent
+ * status is not here; the app reads it from Paseo's agent directory.
+ */
+export const launchRecordSchema = z.object({
+  launchId: z.string(),
+  /** The note it started from; null for records written before 0.12, which did not keep it. */
+  itemId: z.string().nullable(),
+  stage: launchReceiptSchema.shape.stage,
+  workspaceId: z.string().nullable(), agentId: z.string().nullable(),
+  error: z.string().nullable(),
+  /** When it started (the record's file time for records written before 0.12). */
+  at: z.string(),
+});
+/** An agent a note started, as the agent directory lists it (archived ones included): found by its note label. */
+export const launchAgentSchema = z.object({
+  agentId: z.string(), launchId: z.string().nullable(), workspaceId: z.string().nullable(),
+  title: z.string().nullable(), provider: z.string(), status: z.string(),
+  archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(),
+});
+/**
+ * Launch records. Without `itemId`: every note's records, newest first, with a revision; sending it back answers
+ * `unchanged` while no record changed. With `itemId`: that note's records plus the agents labelled with it, archived
+ * ones included (one directory read; never a timeline).
+ */
+export const launchesRpc = defineRpc({
+  name: "project-notes.launches",
+  input: z.object({ revision: z.string().max(128).optional(), itemId: z.string().uuid().optional() }),
+  output: z.union([
+    z.object({ unchanged: z.literal(true), revision: z.string() }),
+    z.object({ unchanged: z.literal(false).optional(), revision: z.string(), records: z.array(launchRecordSchema), agents: z.array(launchAgentSchema).optional() }),
+  ]),
+});
+export type LaunchRecord = z.infer<typeof launchRecordSchema>;
+export type LaunchAgent = z.infer<typeof launchAgentSchema>;
+export type LaunchesUpdate = z.infer<typeof launchesRpc.output>;
 export type LaunchOptions = z.infer<typeof launchOptionsRpc.output>;
 export type LaunchInput = z.infer<typeof launchInputSchema>;
 export type LaunchReceipt = z.infer<typeof launchReceiptSchema>;

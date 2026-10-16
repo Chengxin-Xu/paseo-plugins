@@ -1,7 +1,7 @@
 {
   "id": "terracotta-themes",
   "name": "Terracotta Themes",
-  "description": "Twelve color themes, six dark and six light, derived from one perceptual tonal ladder.",
+  "description": "Twelve color themes, six dark and six light, from one perceptual tonal ladder, plus a live custom theme you tune with sliders. English, Simplified Chinese and user-defined languages.",
   "icon": "assets/icon.png",
   "media": [
     "assets/screenshot-overview.png",

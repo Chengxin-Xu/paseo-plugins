@@ -84,6 +84,7 @@
   },
   "kitDeferredServer": {
     "queued": "已排队，等 Agent 这一轮结束、没有待审批时自动发送",
+    "scheduled": "定时发送：到点后，等 Agent 这一轮结束、没有待审批时自动发送",
     "sending": "正在发送",
     "movedOn": "排队之后会话里又有了新消息，还要发吗？",
     "unsure": "排队之后会话有了变化，分不清是不是别人发的消息，还要发吗？",
@@ -105,6 +106,7 @@
     "canceled": "已取消，没有发送",
     "discarded": "Agent 已归档或不存在，没有发送",
     "expired": "排队超过一天，已放弃发送",
+    "expiredScheduled": "定时发送到点后一天内都没能发出，已放弃发送",
     "busy": "正在给这个 Agent 发送另一条消息，这条没有发送。请稍后再试。",
     "gone": "这个 Agent 已归档或不存在，没有发送。",
     "refused": "{reason}，没有发送。",
@@ -127,6 +129,8 @@
     "empty": "消息是空的。",
     "tooLong": "消息太长，不能发送。",
     "tooLongToQueue": "消息太长，不能排队发送。",
+    "tooFarAhead": "定时发送最多排到 7 天以后。",
+    "badSchedule": "定时发送的时间无效。",
     "goneCannotQueue": "这个 Agent 已归档或不存在，不能排队发送。",
     "tooLateToCancel": "这条消息正在发送，来不及取消了。",
     "readTimelineTimeout": "读取会话记录超时",
@@ -134,7 +138,9 @@
     "noGuardCheck": "插件没有检查这个条件",
     "checkTimeout": "检查超时",
     "tooManyQueued": "排队的消息太多了，请先处理掉一些。",
-    "tooManyForAgent": "给这个 Agent 排队的消息太多了，请先处理掉一些。"
+    "tooManyForAgent": "给这个 Agent 排队的消息太多了，请先处理掉一些。",
+    "movedOnScheduled": "这是定时消息：到点时发现排队之后会话里又有了新消息，还要发吗？",
+    "unsureScheduled": "这是定时消息：到点时发现排队之后会话有了变化，分不清是不是别人发的消息，还要发吗？"
   },
   "kitLanguage": {
     "title": "语言",

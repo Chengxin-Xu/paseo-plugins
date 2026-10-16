@@ -90,6 +90,7 @@
   },
   "kitDeferredServer": {
     "queued": "Queued. Sends automatically when the agent finishes this turn and has no pending approvals.",
+    "scheduled": "Scheduled. Once its time comes, sends automatically when the agent finishes its turn and has no pending approvals.",
     "sending": "Sending",
     "movedOn": "New messages arrived in the session after this was queued. Still send it?",
     "unsure": "The session changed after this was queued, and it is unclear whether someone else sent a message. Still send it?",
@@ -111,6 +112,7 @@
     "canceled": "Canceled; not sent",
     "discarded": "The agent is archived or gone; not sent",
     "expired": "Queued for more than a day; gave up sending",
+    "expiredScheduled": "Could not be sent within a day of its scheduled time; gave up sending",
     "busy": "Another message is being sent to this agent, so this one was not sent. Try again shortly.",
     "gone": "This agent is archived or gone; nothing was sent.",
     "refused": "{reason}; not sent.",
@@ -133,6 +135,8 @@
     "empty": "The message is empty.",
     "tooLong": "The message is too long to send.",
     "tooLongToQueue": "The message is too long to queue.",
+    "tooFarAhead": "A message can be scheduled at most 7 days ahead.",
+    "badSchedule": "The scheduled time is not valid.",
     "goneCannotQueue": "This agent is archived or gone, so the message cannot be queued.",
     "tooLateToCancel": "This message is already being sent; it is too late to cancel.",
     "readTimelineTimeout": "Reading the session timed out",
@@ -140,7 +144,9 @@
     "noGuardCheck": "The plugin has no check for this condition",
     "checkTimeout": "The check timed out",
     "tooManyQueued": "Too many messages are queued. Clear some first.",
-    "tooManyForAgent": "Too many messages are queued for this agent. Clear some first."
+    "tooManyForAgent": "Too many messages are queued for this agent. Clear some first.",
+    "movedOnScheduled": "This scheduled message is due, but new messages arrived in the session after it was queued. Still send it?",
+    "unsureScheduled": "This scheduled message is due, but the session changed after it was queued, and it is unclear whether someone else sent a message. Still send it?"
   },
   "kitLanguage": {
     "title": "Language",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boundProviderTimeline, createProviderSubagentBridge } from "../server/provider-subagents";
+import { boundProviderTimeline, bridgeErrorCode, createProviderSubagentBridge } from "../server/provider-subagents";
 
 function fixture(timeout = 50) {
   let handler: (message: unknown) => void = () => {};
@@ -100,4 +100,27 @@ test("requests queued while the host session is closed leave the queue when they
   assert.equal(sent.length, 16, "only live requests are sent after the session re-attaches"); assert.equal(bridge.queued, 0);
   bridge.dispose();
   for (const request of waiting) await assert.rejects(request);
+});
+
+test("every bridge failure carries a code (timeout, closed, rejected, busy, disposed): callers never match its translated text", async () => {
+  const codeOf = (promise: Promise<unknown>) => promise.then(() => "resolved", (error: unknown) => bridgeErrorCode(error));
+  const f = fixture(5);
+  assert.equal(await codeOf(f.bridge.request({ type: "read" }, "answer")), "timeout", "maybe applied, no answer");
+  const refused = f.bridge.request({ type: "read" }, "answer");
+  f.respond({ requestId: f.requestId(), error: "Unknown message type" });
+  assert.equal(await codeOf(refused), "rejected");
+  const sent = f.bridge.request({ type: "read" }, "answer");
+  f.bridge.dispose();
+  assert.equal(await codeOf(sent), "closed", "sent before the reload: maybe applied");
+  assert.equal(await codeOf(f.bridge.request({ type: "read" }, "answer")), "disposed");
+  let handler: (message: unknown) => void = () => {};
+  const bridge = createProviderSubagentBridge({ send() {}, listen(listener) { handler = listener; return () => {}; } }, 10_000);
+  const inFlight = bridge.request({ type: "read" }, "answer");
+  handler({ type: "paseo_close" });
+  assert.equal(await codeOf(inFlight), "closed");
+  const held = Array.from({ length: 16 }, () => bridge.request({ type: "read" }, "answer").catch(() => null));
+  assert.equal(await codeOf(bridge.request({ type: "read" }, "answer")), "busy", "never sent");
+  bridge.dispose();
+  await Promise.all(held);
+  assert.equal(bridgeErrorCode(new Error("Paseo did not respond: timed out")), null, "a plain error has no code, whatever it says");
 });

@@ -10,6 +10,12 @@ import { StatusGlyph, hueColor, type Phase } from "./status";
 import { attentionCount, attentionUnreliable, useAttentionView, type AttentionStore } from "./use-attention";
 import { AgentApprovals } from "./permission-panel";
 import { QuickReplies } from "./quick-replies";
+import { CacheChip } from "./cache-clock";
+import { ScheduledSends } from "./schedule-send";
+import { recapLook, type RecapView } from "../shared/recap";
+import { recapsQueryKey, useRecaps } from "./use-recaps";
+import { useQueryClient } from "@tanstack/react-query";
+import { RecapLine } from "./recap";
 
 /** Screen params travel in the URL; `t` makes a second tap on the same entry select it again. */
 const stamp = () => Date.now().toString(36);
@@ -19,14 +25,17 @@ const stamp = () => Date.now().toString(36);
  * one-line reason, an approval to answer right here (opus-B12) and the quick replies a reply asks for (opus-B26). It reads the
  * resident badge's own store (`store`), so its count and the badge's never disagree.
  */
-export function AttentionPopover({ theme, layout, close, openScreen, store }: PluginPopoverProps & { store: AttentionStore }) {
+export function AttentionPopover({ theme, layout, host, close, openScreen, store }: PluginPopoverProps & { store: AttentionStore }) {
   const view = useAttentionView(store), now = view.now ?? Date.now(), { colors } = theme;
+  // 每轮小结 under each entry, read while the popover is open (shared with the page's list).
+  const recaps = useRecaps(host.id), byAgent = recaps.data?.enabled ? recaps.data.byAgent : null, cache = useQueryClient();
   const count = attentionCount(view, now), state = view.state;
   const open = (params: Record<string, string>) => { close(); openScreen({ screenId: "observatory", params: { ...params, t: stamp() } }); };
   // An answered request or a sent reply changes the count: read it now, and again once the host has caught up.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  const changed = () => { store.invalidate(); if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => { store.invalidate(); }, 2000); };
+  // A reply sent here starts a turn: the recaps (out of date, then 更新中) are read again too.
+  const changed = () => { store.invalidate(); void cache.invalidateQueries({ queryKey: recapsQueryKey(host.id) }); if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => { store.invalidate(); void cache.invalidateQueries({ queryKey: recapsQueryKey(host.id) }); }, 2000); };
   // The host already pads the popover, and caps it at 440 px on wide layouts (PluginPopoverSurface): the list gets what is left
   // after the header, the notes under it and the button, so the button never scrolls out of a desktop popover.
   const notes = (state?.truncated ? 1 : 0) + (count && state && count.value > state.entries.length ? 1 : 0);
@@ -43,9 +52,12 @@ export function AttentionPopover({ theme, layout, close, openScreen, store }: Pl
         : <EmptyState theme={theme} icon="Hourglass" title={t("coreAttentionPopover.loadingSessions")} message={t("coreAttentionPopover.checkAgainInAMoment")} />
       // The list scrolls inside a bounded height, so the way to the full page always stays in view (room for an opened approval).
       : state.entries.length ? <ScrollView style={{ flexGrow: 0, maxHeight: listHeight }} contentContainerStyle={{ gap: 2 }} keyboardShouldPersistTaps="handled">
-        {state.entries.map(entry => <EntryBlock key={entry.agentId} theme={theme} entry={entry} now={now} compact={layout.compact} onOpen={() => open({ agent: entry.agentId })} onChanged={changed} />)}
+        {state.entries.map(entry => <EntryBlock key={entry.agentId} theme={theme} entry={entry} recap={byAgent?.get(entry.agentId) ?? null} now={now} compact={layout.compact} onOpen={() => open({ agent: entry.agentId })} onChanged={changed} />)}
+        {/* 定时消息 (2.17): every scheduled message on this host, collapsed under the list. */}
+        <ScheduledSends theme={theme} compact collapsible titleOf={agentId => state.entries.find(entry => entry.agentId === agentId)?.title || null} />
       </ScrollView>
-      : <EmptyState theme={theme} icon="CircleCheck" title={t("coreAttentionPopover.noSessionsNeedAttention")} message={t("coreAttentionPopover.approvalsQuestionsIssuesAndUnreadResultsAppear")} tone="success" />}
+      : <><EmptyState theme={theme} icon="CircleCheck" title={t("coreAttentionPopover.noSessionsNeedAttention")} message={t("coreAttentionPopover.approvalsQuestionsIssuesAndUnreadResultsAppear")} tone="success" />
+        <ScheduledSends theme={theme} compact collapsible /></>}
     {state?.truncated ? <MetaLine theme={theme} numberOfLines={2} parts={[t("coreAttentionPopover.thereAreManySessionsCountsCoverOnly")]} /> : null}
     {count && count.value > state!.entries.length ? <MetaLine theme={theme} parts={[t("coreAttentionPopover.moreInObservatory", { value1: count.value - state!.entries.length })]} /> : null}
     <Button theme={theme} variant="primary" icon="Orbit" label={t("coreAttentionPopover.viewAllInObservatory")} onPress={() => open({ focus: "attention" })} />
@@ -58,13 +70,17 @@ export function AttentionPopover({ theme, layout, close, openScreen, store }: Pl
  * P2-1); they answer that turn only (`promptAt`, P1-1; `roundAt`, codex-obs-attn-F1). Both sit beside the row, never inside
  * it (the row is a button).
  */
-function EntryBlock({ theme, entry, now, compact, onOpen, onChanged }: { theme: PluginTheme; entry: AttentionEntry; now: number; compact: boolean; onOpen: () => void; onChanged: () => void }) {
+function EntryBlock({ theme, entry, recap, now, compact, onOpen, onChanged }: { theme: PluginTheme; entry: AttentionEntry; recap: RecapView | null; now: number; compact: boolean; onOpen: () => void; onChanged: () => void }) {
   const [approving, setApproving] = useState(false), { colors } = theme;
   const nudge = popoverReplies(entry), title = entry.title || t("coreAttentionPopover.untitledAgent");
+  // The recap of the turn this entry is about (its start as the plugin saw it), and its 建议回复 where a reply is what is
+  // wanted (a result or a reply that asks); an approval, a question or a stop is answered otherwise.
+  const look = recapLook(recap, { startedAt: entry.roundAt }), suggestion = look?.state === "fresh" && (entry.phase === "idle" || entry.phase === "unread") ? look.reply : null;
   // Under the row's text on wide layouts; nearly full width on phones, so a request's choices fit on one line.
   const amber = hue(theme, "amber", "text"), indent = compact ? space.sm : 32;
   return <View style={{ gap: space.xs }}>
     <EntryRow theme={theme} entry={entry} now={now} onPress={onOpen} />
+    {look ? <View style={{ paddingLeft: indent, paddingRight: space.sm, marginTop: -2 }}><RecapLine theme={theme} look={look} /></View> : null}
     {entry.phase === "approval" ? <View style={{ gap: space.sm, paddingLeft: indent, paddingRight: space.sm, paddingBottom: approving ? space.sm : 0 }}>
       <Pressable accessibilityRole="button" accessibilityLabel={approving ? t("coreAttentionPopover.collapseApprovalsFor", { value1: title }) : t("coreAttentionPopover.reviewRequestsForHere", { value1: title })} accessibilityState={{ expanded: approving }} {...aria({ expanded: approving })}
         onPress={() => setApproving(!approving)} hitSlop={{ top: 6, bottom: 6 }}
@@ -76,8 +92,8 @@ function EntryBlock({ theme, entry, now, compact, onOpen, onChanged }: { theme: 
       </Pressable>
       {approving ? <AgentApprovals theme={theme} agentId={entry.agentId} compact={compact} onOpen={onOpen} onSettled={onChanged} /> : null}
     </View> : null}
-    {nudge ? <View style={{ paddingLeft: indent, paddingRight: space.sm, paddingBottom: space.sm }}>
-      <QuickReplies key={`${entry.agentId}:${entry.promptAt ?? ""}:${entry.roundAt ?? ""}:${entry.since ?? ""}:${nudge}`} theme={theme} agentId={entry.agentId} agentTitle={title} nudge={nudge} expectPrompt={entry.promptAt} expectRound={entry.roundAt} ask={entry.ask} compact={compact} onSent={onChanged} />
+    {nudge || suggestion ? <View style={{ paddingLeft: indent, paddingRight: space.sm, paddingBottom: space.sm }}>
+      <QuickReplies key={`${entry.agentId}:${entry.promptAt ?? ""}:${entry.roundAt ?? ""}:${entry.since ?? ""}:${nudge}:${suggestion ?? ""}`} theme={theme} agentId={entry.agentId} agentTitle={title} nudge={nudge} suggestion={suggestion} expectPrompt={entry.promptAt} expectRound={entry.roundAt} ask={entry.ask} compact={compact} onSent={onChanged} />
     </View> : null}
   </View>;
 }
@@ -96,7 +112,10 @@ function EntryRow({ theme, entry, now, onPress }: { theme: PluginTheme; entry: A
         {entry.since ? <Text style={{ color: colors.foregroundMuted, fontSize: 11, fontVariant: ["tabular-nums"] }}>{relativeTime(entry.since, now)}</Text> : null}
       </View>
       <Text numberOfLines={2} style={{ color: hueColor(theme, reason.hue, "text"), fontSize: fontSize.meta, lineHeight: 17, fontWeight: "600" }}>{reason.text}</Text>
-      <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: 11 }}>{entry.projectName}</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+        <Text numberOfLines={1} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: 11 }}>{entry.projectName}</Text>
+        <CacheChip theme={theme} agentId={entry.agentId} />
+      </View>
     </View>
   </Pressable>;
 }

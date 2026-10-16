@@ -8,10 +8,11 @@ import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { QUICK_REPLIES, quickReplyText, type QuickReply, type ReplyNudge } from "../shared/reply";
+import { aiReply } from "../shared/recap";
 import { markCompletionRead } from "../shared/read-state";
 import { getTelemetry } from "../shared/telemetry";
 import { BUILTIN_SEND } from "../shared/steer";
-import { isOnItsWay, type DeferredView } from "../shared/deferred-rpc";
+import { isOnItsWay, isScheduled, type DeferredView } from "../shared/deferred-rpc";
 import { Banner, Button, fontSize, hue, space } from "./kit";
 import { Enter, Pop } from "./motion";
 import { useSteerableProviders } from "./insight-actions";
@@ -20,6 +21,7 @@ import { ledgerNotice, messageRecord, onItsWayLabel, quickReplyGroup, quickReply
 import { answering, checkFits, clearingAttention, isSendRefused, ledgerInput, outgoingMessage, sameRound, sendChecked, type LedgerAnswer, type OutgoingMessage, type SendConfirmation } from "./send-check";
 import type { Consent, SendPlan } from "./send-plan";
 import { readReceiptQueryKey } from "./use-read-receipts";
+import { SchedulePicker, isScheduledView, scheduleWhen } from "./schedule-send";
 
 /** A message that certainly never went out: the reply is free to be sent again, under a new id. */
 const NEVER_SENT: ReadonlySet<DeferredView["state"]> = new Set(["canceled", "discarded", "expired"]);
@@ -38,10 +40,13 @@ type Problem = { reply: QuickReply; message: string; tone: "danger" | "warning";
  * (codex-obs-attn-R4). Where sending would interrupt or cancel an approval, the confirmation offers 「等审批处理完再发」 /
  * 「等这一轮结束再发」 beside it; a reply on its way (here, on another screen or device) locks them, its row below has 仍然发送 /
  * 取消排队, and the reply the ledger delivered for this turn shows as sent, whichever device sent it.
+ * A recap's 建议回复 (`suggestion`, the model's guess at the user's next message) joins them as one more button marked
+ * AI 建议, sent word for word under the same turn, group and guard; it is left out when it says what a rule button says.
  */
 // Catalog migration preserves the original question distinction: nudge === "go-ahead" ? "它问：" : "它说接下来："
-export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, expectRound, ask, compact = false, onSent }: {
-  theme: PluginTheme; agentId: string; agentTitle: string; nudge: ReplyNudge;
+export function QuickReplies({ theme, agentId, agentTitle, nudge, suggestion, expectPrompt, expectRound, ask, compact = false, onSent }: {
+  theme: PluginTheme; agentId: string; agentTitle: string; nudge: ReplyNudge | null;
+  /** The recap's suggested next message for this turn (AI 建议), if any. */ suggestion?: string | null;
   /** The prompt of the turn they answer (its `lastUserMessageAt`). */ expectPrompt: string | null;
   /** When the plugin saw that turn start (`observedTurnStartedAt`): a heartbeat's rounds share their prompt. */ expectRound?: string | null;
   /** The sentence they answer, quoted above them where the reply itself is not on screen (the popover, P2-1). */ ask?: string | null;
@@ -54,7 +59,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
   // The list as last drawn, for a tap on buttons drawn before it (the four plugins' r5-F1).
   const listed = useRef(deferred.all);
   listed.current = deferred.all;
-  const replies = QUICK_REPLIES[nudge];
+  const rules = nudge ? QUICK_REPLIES[nudge] : [], ai = aiReply(suggestion, rules), replies = ai ? [...rules, ai] : rules;
   const keyOf = (reply: QuickReply) => quickReplyKey(quickReplyText(reply), expectPrompt, expectRound);
   const group = quickReplyGroup(expectPrompt, expectRound), guard = quickReplyGuard(expectPrompt, expectRound);
   const keys = new Set(replies.map(keyOf));
@@ -63,6 +68,8 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
   const [busy, setBusy] = useState<string | null>(null), [sent, setSent] = useState<QuickReply | null>(null);
   const [confirming, setConfirming] = useState<{ reply: QuickReply; confirmation: SendConfirmation } | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null), [refused, setRefused] = useState<string | null>(null);
+  // 定时发 (2.17): the reply being scheduled, while the time picker is open.
+  const [scheduling, setScheduling] = useState<QuickReply | null>(null);
   const clearAttention = clearingAttention(input => markRead(input).then(() => queryClient.invalidateQueries({ queryKey: readReceiptQueryKey })), agentId, expectRound);
   const expect = answering(expectPrompt, agentTitle);
   // The turn start the plugin saw last, read at the tap: a later one than the round they answer is another round.
@@ -73,6 +80,8 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
   const delivered = sent ?? records.find(record => record.view?.state === "sent")?.reply ?? null;
   const uncertain = records.find(record => record.view?.state === "maybe-sent") ?? null;
   const locked = records.some(record => !!record.view && isOnItsWay(record.view));
+  // A scheduled one is listed under 定时消息 (the detail's, the popover's): here one line says so instead of its row again.
+  const scheduled = records.find(record => !!record.view && isScheduledView(record.view)) ?? null;
   // Settled or on its way, the confirmation shown before goes first; a lost try the list now shows is done with after it.
   useEffect(() => {
     for (const { view } of records) {
@@ -82,7 +91,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
       setProblem(null);
       if (unansweredId(agentId, view.key) === view.messageId) settleRequest(agentId, view.key);
     }
-  }, [deferred.all, agentId, expectPrompt, expectRound, nudge]);
+  }, [deferred.all, agentId, expectPrompt, expectRound, nudge, suggestion]);
   /** Whether the list drawn last (not the one this tap's buttons were drawn with) shows these replies settled or on their way. */
   const taken = () => replies.some(reply => {
     const view = messageRecord(listed.current, agentId, keyOf(reply));
@@ -95,7 +104,7 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
     let message = messages.current.get(key);
     const record = message && listed.current.find(view => view.messageId === message!.messageId);
     if (!message || record && NEVER_SENT.has(record.state)) {
-      message = outgoingMessage(agentId, quickReplyText(reply), { what: t("coreQuickReplies.reply"), source: t("coreQuickReplies.quickReply", { value1: reply.text }), key, messageId: requestId(agentId, key, listed.current), group, guard });
+      message = outgoingMessage(agentId, quickReplyText(reply), { what: t("coreQuickReplies.reply"), source: reply.ai ? t("recap.aiReplySource", { value1: reply.text }) : t("coreQuickReplies.quickReply", { value1: reply.text }), key, messageId: requestId(agentId, key, listed.current), group, guard });
       messages.current.set(key, message);
     }
     return message;
@@ -176,6 +185,30 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
       lost(reply, message, error, null);
     } finally { inFlight.current = false; if (mounted.current) setBusy(null); }
   };
+  // 定时发: queued for a time under the reply's one id, once it is known to still answer this turn; at that time the server checks
+  // the turn again and sends it as 「等这一轮结束再发」 would.
+  const schedule = async (reply: QuickReply, at: number) => {
+    if (inFlight.current || refused) return;
+    if (taken()) { setScheduling(null); setConfirming(null); return; }
+    inFlight.current = true;
+    const message = messageFor(reply);
+    setBusy(reply.key); setProblem(null);
+    try {
+      await checkFits(paseo, message, { expect, precheck });
+      message.tried = true;
+      const view = await deferred.enqueue({ ...ledgerInput(message), notBefore: at });
+      settleRequest(agentId, message.key);
+      if (mounted.current) { setConfirming(null); setScheduling(null); }
+      if (view.messageId !== message.messageId) answeredElsewhere(view);
+      else if (view.state === "queued" && view.notBefore !== undefined) toast.show(t("alertsSchedule.scheduledReply", { title: agentTitle, reply: reply.text, when: scheduleWhen(view.notBefore) }), { variant: "success" });
+      else answeredOwn(reply, view, t("coreQuickReplies.repliedTo", { value1: agentTitle, value2: reply.text }));
+    } catch (error) {
+      if (!mounted.current) return;
+      setConfirming(null); setScheduling(null);
+      if (isSendRefused(error)) { setProblem(null); setRefused(error.message); return; }
+      lost(reply, message, error, null);
+    } finally { inFlight.current = false; if (mounted.current) setBusy(null); }
+  };
   if (delivered) return <Enter active><View testID="quick-reply-sent" style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 28 }}>
     <Pop count={1} size={16}><Icon name="CircleCheck" size={16} color={hue(theme, "green")} /></Pop>
     <Text style={{ flexShrink: 1, color: hue(theme, "green", "text"), fontSize: fontSize.small, fontWeight: "600" }}>{t("coreQuickReplies.sent", { value1: delivered.text })}</Text>
@@ -183,12 +216,12 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
   if (refused) return <Enter active><View testID="quick-replies-stale"><Banner theme={theme} tone="info" icon="CircleSlash" message={refused} /></View></Enter>;
   const shown = confirming && !locked && !uncertain ? confirming : null, plan = shown?.confirmation.check.plan, offer = shown?.confirmation.offer;
   return <View testID="quick-replies" style={{ gap: space.sm }}>
-    <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+    {rules.length ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
       <Icon name="Zap" size={13} color={hue(theme, "violet")} />
       <Text numberOfLines={2} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("coreQuickReplies.quickRepliesTapToSendTheWords")}</Text>
-    </View>
+    </View> : null}
     {/* What a tap answers, where the reply is not on screen: its closing question or the step it announced. */}
-    {ask ? <View testID="quick-reply-ask" style={{ paddingLeft: space.sm + 2, borderLeftWidth: 3, borderLeftColor: hue(theme, "violet") }}>
+    {ask && nudge ? <View testID="quick-reply-ask" style={{ paddingLeft: space.sm + 2, borderLeftWidth: 3, borderLeftColor: hue(theme, "violet") }}>
       <Text numberOfLines={3} style={{ flexShrink: 1, color: colors.foreground, fontSize: fontSize.meta, lineHeight: 18 }}>
         <TextParts id="coreQuickReplies.questionContext" values={{ lead: <Text style={{ color: hue(theme, "violet", "text"), fontWeight: "700" }}>{nudge === "go-ahead" ? t("coreQuickReplies.itAsks") : t("coreQuickReplies.itSaysNext")}</Text>, question: ask }} />
       </Text>
@@ -201,16 +234,51 @@ export function QuickReplies({ theme, agentId, agentTitle, nudge, expectPrompt, 
           accessibilityLabel={t("coreQuickReplies.sendTo", { value1: plan.label, value2: agentTitle, value3: shown.reply.text })} onPress={() => void send(shown.reply, shown.confirmation.consent)} />
         {offer ? <Button theme={theme} tone="info" icon="Clock3" label={offer.label} grow={compact} disabled={!!busy}
           accessibilityLabel={t("coreQuickReplies.sendTo", { value1: offer.label, value2: agentTitle, value3: shown.reply.text })} onPress={() => void defer(shown.reply)} /> : null}
+        <Button theme={theme} tone="sky" icon="AlarmClock" label={t("alertsSchedule.scheduleButton")} grow={compact} disabled={!!busy}
+          accessibilityLabel={t("alertsSchedule.scheduleReplyLabel", { title: agentTitle, reply: shown.reply.text })} onPress={() => setScheduling(shown.reply)} />
         <Button theme={theme} variant="ghost" label={t("coreQuickReplies.doNotSend")} disabled={!!busy} onPress={() => setConfirming(null)} />
       </View>
-    </View> : <View style={{ flexDirection: "row", flexWrap: "wrap", gap: compact ? space.md : space.sm }}>
-      {replies.map(reply => <Button key={reply.key} theme={theme} label={reply.text} icon={reply.icon} tone={reply.tone} size={compact ? "md" : "sm"} grow={compact}
-        busy={busy === reply.key} disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={t("coreQuickReplies.sendTo2", { value1: agentTitle, value2: reply.text })} testID={`quick-reply-${reply.key}`}
-        onPress={() => void send(reply)} />)}
+    </View> : <View style={{ gap: space.sm }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: compact ? space.md : space.sm }}>
+        {rules.map(reply => <Button key={reply.key} theme={theme} label={reply.text} icon={reply.icon} tone={reply.tone} size={compact ? "md" : "sm"} grow={compact}
+          busy={busy === reply.key} disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={t("coreQuickReplies.sendTo2", { value1: agentTitle, value2: reply.text })} testID={`quick-reply-${reply.key}`}
+          onPress={() => void send(reply)} />)}
+        {/* 定时发 (2.17): the same replies, at a time you pick. */}
+        <Button theme={theme} variant={scheduling ? "secondary" : "ghost"} tone="sky" icon="AlarmClock" label={t("alertsSchedule.scheduleButton")} size={compact ? "md" : "sm"} grow={compact}
+          disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={t("alertsSchedule.scheduleRepliesLabel", { title: agentTitle })} testID="quick-reply-schedule"
+          onPress={() => setScheduling(scheduling ? null : replies[0]!)} />
+      </View>
+      {/* 建议回复: the recap's guess at the next message, marked as the model's, sent only on a tap. */}
+      {ai ? <View testID="quick-reply-ai-block" style={{ gap: space.xs + 2 }}>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.xs + 2 }}>
+          <Text style={{ color: hue(theme, "fuchsia"), fontSize: 13, fontWeight: "800" }}>✦</Text>
+          <Text style={{ color: hue(theme, "fuchsia", "text"), fontSize: fontSize.meta, fontWeight: "800" }}>{t("recap.aiSuggestion")}</Text>
+          <Text numberOfLines={2} style={{ flexShrink: 1, color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{t("recap.aiSuggestionHint")}</Text>
+        </View>
+        <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+          <Button theme={theme} label={ai.text} icon={ai.icon} tone={ai.tone} size={compact ? "md" : "sm"} grow={compact}
+            busy={busy === ai.key} disabled={!caps || !!busy || locked || !!uncertain} accessibilityLabel={t("recap.sendAiReply", { agent: agentTitle, text: ai.text })} testID="quick-reply-ai"
+            onPress={() => void send(ai)} />
+        </View>
+      </View> : null}
     </View>}
+    {scheduling && !locked && !uncertain ? <View style={{ gap: space.sm }}>
+      {replies.length > 1 ? <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
+        <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta }}>{t("alertsSchedule.whichReply")}</Text>
+        {replies.map(reply => <Button key={reply.key} theme={theme} size="sm" label={reply.text} tone={reply.key === scheduling.key ? "sky" : undefined} variant={reply.key === scheduling.key ? "secondary" : "ghost"}
+          accessibilityLabel={t("alertsSchedule.pickReplyLabel", { reply: reply.text })} onPress={() => setScheduling(reply)} />)}
+      </View> : null}
+      <SchedulePicker theme={theme} compact={compact} busy={busy === scheduling.key} onClose={() => setScheduling(null)} onPick={at => void schedule(scheduling, at)} />
+    </View> : null}
     {uncertain ? <Banner theme={theme} tone="warning" message={t("coreQuickReplies.mayAlreadyHaveArrivedOpenTheSession", { value1: uncertain.reply.text })} /> : null}
     {problem && !uncertain ? <Banner theme={theme} tone={problem.tone} message={problem.message}
       action={problem.retry !== false && !locked ? { label: t("coreQuickReplies.retry"), onPress: () => void send(problem.reply, problem.retry || null) } : undefined} /> : null}
-    <DeferredList theme={theme} queue={deferred} only={view => keys.has(view.key)} compact={compact} />
+    {scheduled?.view?.notBefore !== undefined ? <View testID="quick-reply-scheduled" style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+      <Icon name="AlarmClock" size={13} color={hue(theme, "sky")} />
+      <Text style={{ flexShrink: 1, color: hue(theme, "sky", "text"), fontSize: fontSize.meta, lineHeight: 17, fontWeight: "600" }}>{isScheduled(scheduled.view)
+        ? t("alertsSchedule.repliesScheduled", { when: scheduleWhen(scheduled.view.notBefore), reply: scheduled.reply.text })
+        : t("alertsSchedule.repliesDue", { reply: scheduled.reply.text })}</Text>
+    </View> : null}
+    <DeferredList theme={theme} queue={deferred} only={view => keys.has(view.key) && !isScheduledView(view)} compact={compact} />
   </View>;
 }

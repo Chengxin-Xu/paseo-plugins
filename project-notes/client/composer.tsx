@@ -13,18 +13,24 @@ import { checkPromptSend, promptSource, serverCheck, type SendCheck } from "./co
 import { DeferredList, useDeferredQueue } from "./deferred";
 import { onItsWayLabel, notePromptKey, promptRecord, rememberUnanswered, requestId, settleRequest, unansweredId } from "./deferred-state";
 import { findComposerDraft, type ComposerDraft, type ComposerUndo } from "./web";
+import type { QuickEntry } from "../shared/quick";
+import { quickNoteRpc } from "../shared/quick-settings";
 
 function errorMessage(error: unknown) { return error instanceof Error ? error.message.slice(0, 500) : t("composer.operationFailed"); }
 
+/** The host sizes its sheet from the first render: every state of the popover keeps this outer height. */
+function usePopoverHeight(compact: boolean) {
+  const { height: windowHeight } = useWindowDimensions();
+  return Math.max(180, Math.min(compact ? 420 : 390, windowHeight * 0.8 - 96));
+}
+
 /** One delivery of a prompt at a time: the server's ledger keeps it, and every picker reads its list. */
 
-export function PromptPicker({ theme, host, layout, agentId, initialQuery = "", onClose, presentation = "screen" }: PluginSurfaceProps & { agentId?: string; initialQuery?: string; onClose?: () => void; presentation?: "screen" | "popover" }) {
+export function PromptPicker({ theme, host, layout, agentId, initialQuery = "", initialNote = null, onClose, presentation = "screen" }: PluginSurfaceProps & { agentId?: string; initialQuery?: string; initialNote?: ComposerNote | null; onClose?: () => void; presentation?: "screen" | "popover" }) {
   const paseo = usePaseo(), search = useRpc(composerSearchRpc), capabilities = useRpc(composerCapabilitiesRpc), toast = useToast();
-  const { height: windowHeight } = useWindowDimensions();
-  // The host sizes its sheet from the first render. Keep the outer height stable when selection or confirmation changes.
-  const popoverHeight = Math.max(180, Math.min(layout.compact ? 420 : 390, windowHeight * 0.8 - 96));
+  const popoverHeight = usePopoverHeight(layout.compact);
   const [query, setQuery] = useState(initialQuery), [searchQuery, setSearchQuery] = useState(initialQuery);
-  const [selected, setSelected] = useState<ComposerNote | null>(null), [values, setValues] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<ComposerNote | null>(initialNote), [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null), [confirmation, setConfirmation] = useState<SendCheck | null>(null);
   const sending = useRef(false), [delivered, setDelivered] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft | null>(() => presentation === "popover" ? findComposerDraft() : null);
@@ -210,9 +216,28 @@ export function PromptPicker({ theme, host, layout, agentId, initialQuery = "", 
 /** The disabled stand-in for 发送 while this prompt is on its way. */
 function waitingLabel(state: string) { return state === "held" ? t("composer.held") : state === "sending" ? t("composer.sending") : t("composer.waiting"); }
 
-export function PromptPopover(props: PluginButtonContentProps) {
-  return <PromptPicker {...props} presentation="popover" agentId={props.context === "agent" ? props.agentId : undefined} onClose={props.close} />;
+export function PromptPopover(props: PluginButtonContentProps & { quick?: Pick<QuickEntry, "projectId" | "itemId"> }) {
+  const agentId = props.context === "agent" ? props.agentId : undefined;
+  if (props.quick) return <QuickFill {...props} quick={props.quick} agentId={agentId} onClose={props.close} presentation="popover" />;
+  return <PromptPicker {...props} presentation="popover" agentId={agentId} onClose={props.close} />;
+}
+
+/**
+ * A quick prompt with {{variables}}: the picker opened on it, so the user fills them in and sends as usual. In its pill's
+ * popover, or on the prompts screen when the 「一键 N」 menu opened it (`params.projectId` and `params.itemId`).
+ */
+function QuickFill(props: PluginSurfaceProps & { quick: Pick<QuickEntry, "projectId" | "itemId">; agentId?: string; onClose?: () => void; presentation: "screen" | "popover" }) {
+  const { theme, host, quick, presentation } = props, load = useRpc(quickNoteRpc), height = usePopoverHeight(props.layout.compact);
+  const note = useQuery({ queryKey: ["project-notes", "quick-note", host.id, currentLanguage(), quick.projectId, quick.itemId], queryFn: () => load({ projectId: quick.projectId, itemId: quick.itemId }), staleTime: 0, refetchOnWindowFocus: false, retry: false });
+  if (note.data) return <PromptPicker key={note.data.id} {...props} initialNote={note.data} />;
+  return <View style={[{ width: "100%", alignItems: "center", justifyContent: "center", gap: space.sm, padding: space.lg, backgroundColor: theme.colors.surface0 },
+    presentation === "popover" ? { maxWidth: 640, height, flexShrink: 0 } : { flexGrow: 1, flexShrink: 1 }]}>
+    {note.isPending ? <ActivityIndicator color={hue(theme, "violet")} />
+      : <Banner theme={theme} tone={note.isError ? "danger" : "warning"} message={note.isError ? errorMessage(note.error) : t("composer.quickGone")} />}
+  </View>;
 }
 export function PromptScreen(props: PluginScreenProps) {
-  return <PromptPicker key={`${props.params?.agentId ?? ""}:${props.params?.query ?? ""}`} {...props} agentId={props.params?.agentId} initialQuery={props.params?.query ?? ""} />;
+  const { agentId, query, projectId, itemId } = props.params ?? {};
+  if (projectId && itemId) return <QuickFill key={`${agentId ?? ""}:${projectId}:${itemId}`} {...props} quick={{ projectId, itemId }} agentId={agentId} presentation="screen" />;
+  return <PromptPicker key={`${agentId ?? ""}:${query ?? ""}`} {...props} agentId={agentId} initialQuery={query ?? ""} />;
 }

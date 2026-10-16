@@ -301,14 +301,20 @@ export function statusLabel(value: string): string {
 }
 
 /**
- * Words for a failed row's state pill: the shell exit code when known. Codex/ACP report `exitCode` on the detail;
- * Claude Code only puts it in the error text ("Exit code 1\n…").
+ * A failed command's exit code when known, else null. Codex/ACP report `exitCode` on the detail; Claude Code only puts
+ * it in the error text ("Exit code 1\n…"). 0.8.0: shared by the row's state pill and the fold index (shared/changes.ts).
  */
-export function failureText(detail: { type?: unknown; exitCode?: unknown } | null | undefined, errorText: string | undefined): string | undefined {
-  const fromDetail = detail?.type === "shell" && typeof detail.exitCode === "number" && detail.exitCode !== 0 ? detail.exitCode : null;
-  const fromText = /^\s*Exit code (\d+)\b/i.exec(errorText ?? "")?.[1];
+export function exitCodeOf(detail: { type?: unknown; exitCode?: unknown } | null | undefined, errorText: string | undefined): number | null {
+  const fromDetail = detail?.type === "shell" && typeof detail.exitCode === "number" && Number.isInteger(detail.exitCode) && detail.exitCode !== 0 ? detail.exitCode : null;
+  const fromText = /^\s*Exit code (\d{1,9})\b/i.exec(errorText ?? "")?.[1];
   const code = fromDetail ?? (fromText ? Number(fromText) : null);
-  return code !== null && code !== 0 ? t("modelText.exitCode", { code }) : undefined;
+  return code !== null && code !== 0 ? code : null;
+}
+
+/** Words for a failed row's state pill: the shell exit code when known. */
+export function failureText(detail: { type?: unknown; exitCode?: unknown } | null | undefined, errorText: string | undefined): string | undefined {
+  const code = exitCodeOf(detail, errorText);
+  return code !== null ? t("modelText.exitCode", { code }) : undefined;
 }
 
 /** Screen-reader label: action, what it touched (the path as shown), and the state when it needs attention. */

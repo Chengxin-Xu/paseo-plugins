@@ -88,7 +88,7 @@ describe("board RPCs", () => {
   it("registers every contract and serves dashboard deltas through validated RPCs", async () => {
     const paseo = fakePaseo();
     const { call, handlers, cleanup } = host(paseo);
-    expect([...handlers.keys()].sort()).toEqual(["project-notes.client-chunk.get", "project-notes.composer.attachments", "project-notes.composer.capabilities", "project-notes.composer.search", "project-notes.dashboard", "project-notes.deferred.cancel", "project-notes.deferred.enqueue", "project-notes.deferred.list", "project-notes.deferred.resume", "project-notes.deferred.send", "project-notes.history", "project-notes.launch", "project-notes.launch-options", "project-notes.launch-status", "project-notes.projects", "project-notes.prompt.environment", "project-notes.read", "project-notes.write"]);
+    expect([...handlers.keys()].sort()).toEqual(["project-notes.client-chunk.get", "project-notes.composer.attachments", "project-notes.composer.capabilities", "project-notes.composer.search", "project-notes.dashboard", "project-notes.deferred.cancel", "project-notes.deferred.enqueue", "project-notes.deferred.list", "project-notes.deferred.resume", "project-notes.deferred.send", "project-notes.history", "project-notes.launch", "project-notes.launch-options", "project-notes.launch-status", "project-notes.launches", "project-notes.projects", "project-notes.prompt.environment", "project-notes.quick.note", "project-notes.quick.send", "project-notes.read", "project-notes.write"]);
     const empty = await call(readDashboardRpc, {});
     if (empty.unchanged) throw new Error("expected data");
     expect(empty.boards).toEqual([]);

@@ -41,9 +41,5 @@ export function serverCheck(check: Pick<SendCheck, "text" | "messageId" | "key">
   return { plan: { kind: "confirm", ...result.plan }, consent: result.consent, offer: confirmOffer(result.consent), text: check.text, messageId: check.messageId, ...(check.key === undefined ? {} : { key: check.key }) };
 }
 
-/** How the queue names a prompt: by its title, well inside the queue's 200-character limit. */
-export function promptSource(title: string): string {
-  const chars = Array.from(title.replace(/\s+/g, " ").trim());
-  if (!chars.length) return t("composer.prompt");
-  return t("composer.source", { title: chars.length > 60 ? t("composer.truncatedTitle", { title: chars.slice(0, 60).join("") }) : chars.join("") });
-}
+/** How the queue names a prompt (shared with the server, which sends quick prompts). */
+export { promptSource } from "../shared/prompt-source";

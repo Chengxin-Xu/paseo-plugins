@@ -101,6 +101,12 @@ beforeAll(async () => {
     `export { retryPiNotices } from ${JSON.stringify(path.join(here, "transform.ts"))};`,
     `export { createToolCallData, setPiNoticePhase, setPiNoticeReader } from ${JSON.stringify(path.join(here, "../shared/timeline.ts"))};`,
     `export { readPiNotice } from ${JSON.stringify(path.join(here, "../shared/pi-notice.ts"))};`,
+    // 0.8.0: running animations, the change list of an expanded summary, and the summary's diffstat and turn tokens.
+    `export { LoaderFrame } from ${JSON.stringify(path.join(here, "loaders.tsx"))};`,
+    `export { FoldChanges } from ${JSON.stringify(path.join(here, "fold-changes.tsx"))};`,
+    `export { ChangeStat, TurnTokens } from ${JSON.stringify(path.join(here, "fold-row.tsx"))};`,
+    `export { stillCells } from ${JSON.stringify(path.join(here, "../shared/loaders.ts"))};`,
+    `export { fileId } from ${JSON.stringify(path.join(here, "../shared/changes.ts"))};`,
   ].join("\n"));
   const result = await esbuild.build({
     entryPoints: [entry], bundle: true, format: "esm", platform: "node", write: false, jsx: "automatic", logLevel: "silent",
@@ -329,5 +335,77 @@ describe("a Pi notice drawn without its reader (0.6.0-local.5, codex-vivid-merge
     expect(button[0]!.props.accessibilityLabel).toBe("重新读取 Pi 通知");
     expect(button[0]!.props.onPress).toBe(ui.retryPiNotices);
     expect(textOf(button[0]!)).toBe("重新读取");
+  });
+});
+
+describe("0.8.0: running animations, the change summary and the turn's tokens", () => {
+  const nodes = (element: Element) => render(element);
+  const all = (hosts: Host[]): HostNode[] => hosts.flatMap(function walk(node: Host): HostNode[] {
+    return "text" in node ? [] : [node, ...node.children.flatMap(walk)];
+  });
+
+  it("rests on one frame under reduced motion and moves every layer otherwise", () => {
+    const frame = (kind: string, state: string) => nodes({ type: ui.LoaderFrame, props: { kind, size: 16, color: "#60A5FA", state } });
+    // Sparkle: the full star alone when still; all six glyph layers, each driven by the loop, when moving.
+    expect(all(frame("sparkle", "static")).filter((node) => node.type === "Text").map(textOf)).toEqual(["✻"]);
+    const moving = all(frame("sparkle", "run")).filter((node) => node.type === "Text").map((node) => textOf(node).replace("︎", ""));
+    expect(moving).toEqual(["·", "✢", "✳", "✶", "✻", "✽"]);
+    // Orb: the ball alone when still, the ball and its glow ring when moving.
+    expect(all(frame("orb", "static")).filter((node) => node.type === "View")).toHaveLength(2);
+    expect(all(frame("orb", "run")).filter((node) => node.type === "View")).toHaveLength(3);
+    // Dot grid: nine dots; still, they keep the frozen frame's opacities.
+    const still = all(frame("snake", "static")).filter((node) => flatten(node.props.style).borderRadius !== undefined);
+    expect(still.map((node) => flatten(node.props.style).opacity)).toEqual(ui.stillCells("snake"));
+    const twinkle = all(frame("matrix", "run")).filter((node) => flatten(node.props.style).borderRadius !== undefined);
+    expect(twinkle).toHaveLength(9);
+    for (const dot of twinkle) expect(flatten(dot.props.style).transform).toBeDefined();
+    // Decorative: the row's own label says it is running.
+    for (const kind of ["sparkle", "orb", "snake"]) expect(frame(kind, "run")[0]).toMatchObject({ props: { accessibilityElementsHidden: true } });
+  });
+
+  it("shows 「N 个文件 +A −R」 and five blocks on wide rows, the numbers and blocks on phones", () => {
+    const wide = nodes({ type: ui.ChangeStat, props: { theme, files: 3, added: 12, removed: 4, compact: false, lineHeight: 16 } });
+    expect(textOf({ type: "View", props: {}, children: wide })).toBe("3 个文件+12−4");
+    const phone = nodes({ type: ui.ChangeStat, props: { theme, files: 3, added: 12, removed: 0, compact: true, lineHeight: 16 } });
+    expect(textOf({ type: "View", props: {}, children: phone })).toBe("+12");
+    const blocks = all(phone).filter((node) => node.props.accessibilityElementsHidden === true)[0]!;
+    expect(blocks.children).toHaveLength(5);
+    // Changes whose lines are not known: said apart, never added in; alone when nothing was counted.
+    const more = nodes({ type: ui.ChangeStat, props: { theme, files: 2, added: 5, removed: 1, uncounted: 1, compact: false, lineHeight: 16 } });
+    expect(textOf({ type: "View", props: {}, children: more })).toBe("2 个文件+5−1另 1 处未计");
+    const only = nodes({ type: ui.ChangeStat, props: { theme, files: 0, added: 0, removed: 0, uncounted: 2, compact: true, lineHeight: 16 } });
+    expect(textOf({ type: "View", props: {}, children: only })).toBe("2 处改动未计行数");
+    expect(all(only).some((node) => node.props.accessibilityElementsHidden === true)).toBe(false);
+  });
+
+  it("writes the turn's tokens short and reads them out in full", () => {
+    const line = nodes({ type: ui.TurnTokens, props: { theme, tokens: { id: "t1", i: 12_345, c: 80_123, o: 2_400 }, indent: 30 } })[0] as HostNode;
+    expect(line.props.accessibilityLabel).toBe("本轮：输入 12,345，缓存 80,123，输出 2,400");
+    expect(textOf(line)).toBe("本轮  输入 12k · 缓存 80k · 输出 2.4k");
+    const noCache = nodes({ type: ui.TurnTokens, props: { theme, tokens: { id: "t1", i: 300, c: null, o: 40, live: true }, indent: 30 } })[0] as HostNode;
+    expect(textOf(noCache)).toBe("本轮  输入 300 · 输出 40");
+  });
+
+  it("lists changed files and failed commands, letting long names shrink", () => {
+    const item = (key: string) => ({
+      "t:edit": { type: "tool_call", callId: "edit", name: "Edit", status: "completed", error: null, detail: { type: "edit", filePath: "/home/user/demo-app/src/very/deep/folder/component-with-a-long-name.tsx", oldString: "a", newString: "b" } },
+      "t:bash": { type: "tool_call", callId: "bash", name: "Bash", status: "failed", error: "Exit code 1", detail: { type: "shell", command: "cd /home/user/demo-app && npm test -- --run\necho done" } },
+    } as Record<string, unknown>)[key] ?? null;
+    const list = nodes({ type: ui.FoldChanges, props: {
+      theme, lineHeight: 16, indent: 30, cwd: "/home/user/demo-app", files: 3, item,
+      changed: [{ key: "t:edit", file: ui.fileId("src/very/deep/folder/component-with-a-long-name.tsx"), added: 1, removed: 1 }, { key: "t:edit", file: "unknown", added: 9, removed: 0 }],
+      fails: [{ key: "t:bash", exit: 1 }, { key: "t:gone", exit: 2 }],
+    } });
+    const text = textOf({ type: "View", props: {}, children: list });
+    expect(text).toContain("…/deep/folder/component-with-a-long-name.tsx+1−1");
+    const base = all(list).find((node) => node.type === "Text" && textOf(node) === "component-with-a-long-name.tsx")!;
+    const dir = all(list).find((node) => node.type === "Text" && textOf(node) === "…/deep/folder/")!;
+    expect(flatten(base.props.style)).toMatchObject({ flexShrink: 0, maxWidth: "100%" });
+    expect(flatten(dir.props.style)).toMatchObject({ flexShrink: 1 });
+    // A file whose row is no longer kept, and the one beyond the list, are counted, not named.
+    expect(text).toContain("还有 2 个文件");
+    expect(text).toContain("$ npm test -- --run");
+    expect(text).toContain("退出码 1");
+    expect(text).not.toContain("退出码 2");
   });
 });

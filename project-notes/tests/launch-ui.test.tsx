@@ -12,6 +12,8 @@ vi.mock("react-native", () => ({
   StyleSheet: { create: <T,>(styles: T) => styles, hairlineWidth: 1 },
   AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
 }));
+// Launch status dots animate with the kit's motion (Animated); here only what the marks wrap matters.
+vi.mock("../client/motion", () => ({ Ping: () => null, Breathe: ({ children }: { children: unknown }) => children, Flash: () => null, useChangeCount: () => 0 }));
 vi.mock("@getpaseo/plugin/client", () => {
   const cache = new Map<string, unknown>();
   return { useRpc: (contract: PluginRpcContract) => {

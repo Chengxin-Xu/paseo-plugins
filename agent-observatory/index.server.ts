@@ -39,6 +39,11 @@ import { DeviceZone } from "./server/device-zone";
 import { scheduleInsightSweeps } from "./server/grok-runner";
 import { registerProfiles } from "./server/profiles";
 import { registerClientChunks } from "./server/ui-chunk";
+import { alertSettings, defaultAlertSettings, type AlertSettings } from "./shared/alerts";
+import { bridgeLabelHost, registerSidebarLabels, SidebarLabels } from "./server/sidebar-labels";
+import { registerCacheClock } from "./server/cache-clock";
+import { providerBasesReader } from "./server/provider-bases";
+import { registerRecaps } from "./server/recap";
 
 export default function contribute(host: PluginServerContext) {
   const locales = createLocaleService(host, { pluginId: "agent-observatory", builtins: BUILTIN_CATALOGS });
@@ -46,9 +51,22 @@ export default function contribute(host: PluginServerContext) {
   // The ledger every message to an Agent goes through (server/send-ledger.ts); every RPC below hands it the daemon API. A quick
   // reply carries the turn it answers, checked against what the plugin observed right before it goes out (codex-obs-attn-R3).
   const deferred = createSendLedger({ guard: answeringGuard(telemetry) });
+  // The daemon API from the latest call or hook: the ledger's deliveries (scheduled ones too) and the label sync run without one.
+  let daemon: PaseoApi | null = null, onFirstDaemon = () => {};
+  const handover = { use(paseo: PaseoApi | null | undefined) {
+    deferred.use(paseo);
+    if (!paseo) return;
+    const first = !daemon;
+    daemon = paseo;
+    // The label sync waited for a handle since it was turned on (or since a reload): it runs now rather than at the next minute.
+    if (first) onFirstDaemon();
+  } };
   // One host handler per lifecycle event, shared by every module below: the host clones a hook's input once per handler (opus-F15).
-  const hub = lifecycleHub(handingOver(host, deferred));
+  const hub = lifecycleHub(handingOver(host, handover));
   const server = hub.server;
+  // 提醒 (2.17): the chime, the sidebar labels; one host setting of their own, read by the badge's summary and the label sync.
+  let alerts: AlertSettings = defaultAlertSettings;
+  const alertStore = server.registerSettings(alertSettings);
   // The UI chunk the resident client fetches on first use (shared/ui-chunk.ts): in parts, each reply under 128 KiB.
   registerClientChunks(server);
   // One bridge to the host session for every raw request (subagents, restore, clear attention, schedules).
@@ -72,6 +90,16 @@ export default function contribute(host: PluginServerContext) {
   registerProviderSubagents(server, bridge);
   registerProfiles(server);
   const removeInsights = registerInsights(server, { zone: () => zones.device() });
+  // 每轮小结 and 建议回复, off unless the host setting `recap` turns them on: written from a top-level Agent's own turn-end hook
+  // with the analysis runners. A recap names the turn it describes as the plugin saw it (the quick replies' round), and is
+  // forgotten once the Agent is archived or gone from the directory.
+  const recaps = registerRecaps(server, {
+    observedTurn: async agentId => {
+      const snapshot = await telemetry.snapshot(agentId), row = snapshot.persistenceError ? undefined : snapshot.agents.find(item => item.agentId === agentId);
+      return row ? { startedAt: row.turnStartedAt, endedAt: row.turnEndedAt } : null;
+    },
+    directoryAgents: () => directory,
+  });
   // Grok analyses cut short by a reload or a restart leave their excerpt directory and Grok session behind (opus-F71).
   const stopInsightSweeps = scheduleInsightSweeps(swept => {
     if (swept.directories || swept.sessions || swept.indexed) console.log(t("serverLifecycle.cleanup", { directories: swept.directories, sessions: swept.sessions, indexed: swept.indexed, megabytes: (swept.bytes / 1048576).toFixed(1) }));
@@ -93,7 +121,27 @@ export default function contribute(host: PluginServerContext) {
     scheduleFailures: sinceMs => schedules.failuresSince(sinceMs),
     // The badge polls most often: its reads carry the device's zone.
     noteZone: zone => zones.note(zone),
+    // While the chime is on, the summary carries its events (shared/alerts.ts).
+    alerts: () => alerts,
   });
+  // 同步到侧栏标签: the same 需要处理 rules, written into the host's own workspace labels over the plugin's session.
+  const labels = new SidebarLabels({
+    host: () => daemon ? bridgeLabelHost(bridge, daemon) : null,
+    waiting: async () => {
+      if (!daemon) return null;
+      await Promise.race([attention.attach(daemon).catch(() => {}), new Promise<void>(resolve => { const timer = setTimeout(resolve, 4_000); timer.unref?.(); })]);
+      return attention.workspaces();
+    },
+    log: message => console.warn(`agent-observatory: ${message}`),
+  });
+  const stopLabelWatch = attention.onChange(() => labels.poke());
+  onFirstDaemon = () => labels.poke();
+  registerSidebarLabels(server, labels);
+  const applyAlerts = (next: AlertSettings) => { alerts = next; attention.keep(next.sidebarLabels); labels.configure({ labels: next.sidebarLabels, pin: next.sidebarPin }); };
+  const stopAlertWatch = alertStore.subscribe(state => { if (state.status === "ready") applyAlerts(state.values); });
+  void alertStore.read().then(state => applyAlerts(state.status === "ready" ? state.values : defaultAlertSettings)).catch(() => applyAlerts(defaultAlertSettings));
+  // 提示缓存倒计时: Claude-based sessions (by `extends`) from their own Claude Code logs, as the token scans indexed them.
+  registerCacheClock(server, { directory, bases: providerBasesReader(), transcript: sessionId => tokens.source.claudeTranscript(sessionId), discover: paseo => tokens.discover(paseo) });
   // Which providers take a message mid-turn on this host (client/send-plan.ts): the built-ins plus custom ids extending them,
   // those that also take a steered slash command (Claude and the ids built on it), and the built-in each custom id extends
   // (`bases`: how it runs a command, codex-obs-send-ui-F3).
@@ -106,6 +154,7 @@ export default function contribute(host: PluginServerContext) {
   const interrupts = createInterruptGrace();
   const outcomeOf = (agentId: string, turnId: string | null, outcome: { kind: "completed" | "failed" | "canceled" }) => interrupts.outcome(agentId, outcome.kind, turnId);
   const observeWork = (paseo: PaseoApi, agent: { id: string }, record: () => unknown) => {
+    handover.use(paseo);
     void background.tracker.attach(paseo); tokens.discover(paseo);
     // Analysis helpers have their own usage; avoid counting their turns as productive work.
     // A failed label lookup must not drop the event: unknown counts as ordinary work.
@@ -169,6 +218,7 @@ export default function contribute(host: PluginServerContext) {
   return async () => {
     locales.dispose();
     deferred.stop();
+    stopAlertWatch(); stopLabelWatch();
     statsClosed = true;
     replyCheck.close();
     attention.close();
@@ -178,7 +228,7 @@ export default function contribute(host: PluginServerContext) {
     analytics.close();
     removeHistory();
     stopInsightSweeps();
-    await Promise.all([removeInsights(), readState.close(), preferences.close(), Promise.resolve(removeResults()), telemetry.close(), stats.close(), tokens.close(), removeDigest(), schedules.close(), background.close(), removeQuota(), resume.close(), zones.close()]);
+    await Promise.all([removeInsights(), recaps.close(), readState.close(), preferences.close(), Promise.resolve(removeResults()), telemetry.close(), stats.close(), tokens.close(), removeDigest(), schedules.close(), background.close(), removeQuota(), resume.close(), zones.close(), labels.close()]);
     bridge.dispose();
   };
 }

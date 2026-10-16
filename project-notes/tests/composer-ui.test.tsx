@@ -13,7 +13,7 @@ vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: "Icon", ScrollVie
 vi.mock("../client/web", () => ({ findComposerDraft: () => host.draft }));
 // The queue rows' breathing and flash (kit motion) are drawn by Animated; here only what they wrap matters.
 vi.mock("../client/motion", () => ({ Breathe: ({ children }: { children: unknown }) => children, Flash: () => null, useChangeCount: () => 0 }));
-import { PromptPicker } from "../client/composer";
+import { PromptPicker, PromptPopover, PromptScreen } from "../client/composer";
 import { promptKey } from "../client/deferred-state";
 import { noteContext } from "../shared/composer";
 
@@ -493,5 +493,38 @@ describe("prompt picker", () => {
     expect(host.copies).toEqual(["请检查 示例应用 的实现"]);
     expect(renderer.root.findAll(node => is(node, "Pressable") && node.props.accessibilityLabel === "填入输入框")).toHaveLength(0);
     expect(sends()).toEqual([]);
+  });
+});
+
+describe("one-tap prompt with variables", () => {
+  const mountPopover = async () => {
+    await act(async () => { renderer = create(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(PromptPopover, { theme, host: { id: "host-1", label: "示例主机" }, layout: { compact: true, platform: "web" }, context: "agent", workspaceId: "ws-1", agentId: "agent-1", close: () => {}, quick: { projectId: note.projectId, itemId: note.id } } as never))); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  };
+  it("opens the picker on that prompt, ready to fill in, and sends nothing on its own", async () => {
+    host.rpc.set("project-notes.quick.note", async input => { calls.push({ name: "note", input }); return note; });
+    await mountPopover();
+    // The prompt, then the picker's usual read of this agent's queue.
+    expect(calls.map(call => call.name)).toEqual(["note", "list"]);
+    expect(calls[0]!.input).toEqual({ projectId: note.projectId, itemId: note.id });
+    expect(renderer.root.findAll(node => is(node, "TextInput") && node.props.accessibilityLabel === "变量：项目")).toHaveLength(1);
+    expect(sends()).toEqual([]);
+    await fill("变量：项目", "示例应用");
+    await press("发送给当前 Agent");
+    expect(sends()).toMatchObject([{ agentId: "agent-1", text: noteContext(note, "请检查 示例应用 的实现"), consent: null }]);
+  });
+  it("opens the same form on the prompts screen when the 「一键 N」 menu asks for it", async () => {
+    host.rpc.set("project-notes.quick.note", async input => { calls.push({ name: "note", input }); return note; });
+    await act(async () => { renderer = create(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(PromptScreen, { theme, host: { id: "host-1", label: "示例主机" }, layout: { compact: true, platform: "web" }, params: { agentId: "agent-1", projectId: note.projectId, itemId: note.id } } as never))); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+    expect(calls[0]).toEqual({ name: "note", input: { projectId: note.projectId, itemId: note.id } });
+    await fill("变量：项目", "示例应用");
+    await press("发送给当前 Agent");
+    expect(sends()).toMatchObject([{ agentId: "agent-1", text: noteContext(note, "请检查 示例应用 的实现"), consent: null }]);
+  });
+  it("says so when the prompt is gone", async () => {
+    host.rpc.set("project-notes.quick.note", async () => null);
+    await mountPopover();
+    expect(JSON.stringify(renderer.toJSON())).toContain("这条提示词已删除、在回收站里，或已不是提示词。");
   });
 });

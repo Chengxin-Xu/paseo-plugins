@@ -1,7 +1,7 @@
 {
   "id": "project-notes",
   "name": "Project Notes",
-  "description": "Tasks, prompts and ideas per project, with a launcher and an agent CLI. English and Simplified Chinese plus user-defined languages.",
+  "description": "Tasks, prompts and ideas per project, with one-tap prompt pills, a launcher that shows each started agent on its task, and an agent CLI. English and Simplified Chinese plus user-defined languages.",
   "icon": "assets/icon.png",
   "media": [
     "assets/screenshot-board.png",

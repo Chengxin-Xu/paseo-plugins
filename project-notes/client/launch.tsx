@@ -196,6 +196,8 @@ export function LaunchDialog({ item, open, onOpenChange, theme, host, layout, na
     submitting.current = true; setSubmitted(true); setLaunching(true); setError(null);
     try {
       const result = await launch(input);
+      // Task cards and the note's detail show the new launch.
+      void queryClient.invalidateQueries({ queryKey: ["project-notes", "launches", host.id] });
       session.receipt = mergeReceipt(session.receipt, result); session.error = result.error;
       queryClient.setQueryData(statusKey, session.receipt);
       if (mounted.current) { setReceipt(session.receipt); setError(result.error); }

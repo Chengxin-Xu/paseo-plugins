@@ -9,15 +9,29 @@ vi.mock("../client/i18n-client", async importOriginal => {
     localized: (register: () => (() => void) | readonly (() => void)[]) => { const value = register(); return typeof value === "function" ? value : () => value.forEach(remove => remove()); },
   }) };
 });
-vi.mock("../client/lazy-chunk", () => ({ lazySurfaces: () => () => () => null }));
+// The quick chunk (one-tap send, /notes capture) loads its real code with the first use; the views stay stubs.
+const chunkLoads = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../client/lazy-chunk", () => ({
+  lazySurfaces: () => () => () => null,
+  createChunkLoader: (client: unknown, options: { text?: unknown }) => ({ label: () => "", peek: () => undefined, load: async () => {
+    chunkLoads.count++;
+    return (await import("../quick-chunk.client")).default().createSurfaces(client as never, { text: options.text as never });
+  } }),
+}));
 vi.mock("../client/board", () => ({ NotesSurface: () => null, NotesWorkspacePanel: () => null }));
 vi.mock("../client/composer", () => ({ PromptScreen: () => null, PromptPopover: () => null }));
 vi.mock("../client/kit", () => ({ hue: () => "#8833dd" }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({ SidebarRow: () => null }));
+// The window: wide unless a test turns it into a phone; `turn` stands for rotation or a resized window.
+const screen = vi.hoisted(() => ({ width: 1280, listeners: new Set<() => void>(), turn(width: number) { screen.width = width; for (const listener of screen.listeners) listener(); } }));
+vi.mock("react-native", () => ({ Dimensions: { get: () => ({ width: screen.width, height: 800 }), addEventListener: (_: string, listener: () => void) => { screen.listeners.add(listener); return { remove: () => screen.listeners.delete(listener) }; } } }));
 vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: () => null, useToast: () => ({ show: vi.fn() }) }));
 import contribute from "../index.client";
 import { contributePromptPills } from "../client/composer-pills";
 import { onComposerNotice } from "../client/composer-notice";
+import { createAgentDirectory } from "../client/agent-directory";
+import { createQuickStore } from "../client/quick-store";
+import { createQuickSender } from "../client/quick-send";
 
 function host() {
   let observer: any;
@@ -69,9 +83,14 @@ describe("composer contributions", () => {
     const context = { ...h.client, args: "评审", agent: { id: "agent-1" }, openScreen: vi.fn(), openPanel: vi.fn() };
     await h.slashes.find(command => command.name === "prompt").onSubmit(context);
     expect(context.openScreen).toHaveBeenCalledWith({ screenId: "prompts", params: { agentId: "agent-1", query: "评审" } });
-    expect(h.client.rpc).not.toHaveBeenCalled();
+    // Only the one-tap prompt list is read at start (no events in this host, so at once); /prompt itself calls nothing.
+    expect(h.client.rpc.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual(["settings.quick-prompts.read"]);
+    h.client.rpc.mockClear();
     const toast = vi.fn(), removeNotice = onComposerNotice(h.client.paseo, toast);
+    // Registration loaded nothing; the capture brings the quick chunk (its contracts and schemas) with it.
+    expect(chunkLoads.count).toBe(0);
     await h.slashes.find(command => command.name === "notes").onSubmit({ ...context, args: "重做搜索体验\n保留筛选条件" });
+    expect(chunkLoads.count).toBe(1);
     expect(h.client.rpc.mock.calls[0]![1]).toMatchObject({ projectId: "__inbox__", operation: { type: "create", fields: { kind: "idea", title: "重做搜索体验", body: "重做搜索体验\n保留筛选条件" } } });
     expect(context.openPanel).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith("已记到随手记");
@@ -79,20 +98,24 @@ describe("composer contributions", () => {
     expect(context.openPanel).toHaveBeenCalledWith("project-notes");
     removeNotice(); stop();
   });
+  const services = (h: ReturnType<typeof host>) => ({ directory: createAgentDirectory(h.client.paseo as never), quick: createQuickStore(h.client as never) });
+  const noActions = () => Promise.reject(new Error("not loaded in this test"));
   it("registers pills without reading notes or timelines and reconciles removals and workspace changes", async () => {
-    const h = host(), stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null);
+    const h = host(), shared = services(h), stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null, shared, noActions);
     await Promise.resolve();
     expect(h.pills).toHaveLength(1);
     expect(h.pills[0].button.behavior.kind).toBe("popover");
-    expect(h.client.rpc).not.toHaveBeenCalled();
+    // No notes and no timelines: only the (empty) one-tap list.
+    expect(h.client.rpc.mock.calls.map(([contract]) => (contract as { name: string }).name)).toEqual(["settings.quick-prompts.read"]);
     h.observer().update({ type: "agent_update", payload: { kind: "upsert", agent: { id: "agent-1", workspaceId: "workspace-1" } } });
     expect(h.pills).toHaveLength(1);
     h.observer().update({ type: "agent_update", payload: { kind: "upsert", agent: { id: "agent-1", workspaceId: "workspace-2" } } });
     expect(h.pills[0].registration.remove).toHaveBeenCalledTimes(1);
     expect(h.pills).toHaveLength(2);
     h.observer().snapshot({ entries: [] });
+    await Promise.resolve();
     expect(h.pills[1].registration.remove).toHaveBeenCalledTimes(1);
-    stop();
+    stop(); shared.directory.dispose(); shared.quick.dispose();
     expect(h.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.release).toHaveBeenCalledTimes(1);
   });
@@ -102,13 +125,65 @@ describe("composer contributions", () => {
     h.client.paseo.agents.list
       .mockResolvedValueOnce({ entries: [{ agent: { id: "agent-1", workspaceId: "workspace-1" } }], pageInfo: { hasMore: true, nextCursor: "page-2" }, subscription: h.subscription } as never)
       .mockReturnValueOnce(new Promise(resolve => { nextPage = resolve; }) as never);
-    const stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null);
+    const shared = services(h), stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null, shared, noActions);
     await Promise.resolve();
     h.observer().update({ type: "agent_update", payload: { kind: "remove", agentId: "agent-1" } });
     nextPage({ entries: [{ agent: { id: "agent-2", workspaceId: "workspace-2" } }], pageInfo: { hasMore: false } });
     await Promise.resolve(); await Promise.resolve();
     expect(h.pills.find(pill => pill.agentId === "agent-2")).toBeDefined();
-    expect(h.pills.find(pill => pill.agentId === "agent-1")?.registration.remove).toHaveBeenCalledTimes(1);
-    stop();
+    // The removal is newer than the pages: agent-1 never gets a pill (no flash of a pill that goes at once).
+    expect(h.pills.find(pill => pill.agentId === "agent-1")).toBeUndefined();
+    stop(); shared.directory.dispose(); shared.quick.dispose();
+  });
+  it("loads the send with the first press, and says nothing went out when it cannot load", async () => {
+    const h = host(), calls: string[] = [];
+    h.client.rpc.mockImplementation(async (contract: unknown) => {
+      const name = (contract as { name: string }).name;
+      calls.push(name);
+      if (name === "settings.quick-prompts.read") return { status: "ready", revision: "r1", values: { prompts: [{ projectId: "prj", itemId: "00000000-0000-4000-8000-000000000001", label: "继续", template: false, hidden: false, revision: 1 }] } };
+      if (name === "project-notes.composer.capabilities") return { steerableProviders: [], slashSteerableProviders: [] };
+      return { status: "sent", message: "已发送「继续」" };
+    });
+    let loads = 0, broken = true;
+    const quickSend = createQuickSender(input => h.client.rpc({ name: "project-notes.quick.send" }, input) as never);
+    const actions = async () => { loads++; await Promise.resolve(); if (broken) throw new Error("offline"); return { quickSend, captureNote: async () => undefined }; };
+    const shared = services(h), stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null, shared, actions);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const pill = h.pills.find(entry => entry.id === "quick-00000000-0000-4000-8000-000000000001");
+    expect(pill?.button.behavior.kind).toBe("action");
+    // Registering read the list and the capabilities only: the send half is not loaded yet.
+    expect(loads).toBe(0);
+    await expect(pill.button.behavior.onPress()).rejects.toThrow("「继续」没有发出：offline");
+    expect(calls).not.toContain("project-notes.quick.send");
+    broken = false;
+    await pill.button.behavior.onPress();
+    expect(loads).toBe(2);
+    expect(calls.filter(name => name === "project-notes.quick.send")).toHaveLength(1);
+    stop(); shared.directory.dispose(); shared.quick.dispose();
+  });
+  it("folds the one-tap pills into one menu pill on a phone-wide window and follows rotation, the library pill untouched", async () => {
+    const h = host();
+    h.client.rpc.mockImplementation(async (contract: unknown) => {
+      const name = (contract as { name: string }).name;
+      if (name === "settings.quick-prompts.read") return { status: "ready", revision: "r1", values: { prompts: [1, 2].map(n => ({ projectId: "prj", itemId: `00000000-0000-4000-8000-00000000000${n}`, label: `提示词 ${n}`, template: false, hidden: false, revision: 1 })) } };
+      return { steerableProviders: [], slashSteerableProviders: [] };
+    });
+    screen.width = 390;
+    const shared = services(h), stop = contributePromptPills(h.client as unknown as PluginClientContext, () => null, shared, noActions);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const live = () => h.pills.filter(pill => !pill.registration.remove.mock.calls.length).map(pill => pill.id);
+    // Never two separate pills first: the width is known before the first registration.
+    expect(h.pills.map(pill => pill.id)).toEqual(["note-prompts", "quick-menu"]);
+    // A 900 px window with the sidebar leaves the composer about 550 px: still folded. 1280 px: separate pills.
+    screen.turn(900);
+    expect(live()).toEqual(["note-prompts", "quick-menu"]);
+    screen.turn(1280);
+    expect(live()).toEqual(["note-prompts", "quick-00000000-0000-4000-8000-000000000001", "quick-00000000-0000-4000-8000-000000000002"]);
+    screen.turn(390);
+    expect(live()).toEqual(["note-prompts", "quick-menu"]);
+    expect(h.pills[0].registration.remove).not.toHaveBeenCalled();
+    stop(); shared.directory.dispose(); shared.quick.dispose();
+    expect(screen.listeners.size).toBe(0);
+    screen.width = 1280;
   });
 });

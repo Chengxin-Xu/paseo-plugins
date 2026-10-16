@@ -9,6 +9,8 @@ vi.mock("react-native", () => ({ Text: "Text" }));
 vi.mock("./language-settings", () => ({ LanguageSettings: () => null }));
 vi.mock("./i18n-client", () => ({ useI18n: () => undefined }));
 vi.mock("./kit", () => ({ toneColor: () => "#ffffff" }));
+// 0.8.0: the running animations preview draws live loaders (fx code); the settings logic is what this test covers.
+vi.mock("./loader-preview", () => ({ LoaderPreview: () => null, loaderLabels: { spinner: "转圈", sparkle: "星芒", orb: "光球", snake: "点阵 · 蛇形", matrix: "点阵 · 闪烁" } }));
 vi.mock("react", async (original) => ({ ...await original<typeof import("react")>(), useMemo: (compute: () => unknown) => compute() }));
 
 import { ActivitySettings, type SettingsActions } from "./settings";

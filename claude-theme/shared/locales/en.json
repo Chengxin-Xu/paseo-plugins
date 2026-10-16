@@ -1,0 +1,98 @@
+{
+  "$meta": {
+    "name": "English"
+  },
+  "boot": {
+    "name": "Terracotta Themes",
+    "customThemeName": "🎨 Custom",
+    "settingsTitle": "Custom theme",
+    "languageTitle": "Language",
+    "openCustomTheme": "Customize the theme",
+    "keywords": "theme|colors|palette|appearance|custom|dark|light"
+  },
+  "custom": {
+    "intro": "Pick a dark or light base, a hue for the surfaces and one for the accent. The colors come from the same lightness ladder as the twelve fixed themes, and text contrast is fitted for you.",
+    "inUse": "In use: let go of a slider or tap a button and the whole app takes the new colors, on every device connected to this host.",
+    "notInUse": "Not selected yet. Choose “{name}” in Settings → Appearance → Theme, and every change here will recolor the whole app.",
+    "colorsTitle": "Colors",
+    "appearance": "Mode",
+    "dark": "Dark",
+    "light": "Light",
+    "surfaceHue": "Surface hue",
+    "surfaceHueHint": "The color the page, cards and sidebar lean toward",
+    "surfaceTint": "Surface tint",
+    "surfaceTintHint": "0% is neutral gray",
+    "accentHue": "Accent hue",
+    "accentHueHint": "Buttons, links and the selection",
+    "accentVividness": "Accent vividness",
+    "accentVividnessHint": "100% is the most colorful this hue allows",
+    "degrees": "{value}°",
+    "percent": "{value}%",
+    "decrease": "Decrease {label}",
+    "increase": "Increase {label}",
+    "shuffle": "Shuffle",
+    "reset": "Reset",
+    "saving": "Saving…",
+    "saved": "Saved on the host. Every device follows.",
+    "loading": "Loading the saved colors…",
+    "saveFailed": "Could not save: {error}",
+    "readFailed": "Could not read the saved colors: {error}",
+    "paletteTitle": "Palette"
+  },
+  "preview": {
+    "label": "Preview of the custom theme",
+    "agents": "Workspaces",
+    "rowOne": "Fix the login bug",
+    "rowTwo": "Refactor the parser",
+    "rowThree": "Update the docs",
+    "timeOne": "2m",
+    "timeTwo": "5m",
+    "timeThree": "1h",
+    "userMessage": "Make the tests pass",
+    "cardTitle": "Plan ready",
+    "cardBody": "3 files to change, 2 tests to add",
+    "approve": "Approve",
+    "details": "Details",
+    "placeholder": "Message the agent…"
+  },
+  "swatch": {
+    "background": "Page",
+    "raised": "Cards",
+    "control": "Inputs",
+    "border": "Borders",
+    "foreground": "Text",
+    "mutedForeground": "Secondary",
+    "ring": "Hints",
+    "accent": "Accent"
+  },
+  "checks": {
+    "title": "Contrast",
+    "allPass": "All {total} checks pass",
+    "someFail": {
+      "one": "{count} of {total} checks fails",
+      "other": "{count} of {total} checks fail"
+    },
+    "explain": "Each text color on every surface Paseo paints it on, held to the same floors as the twelve fixed themes: 7:1 for body text, 4.5:1 for everything in the chat.",
+    "workspace": "Chat",
+    "sidebar": "Sidebar",
+    "sidebarSelected": "Selected sidebar row",
+    "popover": "Menus and popovers",
+    "input": "Inputs",
+    "userBubble": "Your messages",
+    "badge": "Status badges",
+    "terminal": "Terminal",
+    "button": "Primary button",
+    "foreground": "Text",
+    "muted": "Secondary",
+    "ring": "Hints",
+    "accent": "Accent",
+    "buttonText": "Button text",
+    "ratio": "{ratio}:1",
+    "needs": "needs {floor}:1",
+    "chipPass": "{token}: {ratio}:1, passes (needs {floor}:1)",
+    "chipFail": "{token}: {ratio}:1, fails (needs {floor}:1)"
+  },
+  "settings": {
+    "languageDescription": "The language of this plugin's screens and of the custom theme's name. The twelve fixed themes keep their names."
+  }
+}

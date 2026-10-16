@@ -64,8 +64,9 @@ export function PinnedInput({ theme, message, confirmed, loading, inset }: { the
 }
 
 const outcomeBadge = { passed: { get label() { return t("secondaryResultView.passed"); }, tone: "success", icon: "CircleCheck" }, failed: { get label() { return t("secondaryResultView.failed"); }, tone: "danger", icon: "CircleX" }, unknown: { get label() { return t("secondaryResultView.unconfirmed"); }, tone: "neutral", icon: "CircleHelp" } } as const;
-export function ResultView({ theme, agent, data, loading, error, header, lead, inset, compact = inset < space.xl, pending = 0, permissions = [], onResolvePermissions, onPermissionsChanged, onReplied, onOpenEvidence, onRefresh }: {
+export function ResultView({ theme, agent, data, loading, error, header, lead, inset, compact = inset < space.xl, pending = 0, permissions = [], suggestion = null, onResolvePermissions, onPermissionsChanged, onReplied, onOpenEvidence, onRefresh }: {
   theme: PluginTheme; agent: AgentRecord; data?: ResultData; loading: boolean; error?: string | null; header?: ReactNode; inset: number; compact?: boolean; pending?: number; permissions?: readonly Record<string, unknown>[];
+  /** The current recap's suggested next message (AI 建议), offered under the reply beside the quick replies. */ suggestion?: string | null;
   /** Shown before the reply, e.g. the 定时任务 card of an Agent a schedule created. */ lead?: ReactNode;
   onResolvePermissions?: () => void;
   /** A request was answered here (or found answered elsewhere): read the Agent's pending requests again. */ onPermissionsChanged?: () => void;
@@ -78,7 +79,8 @@ export function ResultView({ theme, agent, data, loading, error, header, lead, i
   const state = ownTurnRunning(agent) || data?.isRunning ? t("secondaryResultView.running") : data?.isFinal ? t("secondaryResultView.turnResult") : null;
   // 快捷回复 (opus-B26): only under the reply the category was read from, never for subagents (their parent answers them); they
   // answer this turn only (P1-1), and with the whole reply right above them they need no quote.
-  const nudge = agent.replyNudge && !agent.parentAgentId && !agent.archivedAt && pending === 0 && !ownTurnRunning(agent) && !data?.isRunning ? agent.replyNudge : null;
+  const replyable = !agent.parentAgentId && !agent.archivedAt && pending === 0 && !ownTurnRunning(agent) && !data?.isRunning;
+  const nudge = replyable && agent.replyNudge ? agent.replyNudge : null, ai = replyable && suggestion ? suggestion : null;
   const copy = () => { if (!reply) return; void copyText(reply.text).then(() => toast.show(t("secondaryResultView.latestReplyCopied"), { variant: "success" })).catch(() => toast.error(t("secondaryResultView.copyFailedTouchAndHoldTo"))); };
   // The header slot is always rendered: web counts null children when indexing sticky headers, native drops them.
   return <ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingBottom: space.xxl }} stickyHeaderIndices={[1]}>
@@ -96,8 +98,8 @@ export function ResultView({ theme, agent, data, loading, error, header, lead, i
             <Button theme={theme} label={t("secondaryResultView.copy")} icon="Copy" variant="ghost" size="sm" accessibilityLabel={t("secondaryResultView.copyLatestReply")} onPress={copy} />
             <Button theme={theme} label={t("secondaryResultView.viewInTimeline")} icon="ListTree" variant="ghost" size="sm" accessibilityLabel={t("secondaryResultView.viewReplyContext")} onPress={() => onOpenEvidence(reply.ref)} />
           </View>
-          {nudge ? <View style={{ padding: space.md, borderRadius: radius.lg, borderWidth: hairline, borderColor: hue(theme, "violet", "line"), backgroundColor: hue(theme, "violet", "soft") }}>
-            <QuickReplies key={`${agent.id}:${agent.lastUserMessageAt ?? ""}:${agent.observedTurnStartedAt ?? ""}:${nudge}`} theme={theme} agentId={agent.id} agentTitle={agent.title || t("secondaryResultView.unnamedAgent")} nudge={nudge} expectPrompt={agent.lastUserMessageAt} expectRound={agent.observedTurnStartedAt ?? null} compact={compact} onSent={onReplied} />
+          {nudge || ai ? <View style={{ padding: space.md, borderRadius: radius.lg, borderWidth: hairline, borderColor: hue(theme, "violet", "line"), backgroundColor: hue(theme, "violet", "soft") }}>
+            <QuickReplies key={`${agent.id}:${agent.lastUserMessageAt ?? ""}:${agent.observedTurnStartedAt ?? ""}:${nudge}:${ai ?? ""}`} theme={theme} agentId={agent.id} agentTitle={agent.title || t("secondaryResultView.unnamedAgent")} nudge={nudge} suggestion={ai} expectPrompt={agent.lastUserMessageAt} expectRound={agent.observedTurnStartedAt ?? null} compact={compact} onSent={onReplied} />
           </View> : null}
         </> : loading ? <Skeleton theme={theme} rows={3} /> : <EmptyState theme={theme} icon="MessageSquare" title={t("secondaryResultView.noRepliesYet")} message={t("secondaryResultView.newRepliesAppearAutomaticallyViewProgress")} />}
       </View>

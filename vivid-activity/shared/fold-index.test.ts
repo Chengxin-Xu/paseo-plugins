@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { fileId } from "./changes";
 import { reasoningKey } from "./fold";
 import {
   claimsToolCall,
@@ -131,6 +132,60 @@ describe("fold index rows", () => {
       const rows = page(bash("big", output), ...notices);
       expect(performance.now() - started).toBeLessThan(250);
       expect(rows.filter((row) => row.ref === "big" && row.fg === false)).toHaveLength(400);
+    });
+  });
+
+  describe("lines changed and exit codes (0.8.0)", () => {
+    const cwd = "/home/user/demo-app";
+    it("records an edit's +/− per file id and a failed command's exit code, never a path or a command", () => {
+      const edit = call("Edit", { type: "edit", filePath: `${cwd}/src/a.ts`, oldString: "a\nb\n", newString: "a\nB\nc\n" });
+      const row = wireRowFromEntry(entry(40, edit), undefined, cwd)!;
+      expect(row).toMatchObject({ k: "t", look: "edit", ch: [[fileId("src/a.ts"), 2, 1]] });
+      expect(JSON.stringify(row)).not.toContain("src/a.ts");
+      expect(indexRowFromWire(row)).toMatchObject({ changes: [{ file: fileId("src/a.ts"), added: 2, removed: 1 }] });
+      const codex = call("exec", { type: "shell", command: "npm test", exitCode: 3 }, { status: "failed" });
+      expect(wireRowFromEntry(entry(41, codex), undefined, cwd)).toMatchObject({ st: "failed", look: "shell", x: 3 });
+      const claude = call("Bash", { type: "shell", command: "npm run lint" }, { status: "failed", error: { type: "tool_result", content: "Exit code 1\nlint failed", is_error: true } });
+      const failed = wireRowFromEntry(entry(42, claude), undefined, cwd)!;
+      expect(failed).toMatchObject({ x: 1 });
+      expect(JSON.stringify(failed)).not.toContain("npm run lint");
+      expect(indexRowFromWire(failed)).toMatchObject({ exit: 1 });
+    });
+
+    it("marks writes as changes without line counts, and leaves out unfinished edits and commands that did not fail", () => {
+      const write = wireRowFromEntry(entry(43, call("Write", { type: "write", filePath: "a.md", content: "x" })), undefined, cwd)!;
+      expect(write).not.toHaveProperty("ch");
+      expect(write).toMatchObject({ nc: 1 });
+      expect(indexRowFromWire(write)).toMatchObject({ uncounted: 1 });
+      expect(wireRowFromEntry(entry(44, call("Edit", { type: "edit", filePath: "a.md", oldString: "a", newString: "b" }, { status: "running" })), undefined, cwd)).not.toHaveProperty("ch");
+      expect(wireRowFromEntry(entry(45, call("Bash", { type: "shell", command: "ls", exitCode: 0 })), undefined, cwd)).not.toHaveProperty("x");
+    });
+
+    it("counts each file of an apply_patch call, and a call Paseo kept only one file of as a change without line counts", () => {
+      const patch = "*** Begin Patch\n*** Add File: docs/a.md\n+# a\n*** Update File: src/b.ts\n@@\n-x\n+y\n*** Delete File: src/c.ts\n*** End Patch";
+      const whole = wireRowFromEntry(entry(46, call("apply_patch", { type: "unknown", input: { patch }, output: null })), undefined, cwd)!;
+      expect(whole).toMatchObject({ look: "edit", ch: [[fileId("docs/a.md"), 1, 0], [fileId("src/b.ts"), 1, 1]], nc: 1 });
+      const firstOnly = wireRowFromEntry(entry(47, call("apply_patch", { type: "edit", filePath: "src/config.ts", unifiedDiff: "@@ -1 +1 @@\n-a\n+b" })), undefined, cwd)!;
+      expect(firstOnly).not.toHaveProperty("ch");
+      expect(firstOnly).toMatchObject({ look: "edit", nc: 1 });
+    });
+
+    it("passes the Agent's directory through a page", () => {
+      const edit = call("Edit", { type: "edit", filePath: `${cwd}/src/a.ts`, oldString: "a", newString: "b" });
+      expect(wirePageFromEntries([entry(1, edit)], () => null, cwd).rows[0]).toMatchObject({ ch: [[fileId("src/a.ts"), 1, 1]] });
+    });
+
+    it("accepts the new fields and the turns' tokens in the RPC contract", () => {
+      const output = {
+        status: "ok", epoch: "e", rows: [{ s: 1, at: 0, k: "t", key: "t:a", st: "completed", look: "edit", ch: [["abc", 1, 2]] }, { s: 2, at: 0, k: "t", key: "t:b", st: "failed", look: "shell", x: 127 }],
+        startCursor: null, endCursor: null, hasOlder: false, hasNewer: false, reset: false, running: false,
+        tok: [{ id: "foreground-turn-1", i: 10, c: null, o: 5 }, { id: "codex-turn-2", i: 1, c: 2, o: 3, live: true }],
+      };
+      expect(foldIndexRpc.output.parse(output)).toMatchObject({ tok: [{ id: "foreground-turn-1", c: null }, { live: true }] });
+      expect(() => foldIndexRpc.output.parse({ ...output, rows: [{ s: 1, at: 0, k: "t", ch: [] }] })).toThrow();
+      expect(foldIndexRpc.output.parse({ ...output, rows: [{ s: 1, at: 0, k: "t", nc: 2 }] }).rows[0]).toMatchObject({ nc: 2 });
+      expect(() => foldIndexRpc.output.parse({ ...output, rows: [{ s: 1, at: 0, k: "t", nc: 0 }] })).toThrow();
+      expect(() => foldIndexRpc.output.parse({ ...output, tok: [{ id: "x", i: -1, c: 0, o: 0 }] })).toThrow();
     });
   });
 

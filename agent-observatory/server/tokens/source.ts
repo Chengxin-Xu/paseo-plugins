@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, stat } from "node:fs/promises";
+import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { TOKEN_SOURCES, type TokenSource } from "../../shared/tokens";
 import type { TokenCall, TokenCallSource } from "../token-source";
@@ -85,6 +86,20 @@ export class LocalTokenCallSource implements TokenCallSource {
     options: { sources?: Iterable<TokenSource>; budget?: Partial<{ files: number; calls: number }> } = {}) {
     this.sources = new Set(options.sources ?? TOKEN_SOURCES);
     this.budget = { files: MAX_FILES, calls: MAX_CALLS, ...options.budget };
+  }
+
+  /**
+   * 提示缓存倒计时 (server/cache-clock.ts): a Claude session's own log, `<session id>.jsonl` as the scans indexed it (custom
+   * `CLAUDE_CONFIG_DIR` roots included; not a subagent's), the newest when there are several; null when none is known. `identity`
+   * changes whenever the scans saw the log change.
+   */
+  claudeTranscript(sessionId: string): { path: string; identity: string } | null {
+    let found: LogFile | null = null;
+    for (const file of this.ingester.files.values()) {
+      if (file.source !== "claude" || file.parentSession !== null || basename(file.path, ".jsonl") !== sessionId) continue;
+      if (!found || file.mtime > found.mtime) found = file;
+    }
+    return found ? { path: found.path, identity: `${found.dev}:${found.ino}:${found.size}:${found.mtime}` } : null;
   }
 
   callsForSessions(sessionIds: readonly string[]): Promise<{ source: TokenSource; calls: TokenCall[]; version: string } | null> {

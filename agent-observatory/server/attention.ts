@@ -5,7 +5,8 @@ import { enrichAgents, type BackgroundAgent } from "../shared/background";
 import { applyArchiveReadOrigin, applyReadReceipt, type AgentRecord, type AgentTodo } from "../shared/model";
 import { needsAttention } from "../shared/dashboard-model";
 import { isCompletionSnoozed, type CompletionSnooze, type ObservatorySettings } from "../shared/preferences";
-import { applyLiveExtras, attentionPhase, entryOf, getAttention, getLiveExtras, loudPhases, phaseRank, type AttentionResponse, type AttentionSummary, type LiveExtra, type LiveExtrasResponse } from "../shared/attention";
+import { applyLiveExtras, attentionPhase, entryOf, getAttention, getLiveExtras, loudPhases, phaseRank, waitingSince, ATTENTION_PHASES, type AttentionPhase, type AttentionResponse, type AttentionSummary, type LiveExtra, type LiveExtrasResponse } from "../shared/attention";
+import { chimeKindEnabled, chimeKindOf, quietHours, type AlertSettings, type ChimeEvent, type ChimeKind, type ChimeState } from "../shared/alerts";
 import type { TelemetrySnapshot } from "../shared/telemetry";
 import type { ReadReceipt, ArchiveReadOrigin } from "../shared/read-state";
 import { normalizeTimelinePage, object, projectTimelineRows, string, type TimelineItem } from "../shared/timeline";
@@ -24,6 +25,27 @@ export interface AttentionSources {
   scheduleFailures?(sinceMs: number): Promise<number | null>;
   /** The device's IANA zone a badge read reported (server/device-zone.ts `DeviceZone.note`), already shaped like a zone name. */
   noteZone?(zone: string): void;
+  /** 提醒 settings (shared/alerts.ts): while the chime is on, the summary carries its events. */
+  alerts?(): AlertSettings;
+}
+/** One Agent that needs you, by the page's rules, and where it ranks. */
+interface Waiting { agent: AgentRecord; phase: AttentionPhase; rank: number; since: string | null }
+
+/**
+ * The chime's events (shared/alerts.ts `chimeSchema`): one per pending request (its id), else one per time the Agent started
+ * waiting in this phase, each with the turn it belongs to. Kinds the settings silence and (unless asked) subagents are left out.
+ */
+export function chimeEvents(waiting: readonly Waiting[], settings: AlertSettings): ChimeState {
+  const events: ChimeEvent[] = [];
+  const add = (id: string, kind: ChimeKind, turn: string) => { if (chimeKindEnabled(settings, kind) && events.length < 64) events.push({ id: id.slice(0, 600), kind, turn: turn.slice(0, 300) }); };
+  for (const { agent, phase, since } of waiting) {
+    if (agent.parentAgentId && !settings.chimeSubagents) continue;
+    const turn = agent.activeTurnStartedAt ?? agent.observedTurnStartedAt ?? agent.lastUserMessageAt ?? "";
+    const requests = phase === "approval" || phase === "question" || phase === "plan" ? (agent.pending ?? []).filter(request => request.requestId) : [];
+    for (const request of requests) add(`${agent.id}|request|${request.requestId}`, request.kind === "question" ? "question" : "approval", turn);
+    if (!requests.length) add(`${agent.id}|${phase}|${since ?? ""}`, chimeKindOf(phase), turn);
+  }
+  return { quiet: quietHours(settings), events };
 }
 export interface AttentionOptions { now?: () => number; idleMs?: number; todoEveryMs?: number; maxTodoReads?: number }
 type EventStream = ReturnType<PaseoApi["observeEvents"]>;
@@ -75,6 +97,9 @@ export class AttentionIndex {
   private readonly todoReadAt = new Map<string, number>();
   private todoReading: Promise<void> | null = null;
   private closed = false;
+  /** Kept observing without readers (同步到侧栏标签), and told of every directory change. */
+  private kept = false;
+  private readonly changeListeners = new Set<() => void>();
 
   constructor(private readonly sources: AttentionSources, options: AttentionOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -103,6 +128,7 @@ export class AttentionIndex {
       };
       const directory = createAgentDirectory(api, { includeArchived: false, notifyDelayMs: 0 });
       this.directory = directory;
+      directory.subscribe(() => { for (const listener of this.changeListeners) listener(); });
       directory.start(true);
       this.started = directory.refresh();
     }
@@ -157,18 +183,42 @@ export class AttentionIndex {
     return { agents: applyLiveExtras(enriched, this.extras()), truncated: directory.truncated, ready: directory.lastSyncedAt !== null, failed: directory.error !== null };
   }
 
-  async summary(): Promise<AttentionSummary> {
+  /** Everything that needs you, by the page's rules, waiting longest first within each rank. */
+  private async waiting(): Promise<{ waiting: Waiting[]; truncated: boolean; ready: boolean; failed: boolean }> {
     const [{ agents, truncated, ready, failed }, { snoozes, settings }] = await Promise.all([this.records(), this.sources.preferences()]);
     const now = this.now();
     const waiting = agents.filter(agent => needsAttention(agent, isCompletionSnoozed(agent, snoozes, now), { childCompletions: settings.childCompletions }))
-      .map(agent => ({ agent, phase: attentionPhase(agent) ?? "unread" as const }))
-      .map(({ agent, phase }) => ({ entry: entryOf(agent, phase), rank: phaseRank[phase] }))
-      .sort((a, b) => a.rank - b.rank || (Date.parse(a.entry.since ?? "") || Infinity) - (Date.parse(b.entry.since ?? "") || Infinity) || a.entry.agentId.localeCompare(b.entry.agentId));
+      .map(agent => { const phase = attentionPhase(agent) ?? "unread" as const; return { agent, phase, rank: phaseRank[phase], since: waitingSince(agent, phase) }; })
+      .sort((a, b) => a.rank - b.rank || (Date.parse(a.since ?? "") || Infinity) - (Date.parse(b.since ?? "") || Infinity) || a.agent.id.localeCompare(b.agent.id));
+    return { waiting, truncated, ready, failed };
+  }
+
+  async summary(): Promise<AttentionSummary> {
+    const { waiting, truncated, ready, failed } = await this.waiting(), now = this.now();
     // Todo progress is read for the page's live extras only; the badge does not need it.
     const scheduleFailures = this.sources.scheduleFailures ? await this.sources.scheduleFailures(now - 86_400_000).catch(() => null) : null;
-    return { count: waiting.length, truncated, blocking: waiting.filter(item => item.rank === 0).length, loud: waiting.filter(item => loudPhases.has(item.entry.phase)).length,
-      entries: waiting.slice(0, 8).map(item => item.entry), scheduleFailures, ready, failed };
+    const alerts = this.sources.alerts?.();
+    return { count: waiting.length, truncated, blocking: waiting.filter(item => item.rank === 0).length, loud: waiting.filter(item => loudPhases.has(item.phase)).length,
+      entries: waiting.slice(0, 8).map(item => entryOf(item.agent, item.phase)), scheduleFailures, ready, failed, chime: alerts?.chime ? chimeEvents(waiting, alerts) : null };
   }
+
+  /**
+   * 同步到侧栏标签: each workspace's most urgent 需要处理 phase, by the same rules as the badge. `known`: the directory was read
+   * whole (not failed, not truncated): only then may a workspace missing here be taken as needing nothing.
+   */
+  async workspaces(): Promise<{ phases: Map<string, AttentionPhase>; ready: boolean; known: boolean }> {
+    const { waiting, truncated, ready, failed } = await this.waiting(), phases = new Map<string, AttentionPhase>();
+    for (const { agent, phase } of waiting) {
+      if (!agent.workspaceId) continue;
+      const held = phases.get(agent.workspaceId);
+      if (!held || phaseRank[phase] < phaseRank[held] || phaseRank[phase] === phaseRank[held] && ATTENTION_PHASES.indexOf(phase) < ATTENTION_PHASES.indexOf(held)) phases.set(agent.workspaceId, phase);
+    }
+    return { phases, ready: ready && !failed, known: ready && !failed && !truncated };
+  }
+  /** Keep the directory observed while nobody reads the badge (the label sync), or let it go idle again. */
+  keep(on: boolean): void { this.kept = on; }
+  /** Told whenever the observed directory changes (debounce it: a running Agent reports often). */
+  onChange(listener: () => void): () => void { this.changeListeners.add(listener); return () => { this.changeListeners.delete(listener); }; }
 
   async read(input: { revision?: string } = {}): Promise<AttentionResponse> {
     const summary = await this.summary(), revision = contentRevision(summary);
@@ -218,13 +268,13 @@ export class AttentionIndex {
 
   /** Let go of the observation and the stream when nobody has read for a while (or on close). */
   private release(force: boolean): void {
-    if (!force && this.now() - this.lastRead < this.idleMs) return;
+    if (!force && (this.kept || this.now() - this.lastRead < this.idleMs)) return;
     this.directory?.stop(); this.directory = null; this.started = null;
     const stream = this.stream; this.stream = null;
     void stream?.release().catch(() => {});
     if (this.idleTimer) { clearInterval(this.idleTimer); this.idleTimer = null; }
   }
-  close(): void { this.closed = true; this.release(true); this.notes.clear(); this.todos.clear(); this.asks.clear(); }
+  close(): void { this.closed = true; this.release(true); this.notes.clear(); this.todos.clear(); this.asks.clear(); this.changeListeners.clear(); }
 }
 
 export function registerAttention(server: PluginServerContext, sources: AttentionSources, options: AttentionOptions = {}) {

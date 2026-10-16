@@ -519,6 +519,7 @@ describe("fold runtime memory over a long session (0.5.0)", () => {
       turns: [] as NonNullable<FoldIndexOutput["turns"]>,
       active: null as FoldIndexOutput["active"],
       reset: false,
+      tok: undefined as FoldIndexOutput["tok"],
     };
     runtime.configure({
       rpc: async (input) => {
@@ -527,7 +528,7 @@ describe("fold runtime memory over a long session (0.5.0)", () => {
         return {
           status: "ok", epoch: state.epoch, rows: reset ? [] : state.rows, startCursor: { epoch: state.epoch, seq: 1 },
           endCursor: { epoch: state.epoch, seq: state.rows.length + 1 }, hasOlder: false, hasNewer: false, reset,
-          running: true, turns: state.turns, active: state.active,
+          running: true, turns: state.turns, active: state.active, ...(state.tok ? { tok: state.tok } : {}),
         };
       },
       nudge: () => void nudges++,
@@ -588,6 +589,27 @@ describe("fold runtime memory over a long session (0.5.0)", () => {
     expect(runtime.debugMemory("agent-1")).toMatchObject({ turnStarts: 0, expanded: 0 });
     expect(runtime.isExpanded("agent-1", "2")).toBeUndefined();
     expect(runtime.timing("agent-1", "t:a")?.start).toBe(1000);
+  });
+
+  it("drops the tokens of an old history's turn ids when the epoch changes (0.8.0)", async () => {
+    const { clock, runtime, state } = scripted();
+    state.rows = [{ s: 1, at: 1000, k: "b", w: "user_message", u: 0 }, { s: 2, at: 2000, k: "t", key: "t:a", st: "completed", look: "shell", u: 0 }];
+    state.turns = [{ id: "foreground-turn-1", at: 900 }];
+    state.tok = [{ id: "foreground-turn-1", i: 6, c: 900, o: 40 }];
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    expect(runtime.turnTokens("agent-1", "foreground-turn-1")).toMatchObject({ i: 6, o: 40 });
+    let heard = 0;
+    const unsubscribe = runtime.subscribeTokens("agent-1", () => void heard++);
+    // Reloaded: the same id is a new turn the server has no figures for.
+    state.epoch = "e2";
+    state.tok = undefined;
+    state.reset = true;
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.turnTokens("agent-1", "foreground-turn-1")).toBeNull();
+    expect(heard).toBeGreaterThan(0);
+    unsubscribe();
   });
 
   it("caps the folds one Agent remembers and drops them when the Agent is forgotten", async () => {
@@ -748,5 +770,56 @@ describe("fold request traffic", () => {
     expect(times).toHaveLength(3);
     expect(times[1]! - times[0]!).toBe(2_000);
     expect(times[2]! - times[1]!).toBe(5_000);
+  });
+});
+
+describe("0.8.0: what a run changed and the turn's tokens", () => {
+  it("keeps the tokens each answer reports, tells the rows showing them, and keeps the same object while they hold", async () => {
+    const { clock, timeline, runtime } = setup();
+    const original = timeline.rpc.bind(timeline);
+    let tok: FoldIndexOutput["tok"] = [{ id: "turn-1", i: 10, c: 100, o: 5, live: true }];
+    timeline.rpc = async (input) => ({ ...(await original(input)), tok });
+    timeline.append(user);
+    timeline.append(shell("a"));
+    let heard = 0;
+    const unsubscribe = runtime.subscribeTokens("agent-1", () => void heard++);
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    const first = runtime.turnTokens("agent-1", "turn-1");
+    expect(first).toEqual({ id: "turn-1", i: 10, c: 100, o: 5, live: true });
+    expect(heard).toBe(1);
+    // The same figures again: nothing to redraw.
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.turnTokens("agent-1", "turn-1")).toBe(first);
+    expect(heard).toBe(1);
+    // The sum grew, then froze when the turn ended.
+    tok = [{ id: "turn-1", i: 12, c: 180, o: 9 }];
+    timeline.append(text);
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    expect(runtime.turnTokens("agent-1", "turn-1")).toEqual({ id: "turn-1", i: 12, c: 180, o: 9 });
+    expect(heard).toBe(2);
+    expect(runtime.turnTokens("agent-1", "turn-2")).toBeNull();
+    unsubscribe();
+  });
+
+  it("plans again when a row's changed lines or exit code arrive, so the summary shows them", async () => {
+    const { clock, timeline, runtime, project } = setup();
+    timeline.append(user);
+    const edit = timeline.append({ k: "t", key: "t:e", st: "completed", look: "edit" });
+    timeline.append(shell("b", "failed"));
+    timeline.append(text);
+    timeline.setRunning(false);
+    project("t:e", "t:b");
+    runtime.acquire("agent-1");
+    await clock.advance(0);
+    const before = runtime.roleFor("t:e");
+    expect(before.kind === "fold" && before.summary).toMatchObject({ files: 0, fails: [{ key: "t:b", exit: null }] });
+    timeline.update(edit, { ch: [["f1", 4, 2]] });
+    runtime.poke();
+    await clock.advance(FOLD_TIMING.pokeDelay);
+    const after = runtime.roleFor("t:e");
+    expect(after.kind === "fold" && after.summary).toMatchObject({ files: 1, added: 4, removed: 2, changed: [{ key: "t:e", file: "f1", added: 4, removed: 2 }] });
   });
 });

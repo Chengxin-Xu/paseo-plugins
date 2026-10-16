@@ -56,6 +56,21 @@ globalThis.__browserCalls = [];
 globalThis.__browserRelease = {};
 // What live input reached each page: typed text, keys as ⟨Enter⟩, clicks as ⟨click⟩.
 globalThis.__typed = {};
+// Ports Agents opened (browser.ports): this workspace's and one in another workspace. `?scenario=noports` is a host that
+// cannot list them (not Linux): the group stays hidden. __browserFixture.addPort() adds one while a sheet is open.
+const port = (value, process, agentTitle, agentStatus, scope, workspaceId, extra = {}) => ({ port: value, scope, process, agentId: `agent-port-${value}`, agentTitle, agentStatus, workspaceId, workspaceTitle: workspaces.find(item => item.id === workspaceId)?.title ?? null, projectTitle: workspaces.find(item => item.id === workspaceId)?.projectTitle ?? null, openable: true, ...extra });
+const agentPorts = [
+  port(3000, "node", "前端开发 Agent", "running", "local", "ws-demo"),
+  port(6006, "node", "组件库 Agent", "closed", "all", "ws-demo"),
+  port(8000, "python3", "数据接口 Agent", "idle", "address", "ws-demo", { address: "192.0.2.10" }),
+  port(4321, "node", "浏览器验收 Agent", "running", "local", "ws-review"),
+];
+function portsReply(input) {
+  if (scenario === "noports") return { supported: false, items: [], others: [], scannedAt: Date.now(), revision: "unsupported" };
+  const body = { supported: true, items: agentPorts.filter(item => item.workspaceId === input.workspaceId), others: agentPorts.filter(item => item.workspaceId !== input.workspaceId), partial: false, uncertain: false, failed: false };
+  const revision = hash(stable(body));
+  return input.revision === revision ? { supported: true, unchanged: true, revision, scannedAt: Date.now() } : { ...body, revision, scannedAt: Date.now() };
+}
 const services = { "ws-demo": [{ name: "web", port: 5173, url: "http://127.0.0.1:5173/", running: true, health: "healthy" }, { name: "api", port: 8787, url: "http://127.0.0.1:8787/", running: true, health: "unhealthy" }, { name: "storybook", port: null, url: null, running: false, health: null }] };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const latency = scenario === "slow" ? 900 : 60;
@@ -93,6 +108,7 @@ function act(workspaceId, action, target) {
   if (!["mode", "stop", "restart", "settings", "cleanup", "handleDialog"].includes(action.kind) && !fresh) throw new Error("画面已变化，这次操作未执行，已刷新当前页面。");
   const before = scope(session);
   if (["navigate", "back", "forward", "reload", "demo", "newTab", "tab", "closeTab", "devicePreset", "viewport"].includes(action.kind)) newDocument(workspaceId);
+  if (action.kind === "openPort") { const listed = agentPorts.find(item => item.port === action.port && item.openable); if (!listed) throw new Error(`端口 ${action.port} 不在 Agent 开的端口列表里，没有打开。请刷新列表再试。`); return act(workspaceId, { kind: "newTab", url: `http://127.0.0.1:${action.port}/` }, target); }
   switch (action.kind) {
     case "mode": session.mode = action.mode; break;
     case "navigate": { const url = /^[a-z]+:/i.test(action.url) ? action.url : `https://${action.url}`; const page = pageFor(url); Object.assign(current, { url, title: page === "docs" ? `${new URL(url).hostname} · 网页` : pages[page].title, page }); break; }
@@ -149,6 +165,7 @@ export async function rpc(name, input) {
     case "browser.orphan.stop": return { stopped: true };
     case "browser.orphan.delete": (globalThis.__deletedProfiles ??= []).push(input.workspaceId); return { deleted: true };
     case "browser.services": return { items: services[input.workspaceId] ?? [] };
+    case "browser.ports": return portsReply(input);
     case "browser.input": return liveInput(input);
     case "browser.options": return { workspaces: scenario === "none" ? [] : workspaces, profiles: [{ id: "claude-browser", name: "Claude · 浏览器", provider: "claude", model: "opus" }, { id: "codex-browser", name: "Codex · 浏览器", provider: "codex", model: null }] };
     case "browser.overview": {
@@ -192,6 +209,8 @@ export async function rpc(name, input) {
 
 // Explicit synthetic control for race and lifecycle UI tests; never connects to a daemon.
 globalThis.__browserFixture = {
+  // An Agent starts listening while a sheet is open: the row appears on the next poll and flashes once.
+  addPort(value = 5174, workspaceId = "ws-demo") { agentPorts.push(port(value, "node", "新服务 Agent", "running", "local", workspaceId)); },
   switchTab(workspaceId) { const session = sessions.get(workspaceId); session.tabs.forEach(item => { item.active = !item.active; }); newDocument(workspaceId); endInput(workspaceId); },
   // Another device or the Agent loads a new document in the same tab.
   pageChanged(workspaceId) { const session = sessions.get(workspaceId), current = active(session); Object.assign(current, { url: "https://docs.example.com/guide/next-steps", title: "下一步 · 文档", page: "docs" }); newDocument(workspaceId); endInput(workspaceId); },

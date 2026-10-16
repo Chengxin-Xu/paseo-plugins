@@ -41,6 +41,10 @@ addDefaults({ kitDeferredServer });
  *   until the send returns, so two ledgers cannot both use one idle moment; a message sent outside the plugins in
  *   those few milliseconds can still be replaced.
  * - Archived or deleted agents drop their messages; a message waits at most a day. Receipts stay a week.
+ * - A queued message may name a time (`notBefore`, UTC ms, at most a week ahead): it is not delivered before then, and from
+ *   then on it goes out like any queued message (idle, nothing pending, its guard, one copy, held when the conversation moved
+ *   on); its day of waiting counts from that time. It is kept in the file, so a reload or restart keeps the schedule. A ledger
+ *   without such messages behaves exactly as before.
  * - Calls that answer an RPC return within the RPC limit; a slow send finishes in the background.
  */
 
@@ -60,6 +64,8 @@ export interface DeferredView {
   at: number;
   state: DeferredState;
   note: string;
+  /** A scheduled message's time (UTC ms): not delivered before it. Only on messages queued with one. */
+  notBefore?: number;
 }
 
 /** The parts of a Paseo 0.11 agent snapshot (`refresh()`) this reads. */
@@ -143,6 +149,8 @@ export interface DeferredSendInput {
   group?: string | null;
   /** The plugin's own condition, checked by its `guard` right before the message goes out. */
   guard?: DeferredGuard | null;
+  /** Queueing only: not before this time (UTC ms, at most `MAX_SCHEDULE_MS` ahead); a time already past queues it as usual. */
+  notBefore?: number | null;
 }
 
 /**
@@ -192,6 +200,8 @@ interface Message {
   group: string | null;
   /** The plugin's own condition (`DeferredSendInput.guard`); null for none. */
   guard: Record<string, string | null> | null;
+  /** Scheduled (`DeferredSendInput.notBefore`): not delivered before this time; absent on every other message. */
+  notBefore?: number;
 }
 
 interface Receipt {
@@ -265,13 +275,26 @@ const ATTEMPT_MARGIN_MS = 60_000;
 const MAX_PRIOR_IDS = 5;
 /** Named values a guard keeps, and how long each name and value may be. */
 const MAX_GUARD = 8;
+/** How far ahead a message may be scheduled (`notBefore`); a minute more is allowed for clocks that disagree. */
+export const MAX_SCHEDULE_MS = 7 * DAY;
+const SCHEDULE_SLACK_MS = 60_000;
+/** A wake for a scheduled message lands this much after its time: a timer may fire a little early by the wall clock. */
+const WAKE_MARGIN_MS = 25;
+/** Not yet due: scheduled for a time still ahead. */
+const waiting = (message: Pick<Message, "notBefore">, now: number) => message.notBefore !== undefined && message.notBefore > now;
+/** A message's day of waiting counts from its scheduled time, else from when it was queued. */
+const waitsFrom = (message: Pick<Message, "createdAt" | "notBefore">) => Math.max(message.createdAt, message.notBefore ?? message.createdAt);
 
 // Notes are read when written, in the plugin's language then (`kitDeferredServer`); a stored note keeps its language.
 const note = (name: string, params?: Params) => t(`kitDeferredServer.${name}`, params);
 const NOTES = {
   get queued() { return note("queued"); },
+  get scheduled() { return note("scheduled"); },
+  get expiredScheduled() { return note("expiredScheduled"); },
   get sending() { return note("sending"); },
   get movedOn() { return note("movedOn"); },
+  get movedOnScheduled() { return note("movedOnScheduled"); },
+  get unsureScheduled() { return note("unsureScheduled"); },
   get unsure() { return note("unsure"); },
   get unknown() { return note("unknown"); },
   failed: (error: string) => note("failed", { error }),
@@ -301,6 +324,9 @@ const NOTES = {
   get lockBusy() { return note("lockBusy"); },
   get lockHeld() { return note("lockHeld"); },
 };
+
+/** Why an expired message expired: a scheduled one could not go out within a day of its time. */
+const expiryNote = (message: Pick<Message, "notBefore">) => message.notBefore !== undefined ? NOTES.expiredScheduled : undefined;
 
 class OutcomeUnknown extends Error {}
 
@@ -425,6 +451,8 @@ function normalize(value: unknown): Store {
     lastAttemptAt: typeof entry.lastAttemptAt === "number" ? entry.lastAttemptAt : typeof entry.sendingAt === "number" ? entry.sendingAt : null,
     group: typeof entry.group === "string" ? groupOf(entry.group) : null,
     guard: guardOf(entry.guard),
+    // Only scheduled messages carry the key: every other message reads and writes as before.
+    ...(typeof entry.notBefore === "number" && Number.isFinite(entry.notBefore) ? { notBefore: entry.notBefore } : {}),
   }));
   const receipts = raw.receipts.filter(isReceipt).map((entry): Receipt => ({
     ...entry,
@@ -586,13 +614,18 @@ export class DeferredSend {
    * client follows the outcome with `list()`. Repeating a message id returns its state; queueing content that is
    * already on its way (same agent and key), or a message whose question (`group`) is answered, returns that message
    * instead, under its own id. A `guard` that no longer holds drops it (未发送); one the plugin cannot check is held.
+   * `notBefore` schedules it: it waits for that time first (at most `MAX_SCHEDULE_MS` ahead; a time already past is now).
    */
-  async enqueue(input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "key" | "group" | "guard">, paseo?: DeferredPaseo | null): Promise<DeferredView> {
+  async enqueue(input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "key" | "group" | "guard" | "notBefore">, paseo?: DeferredPaseo | null): Promise<DeferredView> {
     this.use(paseo);
     const api = paseo ?? this.paseo;
     if (!api) throw new Error(note("notConnected"));
     if (!input.text.trim()) throw new Error(note("empty"));
     if (input.text.length > MAX_DEFERRED_TEXT) throw new Error(note("tooLongToQueue"));
+    if (input.notBefore !== undefined && input.notBefore !== null) {
+      if (!Number.isFinite(input.notBefore)) throw new Error(note("badSchedule"));
+      if (input.notBefore > this.now() + MAX_SCHEDULE_MS + SCHEDULE_SLACK_MS) throw new Error(note("tooFarAhead"));
+    }
     const key = keyOf(input.messageId, input.text, input.key), group = groupOf(input.group);
     const deadline = Date.now() + this.rpcBudgetMs;
     for (;;) {
@@ -607,7 +640,7 @@ export class DeferredSend {
     }
   }
 
-  private async enqueueClaimed(api: DeferredPaseo, input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "guard">, key: string, group: string | null, deadline: number): Promise<DeferredView> {
+  private async enqueueClaimed(api: DeferredPaseo, input: Pick<DeferredSendInput, "agentId" | "text" | "messageId" | "source" | "guard" | "notBefore">, key: string, group: string | null, deadline: number): Promise<DeferredView> {
     const agent = await this.snapshot(api, input.agentId, deadline);
     if (!agent || agent.archivedAt) throw new Error(note("goneCannotQueue"));
     // A guard is asked now as well: a message the agent has already moved past is not queued to go out later, and one the
@@ -640,13 +673,17 @@ export class DeferredSend {
         messageId: input.messageId, agentId: input.agentId, key, source: (input.source ?? "").slice(0, 200), text: input.text,
         createdAt: this.now(), baseline: agent.lastUserMessageAt ?? null, held: unknown, heldAt: unknown ? this.now() : null, attempts: 0, nextAt: 0, sendingAt: null,
         direct: false, behavior: "steer", outcome: null, sendId: input.messageId, priorIds: [], firstAttemptAt: null, lastAttemptAt: null, group, guard,
+        // A time already past is no schedule: the message is due now, like any queued one.
+        ...(typeof input.notBefore === "number" && input.notBefore > this.now() ? { notBefore: input.notBefore } : {}),
       };
       store.messages.push(message);
       return message;
     });
     if (!("text" in queued)) return queued;
-    if (!busy(agent)) await briefly(this.deliver(queued.agentId), Math.min(this.answerWaitMs, Math.max(0, deadline - Date.now())));
-    this.schedule(this.pollMs);
+    const scheduled = waiting(queued, this.now());
+    if (!busy(agent) && !scheduled) await briefly(this.deliver(queued.agentId), Math.min(this.answerWaitMs, Math.max(0, deadline - Date.now())));
+    // A scheduled message is looked at when it is due, unless an earlier look is set already (that one sets the next).
+    this.schedule(scheduled ? Math.min(this.pollMs, queued.notBefore! - this.now() + WAKE_MARGIN_MS) : this.pollMs);
     return (await this.view(input.messageId)) ?? this.messageView(queued);
   }
 
@@ -679,17 +716,18 @@ export class DeferredSend {
    * message that arrives after this OK holds it again. A message that was sent before (a lost reply, a failed send) is
    * looked for in the agent's timeline first: found, it is marked sent; shown never to have arrived, it goes out again
    * under a new id (Paseo would refuse the old one); otherwise it stays held and says why. A message older than a day
-   * expires instead.
+   * expires instead. A scheduled message keeps its time unless `now` (立即发送): then its time becomes now, it goes as soon as
+   * the agent is free and its day of waiting starts again from now.
    */
-  async resume(messageId: string, paseo?: DeferredPaseo | null): Promise<DeferredView | null> {
+  async resume(messageId: string, paseo?: DeferredPaseo | null, options: { now?: boolean } = {}): Promise<DeferredView | null> {
     this.use(paseo);
     const api = paseo ?? this.paseo;
     const message = (await this.read()).messages.find((entry) => entry.messageId === messageId);
     if (!message || this.sendingIds.has(messageId)) return this.view(messageId);
-    if (this.now() - message.createdAt > DAY) {
+    if (this.now() - waitsFrom(message) > DAY) {
       await this.change((store) => {
         const current = store.messages.find((entry) => entry.messageId === messageId);
-        if (current) this.settle(store, current, current.outcome === "unknown" ? "maybe-sent" : "expired", current.outcome === "unknown" ? NOTES["maybe-sent"] : undefined);
+        if (current) this.settle(store, current, current.outcome === "unknown" ? "maybe-sent" : "expired", current.outcome === "unknown" ? NOTES["maybe-sent"] : expiryNote(current));
       });
       return this.view(messageId);
     }
@@ -736,8 +774,11 @@ export class DeferredSend {
       if (!current || this.sendingIds.has(messageId)) return;
       const fresh = sendId !== current.sendId ? { sendId, priorIds: [...current.priorIds, current.sendId].slice(-MAX_PRIOR_IDS) } : {};
       Object.assign(current, { held: null, heldAt: null, attempts: 0, nextAt: 0, sendingAt: null, baseline: agent.lastUserMessageAt ?? null, direct: false, outcome: null, ...fresh });
+      // 立即发送: due from now, which also starts its day of waiting now (a time days ahead, queued days ago, would
+      // otherwise count from the queueing and expire unsent while the agent is busy). Its id and guard stay.
+      if (options.now && current.notBefore !== undefined) current.notBefore = this.now();
     });
-    if (!busy(agent)) await briefly(this.deliver(message.agentId), Math.min(this.answerWaitMs, Math.max(0, deadline - Date.now())));
+    if (!busy(agent) && (options.now || !waiting(message, this.now()))) await briefly(this.deliver(message.agentId), Math.min(this.answerWaitMs, Math.max(0, deadline - Date.now())));
     this.schedule(this.pollMs);
     return this.view(messageId);
   }
@@ -747,16 +788,16 @@ export class DeferredSend {
     if (this.stopped || !this.paseo) return;
     const now = this.now();
     let store = await this.read();
-    if (store.messages.some((entry) => now - entry.createdAt > DAY)) {
+    if (store.messages.some((entry) => now - waitsFrom(entry) > DAY)) {
       store = await this.change((current) => {
         for (const message of [...current.messages]) {
-          if (now - message.createdAt <= DAY || this.sendingIds.has(message.messageId)) continue;
-          this.settle(current, message, message.outcome === "unknown" ? "maybe-sent" : "expired", message.outcome === "unknown" ? NOTES["maybe-sent"] : undefined);
+          if (now - waitsFrom(message) <= DAY || this.sendingIds.has(message.messageId)) continue;
+          this.settle(current, message, message.outcome === "unknown" ? "maybe-sent" : "expired", message.outcome === "unknown" ? NOTES["maybe-sent"] : expiryNote(message));
         }
         return current;
       });
     }
-    const agents = new Set(store.messages.filter((entry) => (!agentId || entry.agentId === agentId) && !entry.held && entry.nextAt <= now).map((entry) => entry.agentId));
+    const agents = new Set(store.messages.filter((entry) => (!agentId || entry.agentId === agentId) && !entry.held && entry.nextAt <= now && !waiting(entry, now)).map((entry) => entry.agentId));
     for (const id of agents) await this.deliver(id);
   }
 
@@ -894,7 +935,8 @@ export class DeferredSend {
   private async deliverNow(agentId: string): Promise<void> {
     const paseo = this.paseo;
     if (!paseo || this.stopped) return;
-    const head = (await this.read()).messages.find((entry) => entry.agentId === agentId && !entry.held);
+    // A scheduled message whose time has not come waits; the agent's next message may go before it.
+    const head = (await this.read()).messages.find((entry) => entry.agentId === agentId && !entry.held && !waiting(entry, this.now()));
     if (!head || head.nextAt > this.now()) return;
     if (head.direct) {
       // A send now whose process ended before its outcome was written (sends now run before any delivery here): it
@@ -946,14 +988,17 @@ export class DeferredSend {
       // `undo` keeps the earlier claim, if any, so a stop before the send can undo only this one.
       claimed = await this.change((store) => {
         const message = store.messages.find((entry) => entry.messageId === head.messageId);
-        if (!message || message.held || message.direct) return null;
+        if (!message || message.held || message.direct || waiting(message, claimedAt)) return null;
         if (message.sendingAt === null && current !== message.baseline) {
           if (own !== true) {
             // Someone else spoke since (or it cannot be told): hold every message of this agent queued before that,
             // each for its own OK.
             for (const other of store.messages) {
-              if (other.agentId !== agentId || other.held || other.direct || other.sendingAt !== null || other.baseline === current) continue;
-              Object.assign(other, { held: own === false ? NOTES.movedOn : NOTES.unsure, heldAt: this.now() });
+              // A scheduled message whose time has not come is judged when it is due.
+              if (other.agentId !== agentId || other.held || other.direct || other.sendingAt !== null || other.baseline === current || waiting(other, claimedAt)) continue;
+              // A scheduled one says so: the user may have spoken to the agent since without thinking of it.
+              const scheduled = other.notBefore !== undefined;
+              Object.assign(other, { held: own === false ? (scheduled ? NOTES.movedOnScheduled : NOTES.movedOn) : scheduled ? NOTES.unsureScheduled : NOTES.unsure, heldAt: this.now() });
             }
             return null;
           }
@@ -1370,7 +1415,8 @@ export class DeferredSend {
       messageId: message.messageId, agentId: message.agentId, key: message.key, source: message.source, preview: preview(message.text), createdAt: message.createdAt,
       at: message.heldAt ?? message.sendingAt ?? message.createdAt,
       state: message.held ? "held" : sending ? "sending" : "queued",
-      note: message.held ?? (sending ? NOTES.sending : NOTES.queued),
+      note: message.held ?? (sending ? NOTES.sending : waiting(message, this.now()) ? NOTES.scheduled : NOTES.queued),
+      ...(message.notBefore !== undefined ? { notBefore: message.notBefore } : {}),
     };
   }
 
@@ -1395,10 +1441,14 @@ export class DeferredSend {
     } catch (error) {
       this.log("delivery failed", error);
     }
-    // Held messages only need the slow look that lets them expire or finds a lost send arrived.
-    const store = await this.read().catch(() => null);
-    if (!store || store.messages.some((entry) => !entry.held)) this.schedule(this.pollMs);
-    else if (store.messages.length) this.schedule(HELD_POLL_MS);
+    // Held messages only need the slow look that lets them expire or finds a lost send arrived; a scheduled one is looked at
+    // again when it is due (at least once a minute, so the held ones keep their look).
+    const store = await this.read().catch(() => null), now = this.now();
+    if (!store || store.messages.some((entry) => !entry.held && !waiting(entry, now))) this.schedule(this.pollMs);
+    else if (store.messages.length) {
+      const due = Math.min(...store.messages.filter((entry) => !entry.held && entry.notBefore !== undefined).map((entry) => entry.notBefore! - now));
+      this.schedule(Math.max(0, Math.min(HELD_POLL_MS, Number.isFinite(due) ? due + WAKE_MARGIN_MS : HELD_POLL_MS)));
+    }
   }
 
   private async read(): Promise<Store> {

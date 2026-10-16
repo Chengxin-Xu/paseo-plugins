@@ -2,12 +2,12 @@ import { translator } from '../shared/i18n';
 import { t } from '../shared/text';
 import { openExternalUrl, useRpc, type PluginSurfaceProps, type PluginWorkspacePanelProps } from '@getpaseo/plugin/client';
 import { Icon, useToast } from '@getpaseo/plugin/client/react-native';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Image, KeyboardAvoidingView, PanResponder, PixelRatio, Platform, Pressable, Text, View, type GestureResponderEvent } from 'react-native';
 import {
-  actionRpc, agentRpc, deleteOrphanRpc, diagnosticsRpc, frameRpc, inputRpc, optionsRpc, orphanRpc, servicesRpc, stopOrphanRpc, readPageRpc, startRpc, stateRpc,
-  type BrowserAction, type BrowserInputEvent, type BrowserService, type BrowserTarget, type BrowserFrameQuality as FrameQuality, type BrowserFrameResult, type BrowserOverviewItem, type BrowserProfile, type BrowserReading, type BrowserSession, type BrowserWorkspace,
+  actionRpc, agentRpc, deleteOrphanRpc, diagnosticsRpc, frameRpc, inputRpc, optionsRpc, orphanRpc, portsRpc, servicesRpc, stopOrphanRpc, readPageRpc, startRpc, stateRpc,
+  type BrowserAction, type BrowserAgentPort, type BrowserInputEvent, type BrowserService, type BrowserTarget, type BrowserFrameQuality as FrameQuality, type BrowserFrameResult, type BrowserOverviewItem, type BrowserProfile, type BrowserReading, type BrowserSession, type BrowserWorkspace,
 } from '../shared/browser';
 import { bindInput, contextHolds, editDraft, emptyDraft, followBatch, frameInScope, frameMatchesSession, sameTarget, type InputRequest } from './input-target';
 import { dropAll, droppedMessage, enqueueInput, nextInputSeq, settleBatch, splitText, takeBatch, type QueuedInput } from './input-queue';
@@ -24,6 +24,8 @@ import { deviceOpenableUrl } from './local-open';
 import { ActionMenu, Badge, Banner, BottomBar, Button, IconButton, MetaLine, ProjectMark, StatusDot, fontSize, hairline, hue, radius, space, toneColor, useCompactLayout, withAlpha, type MenuAction, type Tone } from './kit';
 import { StateGlyph } from './looks';
 import { Ping } from './motion';
+import { PORTS_POLL_MS, mergePorts, portsRequest, type PortsData } from './agent-ports-model';
+import type { AgentPortsView } from './agent-ports';
 import { ActivitySheet, AgentSheet, DialogSheet, OrphansSheet, DiagnosticsSheet, PageTabsSheet, ReadingSheet, ResourcesSheet, ServicesSheet, StopSheet, TakeoverSheet, ViewSheet, WorkspacePickerSheet, qualityLabel, type FrameMetrics, type TakeoverAction } from './tools';
 
 type Theme = PluginSurfaceProps['theme'];
@@ -159,6 +161,8 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
   const deleteOrphan = useRpc(deleteOrphanRpc);
   const sendInput = useRpc(inputRpc);
   const listServices = useRpc(servicesRpc);
+  const listPorts = useRpc(portsRpc);
+  const queryClient = useQueryClient();
   const toast = useToast();
   const [session, setSession] = useState<BrowserSession | null>(null);
   const [displayedId, setDisplayedId] = useState<string | null>(null);
@@ -195,6 +199,12 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
   const [takeover, setTakeover] = useState<{ then: TakeoverAction; target: BrowserTarget | null; editable: boolean } | null>(null);
   const orphans = useQuery({ queryKey: ['server-browser', host.id, 'orphans', translator().language, translator().hash], queryFn: () => listOrphans({}), enabled: sheet === 'orphans' && appActive, staleTime: 0, gcTime: 0, retry: false, refetchOnWindowFocus: false });
   const services = useQuery({ queryKey: ['server-browser', host.id, 'services', workspaceId, translator().language, translator().hash], queryFn: () => listServices({ workspaceId }), enabled: (sheet === 'services' || sheet === 'tabs') && appActive, staleTime: 5000, gcTime: 30_000, retry: false, refetchOnWindowFocus: false });
+  // Ports Agents opened: polled only while a sheet that shows them is open and the app is in front; an unchanged list
+  // costs a revision check. A host that cannot list ports (not Linux) is asked once per opening.
+  const portsKey = useMemo(() => ['server-browser', host.id, 'ports', workspaceId], [host.id, workspaceId]);
+  const ports = useQuery({ queryKey: portsKey, queryFn: async () => { const previous = queryClient.getQueryData<PortsData>(portsKey); return mergePorts(previous, await listPorts(portsRequest(workspaceId, previous))); },
+    enabled: (sheet === 'services' || sheet === 'tabs') && appActive, refetchInterval: (query) => query.state.data?.supported === false ? false : PORTS_POLL_MS, refetchIntervalInBackground: false,
+    staleTime: 2000, gcTime: 30_000, retry: false, refetchOnWindowFocus: false });
   const [frameNode, setFrameNode] = useState<unknown>(null);
   // The last picture whose image finished loading: stays under the next one until it loads, so typing never flashes blank.
   const [loadedFrame, setLoadedFrame] = useState<Frame | null>(null);
@@ -392,7 +402,7 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
     actionBusyRef.current = true;
     pacingRef.current = { ...pacingRef.current, unchanged: 0 };
     setBusy(label); setBusyKind(action.kind === 'takeover' ? 'takeover' : action.kind === 'mode' ? action.mode : 'other'); setError(null);
-    const invalidates = ['navigate', 'back', 'forward', 'reload', 'demo', 'stop', 'newTab', 'tab', 'closeTab', 'viewport', 'devicePreset', 'restart', 'fitWidth', 'takeover'].includes(action.kind);
+    const invalidates = ['navigate', 'back', 'forward', 'reload', 'demo', 'stop', 'newTab', 'openPort', 'tab', 'closeTab', 'viewport', 'devicePreset', 'restart', 'fitWidth', 'takeover'].includes(action.kind);
     const addressed = action.kind === 'navigate' || (action.kind === 'takeover' && action.then.kind === 'navigate');
     if (invalidates) { clearFrame(); setReading(null); setPageChecks(null); }
     try {
@@ -656,6 +666,13 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
     setSheet(null);
     void perform({ kind: 'newTab', url: service.url }, t("browserUi.opening", { value1: service.name })).then((done) => { if (done) toast.show(t("browserUi.openedInANewTab", { value1: service.name }), { variant: 'success' }); });
   }
+  /** Only the port goes to the server, which opens the address it found for it (and nothing that is not in its list). */
+  function openPort(port: BrowserAgentPort) {
+    if (!port.openable) return;
+    setSheet(null);
+    void perform({ kind: 'openPort', port: port.port }, t('agentPorts.opening', { port: port.port })).then((done) => { if (done) toast.show(t('agentPorts.opened', { port: port.port }), { variant: 'success' }); });
+  }
+  const portsView = (disabled: boolean): AgentPortsView => ({ data: ports.data, error: ports.error ? errorMessage(ports.error) : null, disabled, onOpen: openPort });
   async function sendText() {
     const value = text;
     if (!value || !canType) return;
@@ -700,7 +717,7 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
     menu.push({ key: 'takeover-reload', label: t("browserUi.takeManualControlAndReload"), icon: 'RotateCw', tone: controlLooks.manual.hue, disabled: !!busy, onPress: () => navigateOrTakeOver({ kind: 'reload' }, t("browserUi.reloading")) });
     menu.push({ key: 'takeover-open', label: t("browserUi.takeManualControlAndOpenAUrl"), icon: 'Globe', tone: controlLooks.manual.hue, disabled: !!busy, onPress: () => navigateOrTakeOver({ kind: 'navigate', url: '' }, t("browserUi.openingThePage"), undefined, true) });
   }
-  if (hasBrowser) menu.push({ key: 'services', label: t("browserUi.workspaceServices"), icon: 'Server', tone: 'green', hint: t("browserUi.openThisWorkspaceSDevelopmentServiceIn"), onPress: () => setSheet('services') });
+  if (hasBrowser) menu.push({ key: 'services', label: t('agentPorts.menuLabel'), icon: 'Server', tone: 'green', hint: t('agentPorts.menuHint'), onPress: () => setSheet('services') });
   if (takenOver) {
     menu.push({ key: 'match', label: t("browserUi.matchWindow"), icon: 'Scan', tone: 'teal', disabled: !manual, onPress: () => { void matchWindow(); } });
     menu.push({ key: 'fit', label: t("browserUi.fullWidth"), icon: 'Columns2', tone: 'teal', disabled: !manual, onPress: () => { void perform({ kind: 'fitWidth' }, t("browserUi.fittingThePageWidth")); } });
@@ -836,9 +853,11 @@ function BrowserScreen({ theme, host, layout, navigation, workspaceId, workspace
       onSelect={(tabId) => { setSheet(null); if (!session.tabs.find((tab) => tab.id === tabId)?.active) void perform({ kind: 'tab', tabId }, t("browserUi.switchingTabs")); }}
       onCloseTab={(tabId) => { void perform({ kind: 'closeTab', tabId }, t("browserUi.closingTheTab")); }} onPin={(tabId, pinned) => { void perform({ kind: 'pin', tabId, pinned }); }}
       onNewTab={() => { setSheet(null); void perform({ kind: 'newTab' }, t("browserUi.creatingATab")); }}
-      services={{ items: services.data?.items ?? [], loading: services.isFetching, error: services.error ? errorMessage(services.error) : null, onOpen: openService }} /> : null}
+      services={{ items: services.data?.items ?? [], loading: services.isFetching, error: services.error ? errorMessage(services.error) : null, onOpen: openService }}
+      ports={portsView(!manual || !frameLive || session.tabs.length >= (session.settings?.maxTabs || 20))} /> : null}
     {present('services') ? <ServicesSheet theme={theme} open={sheet === 'services'} onClose={() => setSheet((current) => current === 'services' ? null : current)} items={services.data?.items ?? []} loading={services.isFetching} error={services.error ? errorMessage(services.error) : null}
-      manual={!!manual && frameLive && (session?.tabs.length ?? 0) < (session?.settings?.maxTabs || 20)} agentMode={session?.mode !== 'manual'} onOpen={openService} onRefresh={() => { void services.refetch(); }} /> : null}
+      manual={!!manual && frameLive && (session?.tabs.length ?? 0) < (session?.settings?.maxTabs || 20)} agentMode={session?.mode !== 'manual'} onOpen={openService} onRefresh={() => { void services.refetch(); void ports.refetch(); }}
+      ports={portsView(!(manual && frameLive && (session?.tabs.length ?? 0) < (session?.settings?.maxTabs || 20)))} /> : null}
     {takeover && present('takeover') ? <TakeoverSheet theme={theme} open={sheet === 'takeover'} onClose={() => setSheet((current) => current === 'takeover' ? null : current)} request={takeover.then} editable={takeover.editable} stale={takeoverStale} busy={!!busy && busyKind === 'takeover'} onConfirm={confirmTakeover} /> : null}
     {present('view') ? <ViewSheet theme={theme} open={sheet === 'view'} onClose={() => setSheet((current) => current === 'view' ? null : current)} quality={quality} onQuality={selectQuality} manual={!!manual && frameLive} agentMode={session?.mode !== 'manual'}
       onMatch={() => { void matchWindow(); }} onFitWidth={() => { setSheet(null); void perform({ kind: 'fitWidth' }, t("browserUi.fittingThePageWidth")); }} onPreset={(preset) => { setSheet(null); void perform({ kind: 'devicePreset', preset }, t("browserUi.switchingDeviceEmulation")); }}

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,5 +84,34 @@ test("the overview follows the registry's format", () => {
   assert.ok(statSync(join(root, "LICENSE")).size > 0);
   assert.doesNotMatch(overview, /—/, "no em dashes");
   assert.doesNotMatch(overview, /paseo plugin (add|install)|npm (install|i) /i, "no install commands");
+  assert.doesNotMatch(overview, /contribut/i, "no contributing section");
   assert.match(overview, /not affiliated with or endorsed by Anthropic/);
+  assert.ok(overview.split(/\s+/).filter(Boolean).length <= 1000, "at most 1000 words");
+});
+
+// The live install keeps the id claude-theme; the public listing is terracotta-themes. The id names the folder users
+// put their languages in, so the public export swaps in the file that says so (and the exported tree, which has no
+// oss-export.json, checks that the swap happened).
+test("the plugin id file matches the id the manifest publishes", () => {
+  const idIn = (path: string) => /export const PLUGIN_ID = "([a-z][a-z0-9-]*)";/.exec(readFileSync(join(root, path), "utf8"))?.[1];
+  assert.equal(idIn("shared/plugin-id.ts"), manifest.id);
+  if (ossExport) {
+    assert.deepEqual(ossExport.replace, { "shared/plugin-id.ts": "shared/plugin-id.oss.ts" });
+    assert.equal(idIn("shared/plugin-id.oss.ts"), ossExport.manifest.id);
+  }
+});
+
+// The settings screens are a lazy chunk built by the repository's `npm run build:chunks` and shipped prebuilt, so a
+// Git install needs no build step; `npm run check:chunks` there rebuilds and compares.
+test("the prebuilt screens chunk matches its manifest", () => {
+  const code = readFileSync(join(root, "server/generated/ui-chunk.txt"), "utf8");
+  const source = readFileSync(join(root, "shared/generated/ui-chunk-manifest.ts"), "utf8");
+  const chunk = JSON.parse(/export const UI_CHUNK = (\{.*\}) as const;/.exec(source)![1]!);
+  assert.deepEqual(chunk, {
+    name: "ui",
+    hash: createHash("sha256").update(code).digest("hex").slice(0, 16),
+    api: 1,
+    bytes: Buffer.byteLength(code),
+  });
+  assert.deepEqual(json("client-chunks.json"), [{ name: "ui", entry: "ui-chunk.client.tsx", manifest: "UI_CHUNK", api: 1 }]);
 });

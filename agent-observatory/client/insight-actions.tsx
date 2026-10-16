@@ -20,6 +20,7 @@ import { isSlashCommand, type Consent, type SendPlan } from "./send-plan";
 import { onItsWay, type DeferredView } from "../shared/deferred-rpc";
 import { DeferredList, useDeferredQueue } from "./deferred";
 import { SOURCES, ledgerNotice, messageKey, onItsWayLabel, rememberUnanswered, requestId, settleRequest, unansweredId } from "./deferred-state";
+import { SchedulePicker, scheduleWhen } from "./schedule-send";
 
 /**
  * How running turns take a message on this host: the providers that steer (the built-ins plus custom ids extending them),
@@ -76,9 +77,11 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
   const [text, setText] = useState(""), [busy, setBusy] = useState(false), [problem, setProblem] = useState<Problem | null>(null);
   // The plan for the Agent's state when the sheet opened, for its note; the server plans again when it sends.
   const [check, setCheck] = useState<SendCheck | null>(null), [confirming, setConfirming] = useState<SendConfirmation | null>(null);
+  // 定时发 (2.17): the time picker is open.
+  const [scheduling, setScheduling] = useState(false);
   // The message being sent: every try of this text goes out with its id; another text is another message.
   const message = useRef<OutgoingMessage | null>(null), slash = isSlashCommand(text), body = text.trim(), key = messageKey(SOURCES.finding, body);
-  useEffect(() => { if (open && finding) { setText(findingMessage(finding)); setProblem(null); setConfirming(null); message.current = null; } }, [open, finding?.id]);
+  useEffect(() => { if (open && finding) { setText(findingMessage(finding)); setProblem(null); setConfirming(null); setScheduling(false); message.current = null; } }, [open, finding?.id]);
   useEffect(() => {
     if (!open || !capabilities) return;
     let live = true;
@@ -173,6 +176,26 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
       lost(next, reason);
     } finally { setBusy(false); }
   };
+  // 定时发: queued for a time under the message's one id; from then on it goes as 「等这一轮结束再发」 does.
+  const schedule = async (at: number) => {
+    if (!body || busy) return;
+    const next = current();
+    if (taken(next)) { setConfirming(null); setScheduling(false); return; }
+    setBusy(true); setProblem(null);
+    try {
+      next.tried = true;
+      const view = await deferred.enqueue({ ...ledgerInput(next), notBefore: at });
+      settleRequest(agentId, next.key);
+      setConfirming(null); setScheduling(false);
+      if (view.messageId === next.messageId && view.state === "queued" && view.notBefore !== undefined) {
+        toast.show(t("alertsSchedule.scheduledMessage", { title: agentTitle, when: scheduleWhen(view.notBefore) }), { variant: "success" });
+        onClose();
+      } else answeredWith(next, view, t("coreInsightActions.sentTo", { value1: agentTitle }));
+    } catch (reason) {
+      setConfirming(null); setScheduling(false);
+      lost(next, reason);
+    } finally { setBusy(false); }
+  };
   const plan = confirming?.check.plan ?? check?.plan, offer = confirming?.offer;
   const locked = !!onWay || !!delivered;
   return <Sheet title={t("coreInsightActions.sendToThisAgent")} open={open} onClose={onClose}>
@@ -183,7 +206,10 @@ export function SendToAgentSheet({ theme, open, onClose, agentId, agentTitle, fi
     {problem ? <Banner theme={theme} tone={problem.tone} message={problem.message} /> : null}
     {delivered ? <Banner theme={theme} tone={delivered.state === "sent" ? "success" : "warning"} message={delivered.state === "sent" ? t("coreInsightActions.thisMessageHasBeenDeliveredEditingIts") : t("coreInsightActions.thisMessageMayAlreadyHaveArrivedOpen")} /> : null}
     <DeferredList theme={theme} queue={deferred} only={isFindingMessage} />
+    {scheduling && !locked ? <SchedulePicker theme={theme} busy={busy} onClose={() => setScheduling(false)} onPick={at => void schedule(at)} /> : null}
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, justifyContent: "flex-end" }}>
+      <Button theme={theme} tone="sky" variant={scheduling ? "secondary" : "ghost"} icon="AlarmClock" label={t("alertsSchedule.scheduleButton")} disabled={busy || !body || locked || plan?.kind === "unavailable"}
+        testID="send-schedule" onPress={() => setScheduling(!scheduling)} />
       {confirming ? <>
         <Button theme={theme} label={t("coreInsightActions.cancel")} onPress={() => setConfirming(null)} />
         {offer ? <Button theme={theme} tone="info" icon="Clock3" label={offer.label} busy={busy} disabled={busy || locked} onPress={() => void defer()} /> : null}

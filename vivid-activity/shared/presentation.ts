@@ -2095,6 +2095,10 @@ function splitDiffLines(text: string): { lines: string[]; hasTrailingNewline: bo
   return { lines: rawLines, hasTrailingNewline };
 }
 
+/** Above either bound the line diff falls back to "every old line removed, every new line added" (too coarse to count). */
+const LINE_DIFF_MAX_CELLS = 500_000;
+const LINE_DIFF_MAX_LINES = 2500;
+
 function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   if (oldText.length + newText.length > MAX_DIFF_CHARS) {
     return [
@@ -2145,7 +2149,7 @@ function computeLineDiff(oldText: string, newText: string): DiffLine[] {
   if (tM === 0 && tN === 0) return prefix.concat(suffix);
 
   // If the trimmed region is oversized, fall back to coarse replacement to protect memory
-  if (tM * tN > 500_000 || tM + tN > 2500) {
+  if (tM * tN > LINE_DIFF_MAX_CELLS || tM + tN > LINE_DIFF_MAX_LINES) {
     const fallback: DiffLine[] = [
       ...trimmedOld.map((text) => ({ kind: "remove" as const, text })),
       ...trimmedNew.map((text) => ({ kind: "add" as const, text })),
@@ -2323,6 +2327,48 @@ export function editDiffContentSize(detail: Extract<ToolCallDetail, { type: "edi
   const unifiedDiff = effectiveUnifiedDiff(detail);
   if (unifiedDiff !== undefined) return unifiedDiff.length;
   return (detail.oldString?.length ?? 0) + (detail.newString?.length ?? 0);
+}
+
+/**
+ * 0.8.0: whether Paseo cut this diff short (`truncateDiffText`: the first 12,000 characters, then a line
+ * `...[truncated N chars]`). Only the tail is looked at.
+ */
+export function isHostTruncatedDiff(text: string): boolean {
+  return /\n\.\.\.\[truncated \d{1,12} chars\]\s*$/.test(text.slice(-80));
+}
+
+/** 0.8.0: whether `computeLineDiff` would fall back to counting every changed-region line as removed and added. */
+export function isCoarseLineDiff(oldText: string, newText: string): boolean {
+  if (oldText.length + newText.length > MAX_DIFF_CHARS) return true;
+  const before = splitDiffLines(oldText).lines;
+  const after = splitDiffLines(newText).lines;
+  if (before.length === 0 || after.length === 0) return false;
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let oldEnd = before.length - 1;
+  let newEnd = after.length - 1;
+  while (oldEnd >= start && newEnd >= start && before[oldEnd] === after[newEnd]) {
+    oldEnd--;
+    newEnd--;
+  }
+  const removedSpan = Math.max(0, oldEnd - start + 1);
+  const addedSpan = Math.max(0, newEnd - start + 1);
+  return removedSpan * addedSpan > LINE_DIFF_MAX_CELLS || removedSpan + addedSpan > LINE_DIFF_MAX_LINES;
+}
+
+/**
+ * 0.8.0: an edit's lines added and removed when they are known exactly; null when its diff was cut short (by Paseo or
+ * the size cap) or is too big to compare line by line. Rows and fold summaries show no count then, rather than a wrong one.
+ */
+export function exactDiffStatsForDetail(detail: Extract<ToolCallDetail, { type: "edit" }>): DiffStats | null {
+  const unifiedDiff = effectiveUnifiedDiff(detail);
+  if (unifiedDiff !== undefined) {
+    return unifiedDiff.length > MAX_DIFF_CHARS || isHostTruncatedDiff(unifiedDiff) ? null : diffStatsFromUnifiedDiff(unifiedDiff);
+  }
+  if (!hasEditDiffContent(detail)) return null;
+  const oldString = detail.oldString ?? "";
+  const newString = detail.newString ?? "";
+  return isCoarseLineDiff(oldString, newString) ? null : diffStatsFromStrings(oldString, newString);
 }
 
 export function diffStatsForDetail(detail: Extract<ToolCallDetail, { type: "edit" }>): DiffStats {
@@ -2567,13 +2613,14 @@ export function resolveToolCallPresentation(
       };
     }
     case "edit": {
-      const editSize = editDiffContentSize(detail);
+      // 0.8.0: only exact counts (a diff Paseo cut short or one too big to compare shows none).
+      const diffStats = exactDiffStatsForDetail(detail);
       return {
         category: "file",
         icon: commonFileFields.fileIcon ?? "Pencil",
         label: "Edit",
         summary: compactText(detail.filePath),
-        ...(hasEditDiffContent(detail) && editSize <= MAX_DIFF_CHARS ? { diffStats: diffStatsForDetail(detail) } : {}),
+        ...(diffStats ? { diffStats } : {}),
         ...commonFileFields,
       };
     }

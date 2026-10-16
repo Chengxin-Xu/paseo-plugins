@@ -9,6 +9,7 @@ import {
   REASONING_KEY_SAMPLE,
   reasoningKey,
   roleSignature,
+  summarizeChanges,
   toolKey,
   type FoldOptions,
   type FoldRole,
@@ -61,10 +62,18 @@ describe("fold keys", () => {
   it("signs roles so a changed summary needs drawing again", () => {
     expect(roleSignature({ kind: "show" })).toBe("s");
     expect(roleSignature({ kind: "hide" })).toBe("h");
-    const summary = { segment: "4", mode: "done" as const, expanded: false, steps: 3, hidden: 3, counts: [["shell", 2], ["read", 1]] as Array<[LookKey, number]>, failed: 0, canceled: 0, durationMs: 4000 };
+    const summary = {
+      segment: "4", mode: "done" as const, expanded: false, steps: 3, hidden: 3, counts: [["shell", 2], ["read", 1]] as Array<[LookKey, number]>, failed: 0, canceled: 0, durationMs: 4000,
+      files: 1, added: 3, removed: 1, uncounted: 0, changed: [{ key: "t:e", file: "f1", added: 3, removed: 1 }], fails: [], turn: "turn-1", lastOfTurn: true,
+    };
     expect(roleSignature({ kind: "fold", summary })).toBe(roleSignature({ kind: "fold", summary: { ...summary } }));
     expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, expanded: true } }));
     expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, steps: 4, hidden: 4 } }));
+    // 0.8.0: what the run changed, its failed commands and its place in the turn are drawn too.
+    expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, added: 4, changed: [{ key: "t:e", file: "f1", added: 4, removed: 1 }] } }));
+    expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, fails: [{ key: "t:b", exit: 1 }] } }));
+    expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, lastOfTurn: false } }));
+    expect(roleSignature({ kind: "fold", summary })).not.toBe(roleSignature({ kind: "fold", summary: { ...summary, uncounted: 1 } }));
   });
 });
 
@@ -77,6 +86,7 @@ describe("planFolds: finished segments", () => {
     expect(summaryOf(roles, rows[1]!)).toEqual({
       segment: "2", mode: "done", expanded: false, steps: 3, hidden: 3,
       counts: [["think", 1], ["read", 1], ["shell", 1]], failed: 0, canceled: 0, durationMs: 3000,
+      files: 0, added: 0, removed: 0, uncounted: 0, changed: [], fails: [], turn: null, lastOfTurn: false,
     });
     expect(summaryOf(roles, rows[5]!).counts).toEqual([["shell", 2], ["edit", 1]]);
   });
@@ -320,6 +330,108 @@ describe("fold texts", () => {
     const summary = { mode: "done" as const, steps: 12, hidden: 12, expanded: false, counts: [["think", 2], ["shell", 5]] as Array<[string, number]>, failed: 1, canceled: 0, durationMs: 80_000 };
     expect(foldAccessibilityLabel(summary)).toBe("展开 12 步：思考 2、命令 5，失败 1，用时 1 分 20 秒");
     expect(foldAccessibilityLabel({ ...summary, mode: "earlier", hidden: 7, expanded: true, failed: 0 })).toBe("收起 前面 7 步：思考 2、命令 5");
+    // 0.8.0: what the run changed.
+    expect(foldAccessibilityLabel({ ...summary, files: 3, added: 12, removed: 4 })).toBe("展开 12 步：思考 2、命令 5，失败 1，改动 3 个文件 +12 −4，用时 1 分 20 秒");
+    // Changes whose lines are not known are said apart, never added in.
+    expect(foldAccessibilityLabel({ ...summary, files: 3, added: 12, removed: 4, uncounted: 2 })).toBe("展开 12 步：思考 2、命令 5，失败 1，改动 3 个文件 +12 −4，另有 2 处改动未计行数，用时 1 分 20 秒");
+    expect(foldAccessibilityLabel({ ...summary, failed: 0, uncounted: 1 })).toBe("展开 12 步：思考 2、命令 5，1 处改动未计行数，用时 1 分 20 秒");
+  });
+});
+
+describe("what a run changed (0.8.0)", () => {
+  const edit = (seq: number, changes: Array<[string, number, number]>, extra: Partial<IndexRow> = {}) =>
+    tool(seq, "completed", "edit", { changes: changes.map(([file, added, removed]) => ({ file, added, removed })), ...extra });
+  const step = (row: IndexRow) => ({ key: row.key!, row, status: row.status ?? "completed", look: row.look ?? "other", notice: Boolean(row.notice) });
+
+  it("adds up lines per file over several files, most changed first", () => {
+    const rows = [edit(1, [["fa", 3, 1]]), edit(2, [["fb", 10, 0], ["fc", 0, 2]]), edit(3, [["fa", 2, 2]])];
+    expect(summarizeChanges(rows.map(step))).toEqual({
+      files: 3, added: 15, removed: 5, uncounted: 0,
+      changed: [
+        { key: "t:call-2", file: "fb", added: 10, removed: 0 },
+        { key: "t:call-3", file: "fa", added: 5, removed: 3 },
+        { key: "t:call-2", file: "fc", added: 0, removed: 2 },
+      ],
+      fails: [],
+    });
+  });
+
+  it("handles runs that only add or only remove lines", () => {
+    expect(summarizeChanges([edit(1, [["fa", 7, 0]])].map(step))).toMatchObject({ files: 1, added: 7, removed: 0 });
+    expect(summarizeChanges([edit(1, [["fa", 0, 9]])].map(step))).toMatchObject({ files: 1, added: 0, removed: 9 });
+  });
+
+  it("counts nothing for rows whose lines are unknown, rather than guessing", () => {
+    const rows = [tool(1, "completed", "write"), tool(2, "completed", "edit"), tool(3, "completed", "read")];
+    expect(summarizeChanges(rows.map(step))).toEqual({ files: 0, added: 0, removed: 0, uncounted: 0, changed: [], fails: [] });
+  });
+
+  it("keeps changes whose lines are not known apart from the counted files (a write, a patch Paseo kept only part of)", () => {
+    const rows = [edit(1, [["fa", 3, 1]]), tool(2, "completed", "write", { uncounted: 1 }), edit(3, [["fb", 1, 0]], { uncounted: 2 })];
+    expect(summarizeChanges(rows.map(step))).toMatchObject({ files: 2, added: 4, removed: 1, uncounted: 3 });
+    expect(summarizeChanges([tool(1, "completed", "edit", { uncounted: 1 })].map(step))).toMatchObject({ files: 0, added: 0, removed: 0, uncounted: 1 });
+  });
+
+  it("lists failed commands with their exit code when known, never notices or other failures", () => {
+    const rows = [
+      tool(1, "failed", "shell", { exit: 2 }),
+      tool(2, "failed", "shell"),
+      tool(3, "failed", "edit"),
+      tool(4, "completed", "shell"),
+      tool(5, "failed", "shell", { notice: { ref: null, foreground: false } }),
+    ];
+    expect(summarizeChanges(rows.map(step)).fails).toEqual([{ key: "t:call-1", exit: 2 }, { key: "t:call-2", exit: null }]);
+  });
+
+  it("lists at most eight files and five failed commands, counting all files", () => {
+    const many = Array.from({ length: 12 }, (_, index) => edit(index + 1, [[`f${index}`, index + 1, 0]]));
+    const fails = Array.from({ length: 7 }, (_, index) => tool(20 + index, "failed", "shell", { exit: 1 }));
+    const summary = summarizeChanges([...many, ...fails].map(step));
+    expect(summary.files).toBe(12);
+    expect(summary.changed).toHaveLength(8);
+    expect(summary.changed[0]).toMatchObject({ file: "f11", added: 12 });
+    expect(summary.fails).toHaveLength(5);
+  });
+
+  it("puts what a finished run changed and its failed commands on its summary", () => {
+    const rows = [boundary(1, "user_message"), think(2), edit(3, [["fa", 4, 1]]), tool(4, "failed", "shell", { exit: 1 }), edit(5, [["fb", 2, 0]]), boundary(6)];
+    const summary = summaryOf(planFolds(rows, options()).roles, rows[1]!);
+    expect(summary).toMatchObject({ files: 2, added: 6, removed: 1, fails: [{ key: "t:call-4", exit: 1 }] });
+  });
+
+  it("counts only the hidden earlier steps on a running run's 「前面 N 步」", () => {
+    const rows = [boundary(1, "user_message"), edit(2, [["fa", 1, 0]]), edit(3, [["fb", 2, 0]]), edit(4, [["fc", 3, 0]]), tool(5), tool(6), tool(7, "running")];
+    const summary = summaryOf(planFolds(rows, options({ agentRunning: true })).roles, rows[1]!);
+    expect(summary).toMatchObject({ mode: "earlier", hidden: 3, files: 3, added: 6, removed: 0 });
+  });
+});
+
+describe("the turn a summary belongs to (0.8.0)", () => {
+  it("marks the last run of each turn, which shows the turn's tokens", () => {
+    const rows = [
+      boundary(1, "user_message", 1000), { ...think(2), turn: "t1" }, tool(3, "completed", "read", { turn: "t1" }), { ...boundary(4), turn: "t1" },
+      tool(5, "completed", "shell", { turn: "t1" }), tool(6, "completed", "shell", { turn: "t1" }), { ...boundary(7), turn: "t1" },
+      { ...boundary(8, "user_message"), turn: "t2" }, tool(9, "completed", "shell", { turn: "t2" }), tool(10, "completed", "shell", { turn: "t2" }),
+    ];
+    const { roles } = planFolds(rows, options());
+    expect(summaryOf(roles, rows[1]!)).toMatchObject({ turn: "t1", lastOfTurn: false });
+    expect(summaryOf(roles, rows[4]!)).toMatchObject({ turn: "t1", lastOfTurn: true });
+    expect(summaryOf(roles, rows[8]!)).toMatchObject({ turn: "t2", lastOfTurn: true });
+  });
+
+  it("moves the tokens to the last folded run when the turn ends with a run too short to fold", () => {
+    const rows = [
+      boundary(1, "user_message", 1000), tool(2, "completed", "read", { turn: "t1" }), tool(3, "completed", "shell", { turn: "t1" }), { ...boundary(4), turn: "t1" },
+      tool(5, "completed", "shell", { turn: "t1" }), { ...boundary(6), turn: "t1" },
+    ];
+    const { roles } = planFolds(rows, options());
+    expect(summaryOf(roles, rows[1]!)).toMatchObject({ turn: "t1", lastOfTurn: true });
+    expect(roles.get(rows[4]!.key!)).toBeUndefined();
+  });
+
+  it("has no turn without turn ids (older hosts)", () => {
+    const rows = [boundary(1, "user_message"), tool(2), tool(3), boundary(4)];
+    expect(summaryOf(planFolds(rows, options()).roles, rows[1]!)).toMatchObject({ turn: null, lastOfTurn: false });
   });
 });
 

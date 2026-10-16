@@ -218,14 +218,26 @@ function furthest(appearance: ThemeSpec["appearance"], shades: readonly string[]
   return [...shades].sort((a, b) => (appearance === "light" ? luminance(a) - luminance(b) : luminance(b) - luminance(a)))[0]!;
 }
 
+/**
+ * Every fitted token is fitted against every surface `evaluateThemeContrast` puts it on, at that surface's floor, and
+ * the strongest result wins. The family's twelve themes already clear all of these, so `fitContrast` hands their
+ * colours back unchanged; the extra floors only move a token when a custom hue and tint would otherwise miss one
+ * (`ring` and `accent` on the highlighted chrome: inputs, popovers and the selected sidebar row).
+ */
 export function paletteFor(spec: ThemeSpec): PluginThemeColors {
   const recipe = spec.appearance === "dark" ? DARK : LIGHT;
+  const light = spec.appearance === "light";
   const surface = (index: 0 | 1 | 2 | 3) =>
     oklch(recipe.surfaceL[index], spec.surfaceChroma * recipe.surfaceC[index], spec.surfaceHue);
   const background = surface(0);
   const raised = surface(1);
   const control = surface(2);
   const border = surface(3);
+  // The selected sidebar row: `border` in light themes, `control` in dark ones. Inputs and dark popovers are `control`.
+  const selected = light ? border : control;
+  const ringL = recipe.ringL;
+  const ringC = spec.surfaceChroma * recipe.ringC;
+  const accentL = spec.accentL ?? recipe.accentL;
   return {
     background,
     raised,
@@ -242,20 +254,16 @@ export function paletteFor(spec: ThemeSpec): PluginThemeColors {
       fitContrast(recipe.mutedL, spec.surfaceChroma * recipe.mutedC, spec.surfaceHue, [background, raised], 4.5),
       fitContrast(recipe.mutedL, spec.surfaceChroma * recipe.mutedC, spec.surfaceHue, spec.appearance === "light" ? [border] : [control, border], recipe.mutedOnChrome),
     ]),
-    ring: fitContrast(
-      recipe.ringL,
-      spec.surfaceChroma * recipe.ringC,
-      spec.surfaceHue,
-      recipe.ringOn.map((name) => (name === "raised" ? raised : background)),
-      recipe.ringMinContrast,
-    ),
-    accent: fitContrast(
-      spec.accentL ?? recipe.accentL,
-      spec.accentChroma,
-      spec.accentHue,
-      [background, raised],
-      4.5,
-    ),
+    ring: furthest(spec.appearance, [
+      fitContrast(ringL, ringC, spec.surfaceHue, recipe.ringOn.map((name) => (name === "raised" ? raised : background)), recipe.ringMinContrast),
+      // Placeholder text in inputs and timestamps on the selected row and popovers (CHROME / SELECTED floors).
+      fitContrast(ringL, ringC, spec.surfaceHue, [selected, control], CHROME.ring!),
+    ]),
+    accent: furthest(spec.appearance, [
+      fitContrast(accentL, spec.accentChroma, spec.accentHue, [background, raised], 4.5),
+      fitContrast(accentL, spec.accentChroma, spec.accentHue, [control], CHROME.accent!),
+      fitContrast(accentL, spec.accentChroma, spec.accentHue, [selected], SELECTED.accent!),
+    ]),
   };
 }
 

@@ -1,6 +1,6 @@
 import { LanguageSettings } from "./language-settings";
 import { t } from "../shared/text";
-import { useMemo } from "react";
+import { useMemo, type ComponentType } from "react";
 import { Text } from "react-native";
 import {
   useSettings,
@@ -20,14 +20,22 @@ import {
   DEFAULT_EXPANSION,
   densitySchema,
   expansionModeSchema,
+  loaderSchema,
   paletteModeSchema,
   takeoverScopeSchema,
   visibleExpansionTargets,
 } from "../shared/settings";
-import type { Density, ExpansionMode, ExpansionTarget, TakeoverScope } from "../shared/settings";
+import type { Density, ExpansionMode, ExpansionTarget, LoaderKind, TakeoverScope } from "../shared/settings";
+import { LOADER_KINDS } from "../shared/settings";
 import { toneColor } from "./kit";
+import { LoaderPreview, loaderLabels } from "./loader-preview";
 
-export interface SettingsActions { onFoldSettings(value: { enabled?: boolean; scope?: TakeoverScope }): void; onTakeover(scope: TakeoverScope): void }
+export interface SettingsActions {
+  onFoldSettings(value: { enabled?: boolean; scope?: TakeoverScope }): void;
+  onTakeover(scope: TakeoverScope): void;
+  /** 0.8.0: the resident's running mark (client/vivid.tsx LoaderMark), so the previews use the fx chunk it loads. */
+  LoaderMark?: ComponentType<{ kind: LoaderKind; size: number; color: string }>;
+}
 
 type ReadySettings = Extract<SettingsState<typeof activitySettings.schema>, { status: "ready" }>;
 
@@ -212,7 +220,7 @@ function ExpansionControls({ settings }: { settings: ReadySettings }) {
   );
 }
 
-function PaletteControls({ settings, theme }: { settings: ReadySettings; theme: PluginSurfaceProps["theme"] }) {
+function PaletteControls({ settings, theme, actions }: { settings: ReadySettings; theme: PluginSurfaceProps["theme"]; actions: SettingsActions }) {
   const errorStyle = useMemo(
     () => ({ color: toneColor(theme, "danger"), fontSize: 13, lineHeight: 18 }),
     [theme],
@@ -221,6 +229,12 @@ function PaletteControls({ settings, theme }: { settings: ReadySettings; theme: 
     const parsed = paletteModeSchema.safeParse(value);
     if (!parsed.success) return;
     void settings.save({ ...settings.values, palette: parsed.data }, settings.revision);
+  };
+  const loader = settings.values.loader;
+  const changeLoader = (value: string) => {
+    const parsed = loaderSchema.safeParse(value);
+    if (!parsed.success || parsed.data === loader) return;
+    void settings.save({ ...settings.values, loader: parsed.data }, settings.revision);
   };
   return (
     <SettingsSection title={t("settings.colors")}>
@@ -236,6 +250,15 @@ function PaletteControls({ settings, theme }: { settings: ReadySettings; theme: 
           disabled={settings.saving}
           onValueChange={changePalette}
         />
+        <SettingsSelect
+          label={t("settings.runningAnimation")}
+          hint={t("settings.loaderHint")}
+          value={loader}
+          options={LOADER_KINDS.map((kind) => ({ value: kind, label: loaderLabels[kind] }))}
+          disabled={settings.saving}
+          onValueChange={changeLoader}
+        />
+        <LoaderPreview theme={theme} value={loader} disabled={settings.saving} onChange={changeLoader} Mark={actions.LoaderMark} />
       </SettingsCard>
       {settings.saveError ? <Text accessibilityRole="alert" style={errorStyle}>{settings.saveError}</Text> : null}
     </SettingsSection>
@@ -267,7 +290,7 @@ function DisplaySettings({ theme, actions }: PluginSurfaceProps & { actions: Set
     <>
       <TakeoverControls settings={settings} actions={actions} />
       <FoldControls settings={settings} actions={actions} />
-      <PaletteControls settings={settings} theme={theme} />
+      <PaletteControls settings={settings} theme={theme} actions={actions} />
       <ExpansionControls settings={settings} />
     </>
   );

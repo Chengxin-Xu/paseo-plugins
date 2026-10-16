@@ -1,0 +1,97 @@
+{
+  "$meta": {
+    "name": "简体中文"
+  },
+  "boot": {
+    "name": "Terracotta 主题",
+    "customThemeName": "🎨 自定义",
+    "settingsTitle": "自定义主题",
+    "languageTitle": "语言",
+    "openCustomTheme": "调整自定义主题",
+    "keywords": "主题|配色|颜色|外观|自定义|深色|浅色"
+  },
+  "custom": {
+    "intro": "选深色或浅色，再挑底色和强调色的色相。颜色按十二套固定主题的同一条明度阶梯推导，文字对比度自动拟合。",
+    "inUse": "正在使用：松开滑杆或点按按钮后，整个界面立即换上新颜色，连到这台主机的所有设备同步。",
+    "notInUse": "还没选用。在 设置 → 外观 → 主题 里选「{name}」，之后这里的每次调整都会让整个界面随之变色。",
+    "colorsTitle": "调色",
+    "appearance": "模式",
+    "dark": "深色",
+    "light": "浅色",
+    "surfaceHue": "底色色相",
+    "surfaceHueHint": "页面、卡片和侧栏偏向的颜色",
+    "surfaceTint": "底色浓度",
+    "surfaceTintHint": "0% 为中性灰",
+    "accentHue": "强调色色相",
+    "accentHueHint": "按钮、链接和选中项",
+    "accentVividness": "强调色鲜艳度",
+    "accentVividnessHint": "100% 为该色相能达到的最鲜艳程度",
+    "degrees": "{value}°",
+    "percent": "{value}%",
+    "decrease": "减小{label}",
+    "increase": "增大{label}",
+    "shuffle": "随机一组",
+    "reset": "恢复默认",
+    "saving": "正在保存…",
+    "saved": "已保存到主机，所有设备同步。",
+    "loading": "正在读取已保存的配色…",
+    "saveFailed": "保存失败：{error}",
+    "readFailed": "读取已保存的配色失败：{error}",
+    "paletteTitle": "色板"
+  },
+  "preview": {
+    "label": "自定义主题预览",
+    "agents": "工作区",
+    "rowOne": "修复登录问题",
+    "rowTwo": "重构解析器",
+    "rowThree": "更新文档",
+    "timeOne": "2 分钟",
+    "timeTwo": "5 分钟",
+    "timeThree": "1 小时",
+    "userMessage": "让测试全部通过",
+    "cardTitle": "计划已就绪",
+    "cardBody": "改动 3 个文件，新增 2 个测试",
+    "approve": "批准",
+    "details": "详情",
+    "placeholder": "给 Agent 发消息…"
+  },
+  "swatch": {
+    "background": "页面",
+    "raised": "卡片",
+    "control": "输入框",
+    "border": "边框",
+    "foreground": "正文",
+    "mutedForeground": "次要文字",
+    "ring": "提示文字",
+    "accent": "强调色"
+  },
+  "checks": {
+    "title": "对比度检查",
+    "allPass": "{total} 项全部达标",
+    "someFail": {
+      "other": "{total} 项中有 {count} 项未达标"
+    },
+    "explain": "把每种文字颜色放到 Paseo 实际绘制它的每个表面上，按十二套固定主题的同一套门槛检查：正文 7:1，对话区里的文字 4.5:1。",
+    "workspace": "对话区",
+    "sidebar": "侧栏",
+    "sidebarSelected": "侧栏选中行",
+    "popover": "菜单与弹层",
+    "input": "输入框",
+    "userBubble": "你的消息",
+    "badge": "状态徽标",
+    "terminal": "终端",
+    "button": "主按钮",
+    "foreground": "正文",
+    "muted": "次要文字",
+    "ring": "提示文字",
+    "accent": "强调色",
+    "buttonText": "按钮文字",
+    "ratio": "{ratio}:1",
+    "needs": "需 {floor}:1",
+    "chipPass": "{token}：{ratio}:1，达标（需 {floor}:1）",
+    "chipFail": "{token}：{ratio}:1，未达标（需 {floor}:1）"
+  },
+  "settings": {
+    "languageDescription": "本插件界面和自定义主题名称的语言；十二套固定主题保留原名。"
+  }
+}

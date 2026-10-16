@@ -292,7 +292,18 @@
     "expand": "展开 {title}{parts}{extras}",
     "countsSuffix": "：{counts}",
     "extrasSuffix": "，{extras}",
-    "extrasSeparator": "，"
+    "extrasSeparator": "，",
+    "files": "{count} 个文件",
+    "moreFiles": "还有 {count} 个文件",
+    "changes": "改动 {files} +{added} −{removed}",
+    "uncountedMore": "另 {count} 处未计",
+    "uncountedOnly": "{count} 处改动未计行数",
+    "uncountedLabel": "另有 {count} 处改动未计行数",
+    "uncountedNote": "{count} 处改动未计行数：写入、删除、超长或可能不全的 diff 只记次数，不猜行数",
+    "turn": "本轮",
+    "tokensIn": "输入 {count}",
+    "tokensCached": "缓存 {count}",
+    "tokensOut": "输出 {count}"
   },
   "timelinePi": {
     "loadingSummary": "正在读取…",
@@ -749,8 +760,15 @@
     "editFile": "编辑文件",
     "readFile": "读取文件",
     "takeoverCosts": "· 「设置 → 聊天 → 工具调用显示 → 摘要」不再把工具行合并成一句\n· 不能点文件路径直接打开文件\n· 手机上工具详情改为在行内展开，不再弹出详情页",
-    "foldHint": "一段思考和工具调用全部完成后收成一行：类别计数、失败数和用时，点一下展开，再点收起。运行中的段只留运行中、等你批准、失败的行和最近两步，更早的收成「前面 N 步」。改动对所有设备生效。",
-    "pinHint": "Agent 干了很久、中间说过几段话之后，把你这一轮的提问钉在最新一段活动的上方：默认显示三行，点一下看全文，可以复制。提问还在附近（大约一屏之内）时不显示。改动对所有设备生效。"
+    "foldHint": "一段思考和工具调用全部完成后收成一行：类别计数、失败数、用时，以及改了几个文件、加删几行（只算行数已知的编辑）；一轮的最后一段另带本轮 token（只限运行时看过的轮次）。点一下展开，列出每个文件和失败的命令，再点收起。运行中的段只留运行中、等你批准、失败的行和最近两步，更早的收成「前面 N 步」。改动对所有设备生效。",
+    "pinHint": "Agent 干了很久、中间说过几段话之后，把你这一轮的提问钉在最新一段活动的上方：默认显示三行，点一下看全文，可以复制。提问还在附近（大约一屏之内）时不显示。改动对所有设备生效。",
+    "runningAnimation": "运行中动画",
+    "loaderSpinner": "转圈",
+    "loaderSparkle": "星芒",
+    "loaderOrb": "光球",
+    "loaderSnake": "点阵 · 蛇形",
+    "loaderMatrix": "点阵 · 闪烁",
+    "loaderHint": "运行中的行末尾的标记：转圈（默认）、Claude Code 式的星芒、呼吸的光球，或 3×3 点阵。App 在后台时暂停，系统开启「减少动态效果」时静止。改动对所有设备生效。"
   },
   "childSummary": {
     "activity": "动态",

@@ -90,7 +90,13 @@ test("the server entry hands every RPC the ledger, tells it when a turn ends or 
   assert.match(server, /const deferred = createSendLedger\(\{ guard: answeringGuard\(telemetry\) \}\);/);
   assert.ok(server.indexOf("const telemetry = new TelemetryStore();") < server.indexOf("const deferred = createSendLedger("), "the telemetry exists before the ledger");
   assert.equal(server.split("new TelemetryStore(").length, 2, "one telemetry store");
-  assert.match(server, /const hub = lifecycleHub\(handingOver\(host, deferred\)\);/);
+  // Every call and every hook hands the daemon API over: the ledger's deliveries, scheduled ones too, need one (2.17).
+  assert.match(server, /const handover = \{ use\(paseo: PaseoApi \| null \| undefined\) \{\s+deferred\.use\(paseo\);/);
+  // The label sync waits for a handle after it is turned on or after a reload: the first one starts its pass.
+  assert.match(server, /if \(first\) onFirstDaemon\(\);/);
+  assert.match(server, /onFirstDaemon = \(\) => labels\.poke\(\);/);
+  assert.match(server, /const hub = lifecycleHub\(handingOver\(host, handover\)\);/);
+  assert.match(server.slice(server.indexOf("const observeWork = "), server.indexOf("const observeWork = ") + 200), /handover\.use\(paseo\);/);
   assert.match(server, /registerSendLedger\(server, deferred\);/);
   const hook = (name: string) => server.slice(server.indexOf(`server.on("${name}"`), server.indexOf(`server.on("${name}"`) + 400);
   for (const name of ["agent.turn_ended", "agent.permission_resolved"]) assert.match(hook(name), /deferred\.notify\(agent\.id, paseo\);/, name);

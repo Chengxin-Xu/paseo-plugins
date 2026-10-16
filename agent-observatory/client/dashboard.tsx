@@ -1,5 +1,6 @@
 import { t } from "../shared/text";
 import { LanguageSettings } from "./language-settings";
+import { AlertSettingsSections } from "./alert-settings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View, type FlatList as NativeFlatList } from "react-native";
 import { usePaseo, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
@@ -30,6 +31,8 @@ import { useStats } from "./use-stats";
 import { useTokenLive, useTokens } from "./use-tokens";
 import { useQuota } from "./use-quota";
 import { QuotaChip } from "./quota-card";
+import { recapsQueryKey, useRecaps } from "./use-recaps";
+import { RecapSettingsSection } from "./recap-settings";
 import { AgentDetail } from "./agent-detail";
 import { AnalyticsDashboard } from "./analytics-dashboard";
 import { InsightsHub } from "./insights";
@@ -76,7 +79,8 @@ export function DashboardSurface(props: DashboardProps) {
   const cache = useQueryClient();
   // Directory events from the owned observation refresh lifecycle data sooner than the fallback polls. A turn that just
   // ended may leave subagents working (后台执行中); the 看板 counts (read only while shown) follow too.
-  useAgentActivity(() => { for (const queryKey of [telemetryQueryKey(props.host.id), readReceiptQueryKey, backgroundQueryKey(props.host.id), liveExtrasQueryKey(props.host.id), ["agent-observatory", props.host.id, "stats"]]) void cache.invalidateQueries({ queryKey }); });
+  // A turn's start or end also changes its 每轮小结 (out of date, then 更新中).
+  useAgentActivity(() => { for (const queryKey of [telemetryQueryKey(props.host.id), readReceiptQueryKey, backgroundQueryKey(props.host.id), liveExtrasQueryKey(props.host.id), recapsQueryKey(props.host.id), ["agent-observatory", props.host.id, "stats"]]) void cache.invalidateQueries({ queryKey }); });
   return <DashboardView key={props.host.id} {...props} readReceipts={readReceipts.data?.receipts} archiveOrigins={readReceipts.data?.archiveOrigins} readReceiptError={readReceipts.error?.message ?? readReceipts.data?.error ?? undefined} analytics={analytics.data} analyticsLoading={analytics.isPending} analyticsError={analytics.error?.message} data={data} telemetry={telemetry.data} telemetryError={telemetry.error?.message} background={background.data} onAnalyticsVisible={setObserving} onRefresh={() => { void data.refresh(); void telemetry.refetch(); if (observing) void analytics.refetch(); void readReceipts.refetch(); void cache.invalidateQueries({ queryKey: backgroundQueryKey(props.host.id) }); }} />;
 }
 export function ArchivedSurface(props: DashboardProps) { return <DashboardSurface {...props} archiveMode />; }
@@ -139,6 +143,8 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const tokens = useTokens(host.id, statsRange, tokenTab || (!archiveMode && tab === "board")), tokenLive = useTokenLive(host.id, tokenTab, "full", liveWindow);
   // 额度 on the Token page, and its tightest window on 看板's header.
   const quota = useQuota(host.id, !archiveMode && (tokenTab || tab === "board"));
+  // 每轮小结 on the session rows (only while the list shows; the archive has none).
+  const recaps = useRecaps(host.id, !archiveMode && tab === "agents"), recapMap = recaps.data?.enabled ? recaps.data.byAgent : undefined;
   // Running rows show their live output speed; read only while the session list shows something running.
   const runningCount = useMemo(() => data.agents.filter(agent => agent.status === "running" && !agent.archivedAt).length + (background?.agents.length ?? 0), [data.agents, background]);
   const rowLive = useTokenLive(host.id, !archiveMode && tab === "agents" && runningCount > 0, "agents");
@@ -380,7 +386,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
   const statsProps = { theme, compact, stats: stats.data, loading: stats.isPending, error: stats.error?.message, range: statsRange, onRange: setStatsRange, onRefresh: refresh };
   const searching = sessionsTab && compact && (searchOpen || !!query);
   const sessionList = <SessionList items={items} theme={theme} compact={compact} selectedId={selectedId} expanded={expanded} forceExpanded={revealing} now={now} signals={signals} rates={rates}
-    heartbeats={heartbeats.data?.byAgent} marked={archiveMarks ?? undefined} empty={empty} listRef={list} onScrollEnd={onScrollEnd} onToggle={toggle} onSelect={selectRow} />;
+    heartbeats={heartbeats.data?.byAgent} recaps={recapMap} recapsRevision={recaps.data?.revision} marked={archiveMarks ?? undefined} empty={empty} listRef={list} onScrollEnd={onScrollEnd} onToggle={toggle} onSelect={selectRow} />;
   const pushDetail = compact && !!selected && listTab;
   const chrome = !(compact && tab === "insights" && hubPushed);
   return <View onLayout={onLayout} style={{ flex: 1, minHeight: 0, backgroundColor: colors.surface0 }}>
@@ -440,6 +446,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
     <Sheet title={t("coreDashboard.observationSettings")} open={settingsOpen} onClose={() => setSettingsOpen(false)}>
       {/* Catalog migration preserves: 子 Agent 出错、撞额度、空轮或没收尾、等审批或提问时照常计入 */}
       <LanguageSettings />
+      <RecapSettingsSection theme={theme} open={settingsOpen} />
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.md }}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={{ color: colors.foreground, fontSize: fontSize.body, fontWeight: "500" }}>{t("coreDashboard.countCompletedSubagentsAsNeedsAttention")}</Text>
@@ -448,6 +455,7 @@ export function DashboardView({ theme, layout, host, navigation, workspaceId, in
         <Switch theme={theme} label={t("coreDashboard.countCompletedSubagentsAsNeedingAttention")} value={settings.childCompletions} disabled={!preferences.ready}
           onChange={value => { void preferences.mutate({ settings: { childCompletions: value } }).catch(() => toast.error(t("coreDashboard.settingsWereNotSavedTryAgain"))); }} />
       </View>
+      <AlertSettingsSections theme={theme} />
     </Sheet>
     <ProjectSheet theme={theme} open={sheet === "project"} onClose={() => setSheet(null)} projects={projects} total={ranged.length} value={project} onChange={value => { setProject(value); setWorkspace(workspaceDefault); setCheckout("all"); }} />
     <RangeSheet theme={theme} open={sheet === "range"} onClose={() => setSheet(null)} value={range} onChange={setRange} />

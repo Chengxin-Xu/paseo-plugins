@@ -1,1 +1,4 @@
-[{"name":"ui","entry":"ui-chunk.client.tsx","manifest":"UI_CHUNK","api":1}]
+[
+  { "name": "ui", "entry": "ui-chunk.client.tsx", "manifest": "UI_CHUNK", "api": 1 },
+  { "name": "quick", "entry": "quick-chunk.client.tsx", "manifest": "QUICK_CHUNK", "api": 1 }
+]

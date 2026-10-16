@@ -25,7 +25,23 @@
     "attachmentPickerTitle": "附加手记",
     "attachmentSearchPlaceholder": "搜索标题、正文或项目名",
     "quickNoteEmpty": "请在 /notes 后填写要记下的文字。",
-    "quickNoteTooLong": "随手记不能超过 {count} 字符。"
+    "quickNoteTooLong": "随手记不能超过 {count} 字符。",
+    "quickNotSent": "「{title}」没有发出：{error}。可以再点一次。",
+    "quickUnconfirmed": "「{title}」没有确认发送结果：{error}。可能已经送达，请先在「提示词」胶囊的队列或会话里核对。这次连接内再点会沿用原来的消息编号，不会重复发送；重新连接后再点可能再发一份。",
+    "quickWhyApproval": "Agent 在等你审批，现在发送会取消审批",
+    "quickWhyBusy": "Agent 正在运行，不能插话",
+    "quickAfterApproval": "等审批处理完再发",
+    "quickAfterTurn": "等这一轮结束再发",
+    "quickSendAnyway": "仍然发送",
+    "quickInterrupt": "中断并发送",
+    "quickUntitled": "无标题提示词",
+    "quickFillTitle": "填写并发送「{title}」",
+    "quickSendTitle": "一键发送「{title}」",
+    "quickAskTitle": "发送「{title}」：Agent 正忙，先选怎么发",
+    "quickMenuTitle": "一键发送",
+    "quickMenuLabel": "一键 {count}",
+    "quickMenuNarrow": "一键 {count}",
+    "quickManage": "管理一键发送…"
   },
   "settings": {
     "description": "按项目整理任务、提示词和想法。"
@@ -100,7 +116,11 @@
     "historySummary": "修改快照 · 最近 {count} 版",
     "missingHistory": "有 {count} 个修改快照缺失。请先尝试从备份恢复；也可以确认放弃缺失的快照，保留当前正文和仍存在的快照。",
     "revision": "第 {revision} 版",
-    "restoreRevision": "恢复第 {revision} 版"
+    "restoreRevision": "恢复第 {revision} 版",
+    "quickOff": "一键发送",
+    "quickOn": "一键发送已开",
+    "quickHint": "已显示在每个 Agent 的输入框上方，点按即发；会打断回合或取消审批时先问你。",
+    "quickTemplateHint": "含变量：点按胶囊会先打开填写。"
   },
   "board": {
     "allProjects": "全部项目",
@@ -169,7 +189,10 @@
     "trashDetail": "回收站 · {kind}详情",
     "taskNoun": "任务",
     "promptNoun": "提示词",
-    "ideaNoun": "想法"
+    "ideaNoun": "想法",
+    "quickAdded": "已加入一键发送",
+    "quickAddedTemplate": "已加入一键发送；含变量，点按时先填写",
+    "quickRemoved": "已取消一键发送"
   },
   "composer": {
     "operationFailed": "操作未完成，请重试。",
@@ -225,7 +248,8 @@
     "previewSource": "预览 · 来源手记 #{id}",
     "source": "提示词「{title}」",
     "truncatedTitle": "{title}…",
-    "noteContext": "来源：手记 #{id}\n{title}{body}"
+    "noteContext": "来源：手记 #{id}\n{title}{body}",
+    "quickGone": "这条提示词已删除、在回收站里，或已不是提示词。"
   },
   "deferred": {
     "heldState": "在等你确认",
@@ -239,6 +263,50 @@
     "prompt": "提示词",
     "sendAnyway": "仍然发送",
     "rowLabel": "{label}：{text}"
+  },
+  "quick": {
+    "invalid": "一键发送列表没有保存：{error}",
+    "conflict": "一键发送列表正被其他设备修改，请稍后再试。",
+    "full": "一键发送最多 {count} 条，先移除一条再添加。",
+    "menuPreview": "一键 {count}",
+    "untitled": "无标题提示词",
+    "stripLabel": "管理一键发送，当前 {count} 条",
+    "stripTitle": "一键发送",
+    "stripCount": "{count} 条",
+    "stripEmpty": "在提示词详情里打开「一键发送」，它就会出现在每个 Agent 的输入框上方",
+    "manage": "管理",
+    "missing": "已删除",
+    "hidden": "在回收站或已不是提示词",
+    "template": "含变量：先填写再发",
+    "managerTitle": "一键发送",
+    "managerHint": "这些提示词按这里的顺序显示在每个 Agent 的输入框上方，超过 {count} 条时收进一个菜单胶囊。点按时，Agent 空闲或能插话就直接发；正在运行又不能插话、或在等审批时，先让你选「等这一轮结束再发」或「中断并发送」，不会一点就打断。含变量的提示词会先打开填写。",
+    "previewTitle": "输入框上方的样子",
+    "moveUp": "上移「{title}」",
+    "moveDown": "下移「{title}」",
+    "removeEntry": "取消一键发送「{title}」",
+    "emptyTitle": "还没有一键发送的提示词",
+    "emptyMessage": "打开一条提示词的详情，点「一键发送」。"
+  },
+  "launchStatus": {
+    "needs": "等你处理",
+    "failed": "出错",
+    "running": "运行中",
+    "starting": "启动中",
+    "launching": "创建中",
+    "check": "需要核对",
+    "unread": "完成未读",
+    "idle": "空闲",
+    "rejected": "未启动",
+    "ended": "已结束",
+    "more": "另 {count} 个",
+    "children": "{count} 个子 Agent",
+    "chipLabel": "Agent 状态：{status}",
+    "openAgent": "打开 Agent（{status}）",
+    "historyTitle": "启动记录 · {count}",
+    "childrenRunning": "{count} 个子 Agent，{running} 个运行中",
+    "agentShort": "Agent {id}",
+    "noAgent": "尚未创建 Agent",
+    "open": "打开"
   },
   "launchUi": {
     "prepared": "启动请求已确认",
@@ -492,5 +560,15 @@
     "megabytes": "{count} MB",
     "validationIssue": "{field}: {message}",
     "projectReference": "{id} ({path})"
+  },
+  "serverQuick": {
+    "missing": "这条提示词已删除、在回收站里，或已不是提示词，不能一键发送。",
+    "sent": "已发送「{title}」",
+    "sending": "「{title}」正在发送，结果见「提示词」胶囊",
+    "onItsWay": "「{title}」已在路上，不会重复发送",
+    "queued": "已排队：「{title}」将在这一轮结束、没有待审批时发出",
+    "held": "「{title}」没有收到发送结果，请在「提示词」胶囊里确认",
+    "template": "「{title}」现在含有变量，请再点一次胶囊填写",
+    "askNext": "Agent 刚开始忙，「{title}」没有发出。再点一次胶囊，选择等这一轮结束或中断发送"
   }
 }

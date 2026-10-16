@@ -1,18 +1,23 @@
 import { useI18n } from "./i18n-client";
 import { t } from "../shared/text";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { Pressable, Text, View, type TextStyle, type ViewStyle } from "react-native";
+import { DiffBlocks, Glyph } from "./diffstat";
+import { useFx } from "./fx";
 import { foldAccessibilityLabel, foldCountParts, foldTitle, formatFoldDuration } from "../shared/fold";
+import type { WireTurnTokens } from "../shared/fold-index";
 import type { FoldItemData } from "../shared/timeline";
 import { looks, type LookKey, type RowStatus } from "../shared/vivid-model";
 import { usePalette } from "./activity";
 import { densityMetrics, useDensity, useFoldRow } from "./density";
 import { foldRuntime } from "./fold-runtime";
-import { aria, hue, isDarkTheme, withAlpha } from "./kit";
-import { Flash, Pop, useChangeCount } from "./motion";
+import { aria, compactNumber, hue, isDarkTheme, withAlpha, type Hue } from "./kit";
+import { Breathe, Flash, Pop, useChangeCount } from "./motion";
 import { PinnedPrompt, usePromptPin } from "./prompt-pin";
+import { finishedToolItem } from "./transform";
 import { StatusMark, StatusPill } from "./vivid";
 import { cuiTextEscape, pmonoViewEscape } from "./web";
 
@@ -65,6 +70,69 @@ function LookBar({ theme, mode, parts }: { theme: Theme; mode: string; parts: Re
 }
 
 /**
+ * 0.8.0: 「3 个文件 +12 −4 ▮▮▮▮▯」 at the end of a summary; phones leave out the file count (it is in the label and the
+ * list). Changes whose lines are not known are said apart, never added in: 「另 1 处未计」, or 「1 处改动未计行数」 alone.
+ */
+export function ChangeStat({ theme, files, added, removed, uncounted = 0, compact, lineHeight }: { theme: Theme; files: number; added: number; removed: number; uncounted?: number; compact: boolean; lineHeight: number }) {
+  const number: TextStyle = { fontSize: 12, lineHeight, fontWeight: "700", fontVariant: ["tabular-nums"] };
+  const muted: TextStyle = { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight };
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 0 }}>
+      {files > 0 && !compact ? <Text {...cuiTextEscape} numberOfLines={1} style={muted}>{t("fold.files", { count: files })}</Text> : null}
+      {files > 0 && added > 0 ? <Text style={[number, { color: hue(theme, "green", "text") }]}>+{added}</Text> : null}
+      {files > 0 && removed > 0 ? <Text style={[number, { color: hue(theme, "red", "text") }]}>−{removed}</Text> : null}
+      {files > 0 ? <DiffBlocks theme={theme} added={added} removed={removed} /> : null}
+      {uncounted > 0 ? <Text {...cuiTextEscape} numberOfLines={1} style={muted}>{t(files > 0 ? "fold.uncountedMore" : "fold.uncountedOnly", { count: uncounted })}</Text> : null}
+    </View>
+  );
+}
+
+/** 0.8.0: tokens of a turn the plugin server watched live (server/turn-usage.ts); null until known. */
+function useTurnTokens(agentId: string, turn: string | null): WireTurnTokens | null {
+  const subscribe = useCallback((listener: () => void) => foldRuntime.subscribeTokens(agentId, listener), [agentId]);
+  const read = useCallback(() => (turn ? foldRuntime.turnTokens(agentId, turn) : null), [agentId, turn]);
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/** 0.8.0: 「本轮 输入 12.3k · 缓存 80.1k · 输出 2.4k」 under the last summary of a turn; the coin breathes while the sum still grows. */
+export function TurnTokens({ theme, tokens, indent }: { theme: Theme; tokens: WireTurnTokens; indent: number }) {
+  const parts: Array<{ name: Hue; id: "fold.tokensIn" | "fold.tokensCached" | "fold.tokensOut"; count: number }> = [
+    { name: "blue", id: "fold.tokensIn", count: tokens.i },
+    ...(tokens.c !== null ? [{ name: "teal" as const, id: "fold.tokensCached" as const, count: tokens.c }] : []),
+    { name: "violet", id: "fold.tokensOut", count: tokens.o },
+  ];
+  const separator = t("fold.extrasSeparator");
+  const label = t("fold.turn") + t("fold.countsSuffix", { counts: parts.map((part) => t(part.id, { count: part.count.toLocaleString() })).join(separator) });
+  const coin = <Glyph name="Coins" color={hue(theme, "amber")} />;
+  return (
+    <View accessible accessibilityLabel={label} style={{ flexDirection: "row", alignItems: "center", gap: 5, paddingLeft: indent, paddingRight: 6, paddingBottom: 2, minWidth: 0 }}>
+      {tokens.live ? <Breathe>{coin}</Breathe> : coin}
+      <Text {...cuiTextEscape} numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 15, flexShrink: 1, minWidth: 0 }}>
+        {t("fold.turn")}
+        {parts.map((part, index) => (
+          <Text key={part.id}>
+            {index > 0 ? t("ui.metaSeparator") : "  "}
+            <Text style={{ color: hue(theme, part.name, "text"), fontWeight: "700", fontVariant: ["tabular-nums"] }}>{t(part.id, { count: compactNumber(part.count) })}</Text>
+          </Text>
+        ))}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * 0.8.0: an expanded summary lists the files with their +/− and the failed commands with their exit code. The list lives
+ * in the lazy fx chunk (client/fold-changes.tsx) and reads the names from the rows this app drew (the index carries no
+ * paths or commands); nothing shows until the chunk is here.
+ */
+function FoldChangeList({ agentId, theme, data, lineHeight, indent }: { agentId: string; theme: Theme; data: FoldItemData; lineHeight: number; indent: number }) {
+  const cwd = useAgent(agentId, (agent) => agent.cwd) ?? null;
+  const ChangesView = useFx()?.FoldChanges;
+  if (!ChangesView) return null;
+  return <ChangesView theme={theme} lineHeight={lineHeight} indent={indent} cwd={cwd} files={data.files ?? 0} uncounted={data.uncounted ?? 0} changed={data.changed ?? []} fails={data.fails ?? []} item={finishedToolItem} />;
+}
+
+/**
  * 本地补丁：折叠摘要行。已结束的段：「12 步 · 思考 2 · 命令 5 · 读取 3 · 编辑 2 … 失败 1 · 1 分 20 秒 ✓ ›」；
  * 运行中的段：「前面 7 步 …」。点一下展开整段（Paseo 重新投影，被折叠的行回来），再点收起；选择在本次会话里记住。
  */
@@ -85,6 +153,10 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
   const toggle = useCallback(() => foldRuntime.toggle(agentId, data.segment, !data.expanded), [agentId, data.expanded, data.segment]);
   // 0.6.0 (grok-B2): the question of this turn, when this summary stands for the newest stretch of activity.
   const pin = usePromptPin(agentId, { segment: data.segment });
+  // 0.8.0: the turn's tokens on its last summary.
+  const tokens = useTurnTokens(agentId, data.lastOfTurn && data.turn ? data.turn : null);
+  const files = data.files ?? 0;
+  const uncounted = data.uncounted ?? 0;
 
   const text = useMemo(
     () => ({
@@ -110,6 +182,8 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
     backgroundColor: data.expanded ? withAlpha(hue(theme, done ? (status === "failed" ? "red" : "green") : "blue"), isDarkTheme(theme) ? 0.1 : 0.07) : "transparent",
   };
   const label = foldAccessibilityLabel(data);
+  // The tokens line and the change list line up with the title, after the tile.
+  const indent = (layout.compact ? 6 : 8) + metrics.tile + metrics.gap;
 
   return (
     <View {...pmonoViewEscape} style={card}>
@@ -127,12 +201,15 @@ export function FoldRow({ agentId, item, theme, layout, timestamp }: PluginTimel
           ))}
         </Text>
         <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 2 }} />
+        {files > 0 || uncounted > 0 ? <ChangeStat theme={theme} files={files} added={data.added ?? 0} removed={data.removed ?? 0} uncounted={uncounted} compact={layout.compact} lineHeight={metrics.lineHeight} /> : null}
         {data.failed > 0 ? <StatusPill theme={theme} status="failed" text={t("ui.failed2", { count: data.failed })} /> : null}
         {duration ? <Text {...cuiTextEscape} numberOfLines={1} style={text.meta}>{duration}</Text> : null}
         {done ? <StatusMark theme={theme} status={status} size={14} /> : null}
         <Icon name={data.expanded ? "ChevronDown" : "ChevronRight"} size={12} color={theme.colors.foregroundMuted} />
         {changes > 0 && done ? <Flash count={changes} color={withAlpha(hue(theme, status === "failed" ? "red" : "green"), 0.22)} radius={8} /> : null}
       </Pressable>
+      {tokens ? <TurnTokens theme={theme} tokens={tokens} indent={indent} /> : null}
+      {data.expanded && (files > 0 || uncounted > 0 || (data.fails?.length ?? 0) > 0) ? <FoldChangeList agentId={agentId} theme={theme} data={data} lineHeight={metrics.lineHeight} indent={indent} /> : null}
     </View>
   );
 }

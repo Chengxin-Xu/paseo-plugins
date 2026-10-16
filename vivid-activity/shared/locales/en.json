@@ -319,7 +319,36 @@
     "expand": "Expand {title}{parts}{extras}",
     "countsSuffix": ": {counts}",
     "extrasSuffix": ", {extras}",
-    "extrasSeparator": ", "
+    "extrasSeparator": ", ",
+    "files": {
+      "one": "{count} file",
+      "other": "{count} files"
+    },
+    "moreFiles": {
+      "one": "{count} more file",
+      "other": "{count} more files"
+    },
+    "changes": "changed {files} +{added} −{removed}",
+    "uncountedMore": {
+      "one": "{count} more uncounted",
+      "other": "{count} more uncounted"
+    },
+    "uncountedOnly": {
+      "one": "{count} change not counted",
+      "other": "{count} changes not counted"
+    },
+    "uncountedLabel": {
+      "one": "{count} more change without a line count",
+      "other": "{count} more changes without line counts"
+    },
+    "uncountedNote": {
+      "one": "{count} change without a line count: writes, deletions and diffs too long or possibly incomplete are counted, never guessed",
+      "other": "{count} changes without line counts: writes, deletions and diffs too long or possibly incomplete are counted, never guessed"
+    },
+    "turn": "This turn",
+    "tokensIn": "in {count}",
+    "tokensCached": "cached {count}",
+    "tokensOut": "out {count}"
   },
   "timelinePi": {
     "loadingSummary": "Reading…",
@@ -806,8 +835,15 @@
     "editFile": "Edit file",
     "readFile": "Read file",
     "takeoverCosts": "· \"Settings → Chat → Tool call display → Summary\" no longer combines tool rows into one sentence\n· File paths cannot be clicked to open files\n· On phones, tool details expand within the row instead of opening a details page",
-    "foldHint": "When a sequence of thinking and tool calls finishes, fold it into one row showing category counts, failures, and duration. Tap to expand or collapse. A running sequence keeps running, waiting for approval, failed, and the two latest steps visible. Earlier steps fold into \"Previous N steps\". Changes apply to all devices.",
-    "pinHint": "After an agent has worked for a while and sent several messages, pin this turn's prompt above its latest activity. Show three lines by default. Tap to read or copy the full text. The prompt stays hidden while it is nearby (within about one screen). Changes apply to all devices."
+    "foldHint": "When a sequence of thinking and tool calls finishes, fold it into one row showing category counts, failures, duration, and the files changed with lines added and removed (edits whose lines are known). The last fold of a turn also shows the turn's tokens, for turns you watched while they ran. Tap to expand it, listing each file and failed command, or to collapse it. A running sequence keeps running, waiting for approval, failed, and the two latest steps visible. Earlier steps fold into \"Previous N steps\". Changes apply to all devices.",
+    "pinHint": "After an agent has worked for a while and sent several messages, pin this turn's prompt above its latest activity. Show three lines by default. Tap to read or copy the full text. The prompt stays hidden while it is nearby (within about one screen). Changes apply to all devices.",
+    "runningAnimation": "Running animation",
+    "loaderSpinner": "Spinner",
+    "loaderSparkle": "Sparkle",
+    "loaderOrb": "Orb",
+    "loaderSnake": "Dot grid: snake",
+    "loaderMatrix": "Dot grid: twinkle",
+    "loaderHint": "The mark at the end of a running row: a spinner (default), a Claude Code style sparkle, a breathing orb or a 3×3 dot grid. It pauses while the app is in the background and holds still when the system asks for reduced motion. Changes apply to all devices."
   },
   "childSummary": {
     "activity": "Activity",

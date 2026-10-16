@@ -50,6 +50,8 @@ export const actionSchema = z.discriminatedUnion('kind',[
   z.object({kind:z.enum(['back','forward','reload','demo','stop','restart','cleanup','fitWidth'])}),
   // url: open this address in the new tab (a workspace service) instead of the start page.
   z.object({kind:z.literal('newTab'),url:z.string().min(1).max(4096).optional()}),
+  // A port from the list of ports Agents opened (browser.ports): the server opens its own address for it, nothing else.
+  z.object({kind:z.literal('openPort'),port:z.number().int().min(1).max(65535)}),
   z.object({kind:z.literal('click'),x:z.number().finite(),y:z.number().finite()}),
   z.object({kind:z.literal('scroll'),deltaX:z.number().min(-3000).max(3000),deltaY:z.number().min(-3000).max(3000)}),
   z.object({kind:z.literal('text'),text:z.string().max(10000)}),
@@ -116,6 +118,28 @@ export const deleteOrphanRpc = defineRpc({name:'browser.orphan.delete',input:z.o
 export const serviceSchema = z.object({name:z.string(),url:z.string().nullable(),port:z.number().nullable(),running:z.boolean(),health:z.enum(['healthy','unhealthy']).nullable()});
 export const servicesRpc = defineRpc({name:'browser.services',input:z.object({workspaceId:workspaceIdSchema}),output:z.object({items:z.array(serviceSchema)})});
 export type BrowserService = z.infer<typeof serviceSchema>;
+/**
+ * A port an Agent opened: a listening TCP socket of a process that carries an Agent of this daemon (PASEO_AGENT_ID),
+ * found in /proc on a Linux daemon host. scope: local (loopback only), all (every address), address (one other address,
+ * named in `address`). process: the program name only; no command line or environment variable leaves the server.
+ * openable: the shared browser may open it (link-local and metadata addresses are refused, as for every page).
+ */
+export const agentPortSchema = z.object({
+  port:z.number().int().min(1).max(65535),scope:z.enum(['local','all','address']),address:z.string().max(64).optional(),process:z.string().max(32),
+  agentId:z.string().max(128),agentTitle:z.string().max(200).nullable(),agentStatus:z.enum(['initializing','running','idle','error','closed','archived']),
+  workspaceId:z.string().max(200).nullable(),workspaceTitle:z.string().max(200).nullable(),projectTitle:z.string().max(200).nullable(),openable:z.boolean(),
+});
+/**
+ * Ports Agents opened: `items` belong to the asked workspace, `others` to other workspaces. supported: false on hosts
+ * without /proc (the group stays hidden). partial: caps or the deadline cut the scan short; uncertain: some owners' Agents
+ * could not be looked up this time; failed: the scan itself failed. A client that sends the revision it renders gets
+ * only {supported, unchanged, revision, scannedAt} while nothing changed.
+ */
+export const portsRpc = defineRpc({name:'browser.ports',input:z.object({workspaceId:workspaceIdSchema,revision:z.string().max(64).optional()}),
+  output:z.object({supported:z.boolean(),items:z.array(agentPortSchema).optional(),others:z.array(agentPortSchema).optional(),partial:z.boolean().optional(),
+    uncertain:z.boolean().optional(),failed:z.boolean().optional(),scannedAt:z.number(),revision:z.string().optional(),unchanged:z.boolean().optional()})});
+export type BrowserAgentPort = z.infer<typeof agentPortSchema>;
+export type BrowserPortsReply = z.infer<typeof portsRpc.output>;
 export type BrowserTarget = z.infer<typeof targetSchema>;
 export type BrowserDialog = z.infer<typeof dialogSchema>;
 export type BrowserDevicePreset = z.infer<typeof devicePresetSchema>;

@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, type ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, type DimensionValue, type TextInput as NativeTextInput, type StyleProp, type ViewStyle } from "react-native";
 import { INBOX_PROJECT_ID, type BoardItem, type BoardProject, type NoteFields, type NoteKind, type TaskStatus } from "../shared/board";
 import { Button, IconButton, ProjectMark, control, fontSize, hairline, hue, radius, relativeTime, space, toneColor, type Hue, type Tone } from "./kit";
+import { LaunchChip, type LaunchLinks } from "./launch-ui";
 
 export const KINDS: NoteKind[] = ["task", "prompt", "idea"];
 export const KIND_LABELS: Record<NoteKind, string> = { get task() { return t("ui.task"); }, get prompt() { return t("ui.prompt"); }, get idea() { return t("ui.idea"); } };
@@ -139,19 +140,26 @@ function PressableFrame({ theme, label, onPress, selected = false, selectedColor
 function NoteText({ theme, item, project, previewLines }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; previewLines: number }) {
   const { colors } = theme, done = item.kind === "task" && item.status === "done" && item.deletedAt === null;
   const preview = done ? "" : excerpt(item.body);
-  return <View aria-hidden style={[touch.ignore, { flex: 1, minWidth: 0, gap: 3 }]}>
+  // Grows without a zero basis: inside the column that also holds the launch line, `flex: 1` collapses on native (Yoga).
+  return <View aria-hidden style={[touch.ignore, { flexGrow: 1, flexShrink: 1, minWidth: 0, gap: 3 }]}>
     <Text numberOfLines={2} style={{ color: done ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.body, lineHeight: 20, fontWeight: "500" }}>{item.title}</Text>
     {preview ? <Text numberOfLines={previewLines} style={{ color: colors.foregroundMuted, fontSize: fontSize.small, lineHeight: 19 }}>{preview}</Text> : null}
     <View style={{ paddingTop: 1 }}><NoteMeta theme={theme} item={item} project={project} /></View>
   </View>;
 }
 
-/** Board card: status glyph (the one inline action), title, a short excerpt and the colored meta. Tap opens the detail. */
-export const NoteCard = memo(function NoteCard({ theme, item, project, busy, actions }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; busy: boolean; actions: NoteActions }) {
+/**
+ * Board card: status glyph (the one inline action), title, a short excerpt and the colored meta, then what the agents
+ * it started are doing (pressing that opens the agent). Tap elsewhere opens the detail.
+ */
+export const NoteCard = memo(function NoteCard({ theme, item, project, busy, actions, launches }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; busy: boolean; actions: NoteActions; launches?: LaunchLinks }) {
   const { colors } = theme;
   return <PressableFrame theme={theme} label={item.title} onPress={() => actions.open(item)} base={colors.surface1} hovered={colors.surface2} style={{ borderWidth: 1, borderColor: colors.border }}>
     <View style={{ paddingTop: space.md - 2, paddingLeft: space.md - 2 }}><StatusToggle theme={theme} item={item} disabled={busy} onPress={() => actions.status(item, NEXT_STATUS[item.status])} /></View>
-    <View style={[touch.ignore, { flex: 1, minWidth: 0, paddingVertical: space.md - 2, paddingRight: space.md }]}><NoteText theme={theme} item={item} project={project} previewLines={2} /></View>
+    <View style={[touch.through, { flex: 1, minWidth: 0, gap: space.xs + 2, paddingVertical: space.md - 2, paddingRight: space.md }]}>
+      <NoteText theme={theme} item={item} project={project} previewLines={2} />
+      {launches && item.deletedAt === null ? <LaunchChip theme={theme} links={launches} itemId={item.id} /> : null}
+    </View>
   </PressableFrame>;
 });
 
@@ -159,14 +167,17 @@ export const NoteCard = memo(function NoteCard({ theme, item, project, busy, act
  * List row (kit Row metrics): tasks lead with their status glyph, prompts and ideas with their colored kind icon (and
  * a copy button), the trash with the kind icon and a green 恢复. The selected row is tinted with the kind's color.
  */
-export const NoteRow = memo(function NoteRow({ theme, item, project, selected = false, busy, actions }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; selected?: boolean; busy: boolean; actions: NoteActions }) {
+export const NoteRow = memo(function NoteRow({ theme, item, project, selected = false, busy, actions, launches }: { theme: PluginTheme; item: BoardItem; project: ScopeProject | null; selected?: boolean; busy: boolean; actions: NoteActions; launches?: LaunchLinks }) {
   const { colors } = theme, trashed = item.deletedAt !== null, task = item.kind === "task" && !trashed;
   const leading = task ? <StatusToggle theme={theme} item={item} disabled={busy} onPress={() => actions.status(item, NEXT_STATUS[item.status])} /> : <KindIcon theme={theme} kind={item.kind} />;
   const trailing = trashed ? <View style={{ marginVertical: -space.xs }}><Button theme={theme} label={t("ui.restore")} icon="RotateCcw" size="sm" tone="success" disabled={busy} accessibilityLabel={t("ui.restoreTitle", { title: item.title })} onPress={() => actions.restore(item)} /></View>
     : task ? null : <View style={{ marginVertical: -space.xs, marginRight: -space.xs }}><IconButton theme={theme} icon="Copy" size="sm" label={t("ui.copyTitle", { title: item.title })} onPress={() => actions.copy(item)} /></View>;
   return <PressableFrame theme={theme} label={item.title} onPress={() => actions.open(item)} selected={selected} selectedColor={toneColor(theme, KIND_TONES[item.kind], "soft")} hovered={colors.surface1} style={{ paddingVertical: 10, paddingHorizontal: space.md }}>
     <View style={[touch.through, { minHeight: 20, justifyContent: "center" }]}>{leading}</View>
-    <NoteText theme={theme} item={item} project={project} previewLines={task ? 1 : 2} />
+    {launches && !trashed ? <View style={[touch.through, { flex: 1, minWidth: 0, gap: space.xs + 2 }]}>
+      <NoteText theme={theme} item={item} project={project} previewLines={task ? 1 : 2} />
+      <LaunchChip theme={theme} links={launches} itemId={item.id} />
+    </View> : <NoteText theme={theme} item={item} project={project} previewLines={task ? 1 : 2} />}
     {trailing ? <View style={[touch.through, { minHeight: 20, justifyContent: "center" }]}>{trailing}</View> : null}
   </PressableFrame>;
 });

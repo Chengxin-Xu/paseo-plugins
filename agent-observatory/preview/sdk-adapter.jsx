@@ -4,6 +4,7 @@ import { createFixtureLedger } from "./deferred-fixture";
 import { quickReplyGroup, quickReplyGuard, quickReplyKey } from "../client/deferred-state";
 import { fixtureTokenLive, fixtureTokens } from "./tokens-fixture";
 import { fixtureDigest } from "./digest-fixture";
+import { fixtureRecapList, fixtureRecapSettings, fixtureRecapStatus, saveRecapSettings, subscribeRecapSettings } from "./recap-fixture";
 import { fixtureQuota } from "./quota-fixture";
 import { fixtureHeartbeatsResponse, fixtureScheduleList, fixtureScheduleRun } from "./schedules-fixture";
 import { fixtureModels, fixtureOverview, fixtureProfiles, fixtureReportJobs, fixtureRunners, fixtureSuggestions, fixtureSuggestionsState, richInsightScenarios, runnerLabelFor } from "./insights-overview-fixture";
@@ -260,6 +261,8 @@ export function useRpc(contract) {
       case "observatory.tokens.get": if (scenarioName() === "tokens-error") throw new Error("模拟 Token 统计读取失败"); result = fixtureTokens(input.range, input.utcOffsetMinutes); break;
       case "observatory.tokens.live": if (scenarioName() === "tokens-error") throw new Error("模拟 Token 统计读取失败"); result = fixtureTokenLive(input.windowMinutes, input.utcOffsetMinutes, input.detail); break;
       case "observatory.digest.get": result = fixtureDigest(input.agentId); break;
+      case "observatory.recap.list": { const full = fixtureRecapList(); result = input.revision === full.revision ? { mode: "unchanged", revision: full.revision } : full; break; }
+      case "observatory.recap.status": result = fixtureRecapStatus(); break;
       case "observatory.schedules.list": { const full = fixtureScheduleList(input.window ?? "recent", scenarioName()); result = input.revision === full.revision ? { mode: "unchanged", unchanged: true, revision: full.revision } : full; break; }
       case "observatory.schedules.run": result = fixtureScheduleRun(input.runId); if (scenarioName() === "schedule-no-reply") result = { ...result, output: null, prompt: null, note: "定时任务记录已不存在，可以读取会话记录查看最后回复。" }; break;
       case "observatory.read-state.list": result = { receipts: [...fixtureReadReceipts], archiveOrigins:[...fixtureArchiveOrigins], error: null }; break;
@@ -339,6 +342,9 @@ export function useRpc(contract) {
       case "observatory.history.restore.status": result = null; break;
       case "observatory.provider-subagents.list": result = { subagents: input.parentAgentId === "payment-root" ? nativeChildren : [], error: null, truncated: false }; break;
       case "observatory.provider-subagents.timeline": result = { page: nativeTimeline(input.parentAgentId, input.subagentId), error: null }; break;
+      // 提醒 (2.17): the preview has no Claude logs and no host labels.
+      case "observatory.cache.get": result = { mode: "full", revision: "fixture", agents: [] }; break;
+      case "observatory.alerts.labels": result = { state: "off", labels: 0, pins: 0, error: null }; break;
       default: throw new Error(`No development fixture for ${contract.name}`);
     }
     if(contract.name==="observatory.results.get"&&scenarioName()==="long-history"){
@@ -403,11 +409,17 @@ export function ToastHost() {
 }
 
 
-// Host settings controls used by the in-app language section. Only the fixture preview uses DOM elements.
-export function useSettings() {
-  const [values, setValues] = useState({ language: previewLanguage });
+// Host settings controls used by the in-app language, 提醒 and 每轮小结 sections. Only the fixture preview uses DOM elements.
+export function useSettings(definition) {
+  // 每轮小结's host setting (`recap`): the same values the recap fixtures answer with.
+  const [recap, setRecap] = useState(() => ({ ...fixtureRecapSettings }));
+  useEffect(() => subscribeRecapSettings(() => setRecap({ ...fixtureRecapSettings })), []);
+  // The language setting starts from the preview's language; any other (提醒, 2.17) from its schema's defaults.
+  const [values, setValues] = useState(() => definition?.id && definition.id !== "language" && definition.schema?.parse ? definition.schema.parse({}) : { language: previewLanguage });
+  if (definition?.id === "recap") return { status: "ready", revision: "fixture", values: recap, saving: false, saveError: null,
+    async save(next) { saveRecapSettings(next); return true; }, async reset() { saveRecapSettings({ enabled: false, suggestions: false, runner: { kind: "grok" } }); return true; }, async reload() {} };
   return { status: "ready", revision: "fixture", values, saving: false, saveError: null,
-    async save(next) { setValues(next); setPreviewLanguage(next.language === "auto" ? "zh-CN" : next.language); return true; } };
+    async save(next) { setValues(next); if (typeof next.language === "string") setPreviewLanguage(next.language === "auto" ? "zh-CN" : next.language); return true; } };
 }
 export function SettingsSection({ title, children }) {
   return <section style={{ color: theme().colors.foreground, display: "flex", flexDirection: "column", gap: 8 }}><h3 style={{ fontSize: 14, margin: 0 }}>{title}</h3>{children}</section>;
@@ -420,6 +432,9 @@ export function SettingsRow({ label, hint, children, error }) {
 }
 export function SettingsSelect({ label, hint, value, options, onValueChange, disabled, error }) {
   return <SettingsRow label={label} hint={hint} error={error}><select aria-label={label} value={value} onChange={event => onValueChange(event.target.value)} disabled={disabled} style={{ marginTop: 8, maxWidth: "100%" }}>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></SettingsRow>;
+}
+export function SettingsSwitch({ label, hint, value, onValueChange, disabled, error }) {
+  return <SettingsRow label={label} hint={hint} error={error}><input type="checkbox" role="switch" aria-label={label} aria-checked={value ? "true" : "false"} checked={!!value} disabled={disabled} onChange={event => onValueChange(event.target.checked)} style={{ marginTop: 8 }} /></SettingsRow>;
 }
 export function SettingsAction({ label, actionLabel, onPress }) {
   return <SettingsRow label={label}><button onClick={onPress}>{actionLabel}</button></SettingsRow>;

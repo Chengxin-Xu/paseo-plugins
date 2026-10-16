@@ -365,11 +365,13 @@ test("pending requests are summarised by kind: questions with choices, plans by 
   const agent = normalizeAgent({ id: "w", status: "running", pendingPermissions: [
     { id: "q", kind: "question", name: "AskUserQuestion", input: { questions: [{ question: "要合并到 main 吗？", header: "合并", options: [{ label: "合并" }, { label: "先不合" }] }] } },
   ] });
-  assert.deepEqual(agent.pending, [{ kind: "question", title: "要合并到 main 吗？", detail: "合并", options: ["合并", "先不合"] }]);
+  // The host's request id rides along: one chime per request (2.17).
+  assert.deepEqual(agent.pending, [{ kind: "question", title: "要合并到 main 吗？", detail: "合并", options: ["合并", "先不合"], requestId: "q" }]);
   const plan = normalizeAgent({ id: "p", status: "running", pendingPermissions: [{ id: "p", kind: "plan", name: "ExitPlanMode", input: { plan: "## 重构存储层\n\n1. …" } }] });
   assert.equal(plan.pending?.[0]?.title, "重构存储层");
   const tool = normalizeAgent({ id: "t", status: "running", pendingPermissions: [{ id: "t", kind: "tool", name: "Bash", title: "Run command", detail: { type: "shell", command: "npm test" } }] });
-  assert.deepEqual(tool.pending?.[0], { kind: "tool", title: "Run command", detail: "npm test", options: [] });
+  assert.deepEqual(tool.pending?.[0], { kind: "tool", title: "Run command", detail: "npm test", options: [], requestId: "t" });
+  assert.equal("requestId" in (normalizeAgent({ id: "n", status: "running", pendingPermissions: [{ kind: "tool", name: "Bash" }] }).pending?.[0] ?? {}), false, "none without an id");
 });
 
 test("a turn's stop reason enriches its record until the next prompt", () => {

@@ -1,0 +1,123 @@
+{
+  "$comment": "The twelve fixed palettes as 0.5.1 shipped them. 0.6.0 fits ring and accent against more surfaces for the custom theme; these must not move.",
+  "claude-code-dark": {
+    "background": "#1A1A1A",
+    "raised": "#262626",
+    "control": "#373737",
+    "border": "#505050",
+    "foreground": "#FFFFFF",
+    "mutedForeground": "#B9B9B9",
+    "ring": "#8C8C8C",
+    "accent": "#D77757"
+  },
+  "claude-code-light": {
+    "background": "#FAF9F5",
+    "raised": "#F0EEE6",
+    "control": "#E8E4D7",
+    "border": "#DAD5C4",
+    "foreground": "#151412",
+    "mutedForeground": "#64635D",
+    "ring": "#737169",
+    "accent": "#B54821"
+  },
+  "cocoa-night": {
+    "background": "#1D1916",
+    "raised": "#2B251F",
+    "control": "#3E352E",
+    "border": "#594E44",
+    "foreground": "#F8F4F2",
+    "mutedForeground": "#BEB8B2",
+    "ring": "#928B84",
+    "accent": "#D77757"
+  },
+  "blueberry-night": {
+    "background": "#181A22",
+    "raised": "#222532",
+    "control": "#323647",
+    "border": "#4A4F64",
+    "foreground": "#F3F5FB",
+    "mutedForeground": "#B5B9C5",
+    "ring": "#888B9A",
+    "accent": "#B1B9F9"
+  },
+  "sakura-latte": {
+    "background": "#FFF7F8",
+    "raised": "#FEE7EB",
+    "control": "#FFD9E0",
+    "border": "#F7C6D0",
+    "foreground": "#191213",
+    "mutedForeground": "#6E5D60",
+    "ring": "#816A6F",
+    "accent": "#B4415B"
+  },
+  "matcha-latte": {
+    "background": "#F6FBF4",
+    "raised": "#E8F1E3",
+    "control": "#DBEAD1",
+    "border": "#C9DCBC",
+    "foreground": "#121511",
+    "mutedForeground": "#5F655A",
+    "ring": "#6C7466",
+    "accent": "#B54821"
+  },
+  "harbor-night": {
+    "background": "#131B22",
+    "raised": "#1B2833",
+    "control": "#273949",
+    "border": "#3D5366",
+    "foreground": "#F0F6FC",
+    "mutedForeground": "#AFBCC7",
+    "ring": "#808F9B",
+    "accent": "#00C7DF"
+  },
+  "glacier-latte": {
+    "background": "#F5FAFF",
+    "raised": "#E5EFF9",
+    "control": "#D5E6F6",
+    "border": "#C1D8ED",
+    "foreground": "#111417",
+    "mutedForeground": "#5C646B",
+    "ring": "#68727C",
+    "accent": "#0D6BCD"
+  },
+  "velvet-night": {
+    "background": "#1D1821",
+    "raised": "#2A2331",
+    "control": "#3C3246",
+    "border": "#564A62",
+    "foreground": "#F7F3FB",
+    "mutedForeground": "#BBB5C2",
+    "ring": "#918998",
+    "accent": "#F27CC2"
+  },
+  "orchid-latte": {
+    "background": "#FBF7FE",
+    "raised": "#F1EAF9",
+    "control": "#EADEF6",
+    "border": "#DDCEEC",
+    "foreground": "#151317",
+    "mutedForeground": "#65606B",
+    "ring": "#756E7B",
+    "accent": "#AA408D"
+  },
+  "lagoon-night": {
+    "background": "#101D1E",
+    "raised": "#162A2C",
+    "control": "#213C3F",
+    "border": "#35575B",
+    "foreground": "#EEF7F8",
+    "mutedForeground": "#ADBFC1",
+    "ring": "#7C9193",
+    "accent": "#F4AF2D"
+  },
+  "lagoon-latte": {
+    "background": "#F2FBFC",
+    "raised": "#E0F2F4",
+    "control": "#CDEAEE",
+    "border": "#B6DDE2",
+    "foreground": "#101516",
+    "mutedForeground": "#586668",
+    "ring": "#637577",
+    "accent": "#00797E"
+  }
+}

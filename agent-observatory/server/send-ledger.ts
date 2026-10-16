@@ -6,6 +6,7 @@ import { resolvePaseoHome } from "./paseo-home";
 import { readSendCapabilities } from "./steerable-providers";
 import { telemetryDirectory } from "./telemetry";
 import { observatoryDeferred } from "../shared/steer";
+import type { PaseoApi } from "./paseo-types";
 
 type LedgerOptions = ConstructorParameters<typeof DeferredSend>[0];
 /**
@@ -56,7 +57,7 @@ export function answeringGuard(turns: ObservedTurns) {
  * The host context with every RPC handing the ledger the daemon API first: after a reload the ledger has none until a call
  * or a hook brings one, so the first call of any kind (the sidebar badge polls) lets queued messages go out again.
  */
-export function handingOver(host: PluginServerContext, ledger: Pick<DeferredSend, "use">): PluginServerContext {
+export function handingOver(host: PluginServerContext, ledger: { use(paseo: PaseoApi | null | undefined): void }): PluginServerContext {
   const handle: PluginServerContext["handle"] = (contract, handler) => host.handle(contract, (input, call) => { ledger.use(call?.paseo); return handler(input, call); });
   return new Proxy(host, { get: (target, property) => {
     if (property === "handle") return handle;
@@ -71,5 +72,6 @@ export function registerSendLedger(server: Pick<PluginServerContext, "handle">, 
   server.handle(observatoryDeferred.enqueue, (input, { paseo }) => ledger.enqueue(input, paseo));
   server.handle(observatoryDeferred.list, input => ledger.list(input));
   server.handle(observatoryDeferred.cancel, ({ messageId }) => ledger.cancel(messageId));
-  server.handle(observatoryDeferred.resume, ({ messageId }, { paseo }) => ledger.resume(messageId, paseo));
+  // 立即发送 a scheduled message (`now`), or 仍然发送 a held one (its time, if any, kept).
+  server.handle(observatoryDeferred.resume, ({ messageId, now }, { paseo }) => ledger.resume(messageId, paseo, { now }));
 }

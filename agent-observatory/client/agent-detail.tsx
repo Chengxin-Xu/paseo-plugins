@@ -28,6 +28,9 @@ import { readingMemory } from "./reading-cache";
 import { readReceiptQueryKey } from "./use-read-receipts";
 import { telemetryQueryKey } from "./use-telemetry";
 import { useInvalidateAttention } from "./attention-context";
+import { recapLook } from "../shared/recap";
+import { useRecaps } from "./use-recaps";
+import { RecapCard } from "./recap";
 import { useForeground } from "./use-foreground";
 import { useObservatory } from "./use-observatory";
 import { RecordedRunResult, ScheduleRunCard } from "./schedule-run-card";
@@ -37,6 +40,9 @@ import { StopCard } from "./stop-card";
 import { useRestoreSession } from "./use-restore";
 import type { ScheduleFocus } from "./schedule-focus";
 import { describeRunError, knownRunError } from "../shared/schedules";
+import { CacheChip } from "./cache-clock";
+import { DeferredList, useDeferredQueue } from "./deferred";
+import { isScheduledView } from "./schedule-send";
 
 interface AgentDetailProps { hostId: string; agent: AgentRecord;
   /** The page's Agents (for 子任务); the panel passes none and reads the directory only while 子任务 is open. */ agents?: AgentRecord[]; theme: PluginTheme; compact: boolean; navigation?: PluginSurfaceProps["navigation"]; onSelectAgent: (id: string) => void;
@@ -63,6 +69,11 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   const digest = useDigest(agent.id, tab === "digest", ownTurnRunning(agent));
   const getResult = useRpc(getAgentResult), fetchEvidence = useRpc(getSessionEvidence), markRead = useRpc(markCompletionRead), queryCache = useQueryClient();
   const foreground = useForeground(), invalidateAttention = useInvalidateAttention();
+  // This Agent's ledger (shared with its quick replies by query key): its scheduled messages show above the result.
+  const deferredQueue = useDeferredQueue(agent.id, !agent.archivedAt);
+  // 每轮小结 at the top, judged against the turn this detail shows; its 建议回复 goes under the reply.
+  const recaps = useRecaps(hostId, !agent.archivedAt && !agent.parentAgentId);
+  const recap = recaps.data?.enabled ? recapLook(recaps.data.byAgent.get(agent.id), { startedAt: agent.observedTurnStartedAt ?? null, endedAt: agent.observedTurnEndedAt ?? null, running: ownTurnRunning(agent) }) : null;
   // A heartbeat's turn leaves the prompt and an unread attention stamp as they were: its completion and round tell it apart (codex-obs-attn-F1).
   const resultKey = ["observatory-result", agent.id, agent.lastUserMessageAt, knownCompletionAt(agent), observedRound(agent)];
   // An Agent a schedule created: its run's recorded reply is shown first. Reading an archived session's result loads it in
@@ -176,6 +187,9 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     <Text selectable numberOfLines={compact ? undefined : 3} style={{ color: colors.foreground, fontSize: fontSize.heading, fontWeight: "600", lineHeight: 26 }}>{agent.title}</Text>
     <IdentityLine theme={theme} agent={agent} compact={compact} />
     <LiveMeta theme={theme} agent={agent} totalRunMs={observed?.totalRunMs} tools={result.data?.metrics.tools} />
+    {recap ? <RecapCard theme={theme} look={recap} /> : null}
+    {/* 提示缓存倒计时 (2.17): how long this session's prompt cache stays warm, when its own log tells. */}
+    {!agent.archivedAt ? <View style={{ flexDirection: "row" }}><CacheChip theme={theme} agentId={agent.id} /></View> : null}
     {agent.background && agent.status === "running" && !agent.activeTurnStartedAt ? <Banner theme={theme} tone="info" icon="Workflow"
       message={t("coreAgentDetail.thisTurnHasEndedSubtasksAreStill", { value1: agent.background.running, value2: agent.background.labels.length ? t("coreAgentDetail.message", { value1: joinList(agent.background.labels) }) : "" })}
       action={{ label: t("coreAgentDetail.viewSubtasks"), onPress: () => setTab("children") }} /> : null}
@@ -202,13 +216,18 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   const stopCard = agent.stop ? <StopCard theme={theme} agent={agent} heartbeats={heartbeats} hostId={hostId} onOpenConversation={navigation ? openConversation : undefined} onHandedOver={openHandedOver}
     onScheduled={() => { void queryCache.invalidateQueries({ queryKey: heartbeatsQueryKey(hostId) }); }} /> : null;
   const heartbeatCard = heartbeats?.length ? <HeartbeatCard theme={theme} heartbeats={heartbeats} onOpenAll={onOpenSchedules ? scheduleId => onOpenSchedules({ scheduleId }) : undefined} /> : null;
-  const lead = scheduleCard || stopCard || heartbeatCard ? <View style={{ gap: space.md }}>{stopCard}{scheduleCard}{heartbeatCard}</View> : null;
+  // 定时消息 to this Agent (2.17): each with 立即发送 and 取消, gone once it went out.
+  const scheduledCard = !agent.archivedAt && deferredQueue.all.some(isScheduledView) ? <View testID="detail-scheduled" style={{ gap: space.xs + 2 }}>
+    <PaneLabel theme={theme} icon="AlarmClock" tone="sky">{t("alertsSchedule.detailTitle")}</PaneLabel>
+    <DeferredList theme={theme} queue={deferredQueue} only={isScheduledView} />
+  </View> : null;
+  const lead = scheduleCard || stopCard || heartbeatCard || scheduledCard ? <View style={{ gap: space.md }}>{stopCard}{scheduledCard}{scheduleCard}{heartbeatCard}</View> : null;
   // A schedule Agent whose session cannot be read (an ACP session cannot be resumed, the log is gone) still has the reply its run recorded.
   const recordedFallback = !!scheduleRunId && !recordedFirst && !!result.error && !result.data;
   const body = tab === "result" ? waitForTap ? <RecordedRunResult theme={theme} runId={scheduleRunId!} header={scrolled} lead={lead} inset={inset} onLoadFull={() => setFullResult(true)} />
     : recordedFallback ? <RecordedRunResult theme={theme} runId={scheduleRunId!} header={scrolled} lead={lead} inset={inset} loadLabel={t("coreAgentDetail.retryLoadingSession")} loadHint={null} loading={result.isFetching}
       notice={t("coreAgentDetail.couldNotLoadSessionTheReplyRecorded", { value1: describeRunError(result.error?.message)?.summary ?? t("coreAgentDetail.tryAgainLater") })} onLoadFull={() => void result.refetch()} />
-    : <ResultView theme={theme} agent={agent} data={result.data} loading={result.isPending} error={result.error ? knownRunError(result.error.message) ?? result.error.message : undefined} header={scrolled} lead={lead} inset={inset} pending={pending} permissions={permissions} onResolvePermissions={navigation ? openConversation : undefined} onPermissionsChanged={() => void pendingDetails.refetch()} compact={compact} onOpenEvidence={openEvidence} onRefresh={() => void result.refetch()} />
+    : <ResultView theme={theme} agent={agent} data={result.data} loading={result.isPending} error={result.error ? knownRunError(result.error.message) ?? result.error.message : undefined} header={scrolled} lead={lead} inset={inset} pending={pending} permissions={permissions} suggestion={recap?.state === "fresh" ? recap.reply : null} onResolvePermissions={navigation ? openConversation : undefined} onPermissionsChanged={() => void pendingDetails.refetch()} compact={compact} onOpenEvidence={openEvidence} onRefresh={() => void result.refetch()} />
     : tab === "digest" ? <AgentDigest theme={theme} compact={compact} digest={digest.data} loading={digest.isPending} error={digest.error?.message} onRefresh={() => void digest.refetch()}
       onOpenSeq={(epoch, seq) => openEvidence(`${agent.id}:${epoch}:${seq}-${seq}`)} header={scrolled} inset={inset} />
     : tab === "timeline" ? <TimelineContent timeline={timeline} theme={theme} cacheKey={agent.id} focusRef={focusRef} header={scrolled} inset={inset} />

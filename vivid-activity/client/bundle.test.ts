@@ -81,7 +81,13 @@ describe("client mobile bundle compatibility", () => {
   it("bundles index.client.tsx and stays within mobile size budget", async () => {
     const bundle = await compileClientBundle();
     // Details/highlighting/settings must never drift back into the eager timeline bundle.
-    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(360 * 1024);
+    // 0.8.0: 360 → 368 KiB for what every collapsed summary shows (the change stat with its uncounted changes, the turn's
+    // tokens and their store) and exact-only diff counts on rows; the running animations and the expanded change list
+    // wait in the fx chunk.
+    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(368 * 1024);
+    expect(bundle).toContain("function ChangeStat");
+    expect(bundle).toContain("function TurnTokens");
+    expect(bundle).not.toMatch(/function (?:RunningLoader|LoaderFrame|FoldChanges|sparkleStops|shiftStops)\b/);
     expect(bundle).not.toMatch(/\/\/ .*\/client\/(?:activity-details|highlight|settings)\.tsx?\n/);
     expect(bundle).not.toContain("prismjs/components/");
     expect(bundle).toMatch(/(?:var|function) transformToolCall\b/);
@@ -97,10 +103,21 @@ describe("client mobile bundle compatibility", () => {
     expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(96 * 1024);
   });
 
+  it("ships the running animations and the change list in a small chunk of their own (0.8.0)", async () => {
+    const bundle = await compileClientBundle(path.resolve(__dirname, "../fx-chunk.client.tsx"));
+    expect(bundle).toContain("function RunningLoader");
+    expect(bundle).toContain("function FoldChanges");
+    expect(bundle).not.toMatch(/\b(?:createFoldRuntime|foldRuntime|startTakeover|ColorfulToolCall|DetailBody|ActivitySettings)\b/);
+    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(72 * 1024);
+  });
+
   it("keeps the chunk independent of the eager fold and takeover state", async () => {
     const bundle = await compileClientBundle(path.resolve(__dirname, "../ui-chunk.client.tsx"));
     expect(bundle).toContain("function DetailBody");
     expect(bundle).toContain("function ActivitySettings");
+    // 0.8.0: the settings preview borrows the resident's running mark; the loaders live only in the fx chunk.
+    expect(bundle).toContain("function LoaderPreview");
+    expect(bundle).not.toMatch(/function (?:RunningLoader|LoaderFrame|sparkleStops|shiftStops)\b/);
     expect(bundle).not.toMatch(/\b(?:createFoldRuntime|foldRuntime|startTakeover|createLatestRows)\b/);
     expect(bundle).not.toMatch(/\/\/ .*\/client\/(?:fold-runtime|takeover|latest-rows)\.tsx?\n/);
   });

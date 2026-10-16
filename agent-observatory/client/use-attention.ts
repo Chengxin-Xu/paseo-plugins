@@ -41,7 +41,7 @@ export function withDeviceZone(read: Read, zone: () => string | null = deviceTim
  * someone shows it and the app is in the foreground; the server answers an unchanged revision with a few bytes. A change
  * that arrives while a read is in flight (`invalidate`) gets one more read after it: that read may predate the change.
  */
-export function createAttentionStore(intervalMs = ATTENTION_POLL_MS, now: () => number = Date.now): AttentionStore {
+export function createAttentionStore(intervalMs = ATTENTION_POLL_MS, now: () => number = Date.now, onRead?: (state: AttentionState, store: AttentionStore) => void): AttentionStore {
   let view: AttentionView = { state: null, error: null, at: null, now: now(), foreground: active() };
   const listeners = new Set<() => void>();
   let timer: ReturnType<typeof setInterval> | undefined, appState: { remove(): void } | undefined, pending: Promise<void> | undefined, again = false;
@@ -65,6 +65,8 @@ export function createAttentionStore(intervalMs = ATTENTION_POLL_MS, now: () => 
         if (reply.mode !== "full" && !previous) throw new Error(t("boot.secondaryAttentionCacheExpired"));
         const state = reply.mode === "full" ? reply : previous!;
         publish({ state, error: null, at: now() });
+        // 提示音 listens to every new summary (client/chime.ts); it never fails a read.
+        if (reply.mode === "full") try { onRead?.(state, store); } catch { /* the chime stays quiet */ }
       } catch (error) { publish({ ...view, error: error instanceof Error ? error.message : t("boot.secondaryAttentionIsTemporarilyUnavailable") }); }
       finally {
         pending = undefined;
@@ -92,10 +94,10 @@ export function attentionCount(view: AttentionView, now = view.now ?? Date.now()
  * a store holding the old connection's RPC binding must not outlive it.
  */
 export interface AttentionStores { get(hostId: string): AttentionStore; invalidate(hostId: string): void }
-export function createAttentionStores(): AttentionStores {
+export function createAttentionStores(onRead?: (hostId: string, state: AttentionState, store: AttentionStore) => void): AttentionStores {
   const stores = new Map<string, AttentionStore>();
   return {
-    get(hostId) { let store = stores.get(hostId); if (!store) { store = createAttentionStore(); stores.set(hostId, store); } return store; },
+    get(hostId) { let store = stores.get(hostId); if (!store) { store = createAttentionStore(ATTENTION_POLL_MS, Date.now, onRead ? (state, own) => onRead(hostId, state, own) : undefined); stores.set(hostId, store); } return store; },
     // No badge shown for this host yet: nothing to read again.
     invalidate(hostId) { stores.get(hostId)?.invalidate(); },
   };

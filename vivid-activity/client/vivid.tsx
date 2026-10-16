@@ -9,6 +9,7 @@ export { failureText, lookFor, mcpParts, zh, type LookKey, type RowStatus } from
 import { Breathe, Flash, Ping, Pop, Spin, Sweep, useChangeCount } from "./motion";
 import type { ActivityPalette } from "../shared/presentation";
 import { badgeInk, type Badge } from "../shared/brand";
+import { useFx, useLoader } from "./fx";
 
 /**
  * 本地补丁（vivid-activity）：鲜明配色 + 状态动效。上游行布局与详情视图不动，只替换行头与调色板。
@@ -42,13 +43,31 @@ export function resolveVividPalette(theme: PluginTheme): ActivityPalette {
 }
 
 /** Ring with a turning arc (same drawing as the observatory's running mark). */
-function Spinner({ size, color }: { size: number; color: string }) {
+export function Spinner({ size, color }: { size: number; color: string }) {
   const ring = size - 2, stroke = size >= 14 ? 2 : 1.5;
   const circle: ViewStyle = { position: "absolute", width: ring, height: ring, borderRadius: ring / 2, borderWidth: stroke };
   return <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
     <View style={[circle, { borderColor: withAlpha(color, 0.28) }]} />
     <Spin size={ring}><View style={[circle, { borderColor: "transparent", borderTopColor: color, borderRightColor: color }]} /></Spin>
   </View>;
+}
+
+/**
+ * 0.8.0: the running mark in the animation chosen in settings (「运行中动画」). The spinner by default; the others come
+ * from the lazy fx chunk (client/fx.ts), and the spinner turns until it is here.
+ */
+export function RunningMark({ size, color }: { size: number; color: string }) {
+  const kind = useLoader();
+  return kind === "spinner" ? <Spinner size={size} color={color} /> : <LoaderMark kind={kind} size={size} color={color} />;
+}
+
+/**
+ * 0.8.0: one running animation by name, from the fx chunk once it is here (the spinner until then). The settings preview
+ * borrows it too (index.client.tsx passes it with the settings actions), so the ui chunk carries no copy of the loaders.
+ */
+export function LoaderMark({ kind, size, color }: { kind: string; size: number; color: string }) {
+  const Loader = useFx()?.RunningLoader;
+  return kind !== "spinner" && Loader ? <Loader kind={kind} size={size} color={color} /> : <Spinner size={size} color={color} />;
 }
 
 /** The status glyph at the end of a row: spinner, pinging hand, or a filled disk with a white mark. */
@@ -58,7 +77,7 @@ export function StatusMark({ theme, status, size: requested }: { theme: PluginTh
   const changes = useChangeCount(status);
   const motion = rowMotion({ status, statusChanges: changes, finishes: 0, live: false });
   const box: ViewStyle = { width: size, height: size, alignItems: "center", justifyContent: "center" };
-  if (status === "running") return <View style={box}><Spinner size={size} color={color} /></View>;
+  if (status === "running") return <View style={box}><RunningMark size={size} color={color} /></View>;
   if (status === "canceled") return <View style={box}><Icon name="CircleSlash2" size={size - 2} color={color} /></View>;
   const mark = <View style={box}>
     {motion.ping ? <Ping size={size} color={color} /> : null}

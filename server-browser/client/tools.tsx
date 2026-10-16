@@ -9,6 +9,7 @@ import { Badge, Banner, Button, IconButton, MetaLine, ProjectMark, Row, SearchFi
 import { Breathe, Ping } from './motion';
 import { StateGlyph } from './looks';
 import { BrowserActivityList } from './overview';
+import { AgentPortSection, type AgentPortsView } from './agent-ports';
 import { pageHost, readable, type Look } from './overview-model';
 
 type Theme = PluginSurfaceProps['theme'];
@@ -35,11 +36,15 @@ function Group({ theme, label, icon, tone, children }: { theme: Theme; label: st
 const agentAtWork: Look = { get label() { return t("browserTools.agentIsWorking"); }, tone: 'info', icon: 'LoaderCircle', motion: 'spin' };
 const wrap = { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: space.sm } as const;
 
-/** `manual`: controls usable right now; `agentMode`: the Agent holds control (explains why they are not). `services`: this workspace's own, opened in a new tab. */
-export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, maxTabs, agentTabId, onSelect, onCloseTab, onPin, onNewTab, services }: {
+/**
+ * `manual`: controls usable right now; `agentMode`: the Agent holds control (explains why they are not). `services`: this
+ * workspace's own, opened in a new tab; `ports`: ports its Agents opened, likewise.
+ */
+export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, maxTabs, agentTabId, onSelect, onCloseTab, onPin, onNewTab, services, ports }: {
   theme: Theme; open: boolean; onClose: () => void; tabs: BrowserSession['tabs']; manual: boolean; agentMode: boolean; maxTabs: number; agentTabId?: string | null;
   onSelect: (tabId: string) => void; onCloseTab: (tabId: string) => void; onPin: (tabId: string, pinned: boolean) => void; onNewTab: () => void;
   services?: { items: BrowserService[]; loading: boolean; error: string | null; onOpen: (service: BrowserService) => void };
+  ports?: AgentPortsView;
 }) {
   const { colors } = theme;
   return <ListSheet title={t("browserTools.tabs", { value1: tabs.length })} open={open} onClose={onClose}>
@@ -68,6 +73,7 @@ export function PageTabsSheet({ theme, open, onClose, tabs, manual, agentMode, m
       <View style={{ paddingHorizontal: space.md, paddingVertical: space.xs }}><Label theme={theme} icon="Server" tone="green">{t("browserTools.workspaceServices")}</Label></View>
       <ServiceList theme={theme} items={services.items} loading={services.loading} error={services.error} disabled={!manual || tabs.length >= maxTabs} onOpen={services.onOpen} />
     </View> : null}
+    {ports ? <AgentPortSection theme={theme} view={ports} divider quietWhenEmpty /> : null}
   </ListSheet>;
 }
 
@@ -98,11 +104,15 @@ export function ServiceList({ theme, items, loading, error, disabled, onOpen }: 
   })}</>;
 }
 
-export function ServicesSheet({ theme, open, onClose, items, loading, error, manual, agentMode, onOpen, onRefresh }: {
+/** The workspace's services and, under them, the ports its Agents opened (when the daemon host can list them). */
+export function ServicesSheet({ theme, open, onClose, items, loading, error, manual, agentMode, onOpen, onRefresh, ports }: {
   theme: Theme; open: boolean; onClose: () => void; items: BrowserService[]; loading: boolean; error: string | null; manual: boolean; agentMode: boolean; onOpen: (service: BrowserService) => void; onRefresh: () => void;
+  ports?: AgentPortsView;
 }) {
-  return <ListSheet title={t("browserTools.workspaceServices")} open={open} onClose={onClose}>
+  return <ListSheet title={t("agentPorts.menuLabel")} open={open} onClose={onClose}>
+    <View style={{ paddingHorizontal: space.md, paddingVertical: space.xs }}><Label theme={theme} icon="Server" tone="green">{t("browserTools.workspaceServices")}</Label></View>
     <ServiceList theme={theme} items={items} loading={loading} error={error} disabled={!manual} onOpen={onOpen} />
+    {ports ? <AgentPortSection theme={theme} view={ports} divider /> : null}
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.xs }}>
       <Button theme={theme} label={t("browserTools.refresh")} icon="RefreshCw" size="sm" busy={loading} testID="server-browser-services-refresh" onPress={onRefresh} />
       <View style={{ flex: 1, minWidth: 0 }}><MetaLine theme={theme} numberOfLines={2} parts={[agentMode ? t("browserTools.switchToManualControlToOpen") : t("browserTools.opensInANewTabAtA")]} /></View>

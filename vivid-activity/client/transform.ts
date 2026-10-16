@@ -256,6 +256,11 @@ export function retryPiNotices(): void {
   loadPiReader(loader);
 }
 
+/** 0.8.0: the finished tool call last drawn for `key` (an expanded fold summary names its file or command); null when not kept. */
+export function finishedToolItem(key: string): ToolCallItem | null {
+  return finishedRows.get(key)?.item ?? null;
+}
+
 function finishedResult(key: string): ComparableResult | null {
   const row = finishedRows.get(key);
   if (!row) return null;

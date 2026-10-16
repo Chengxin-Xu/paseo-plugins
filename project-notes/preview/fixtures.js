@@ -65,6 +65,21 @@ if (scenario === "many") {
 }
 
 let revisionCounter = 1;
+const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+/** The one-tap prompt setting (a host setting in Paseo). */
+export const quickState = { revision: "quick-1", prompts: scenario === "empty" ? [] : [
+  { projectId: "__inbox__", itemId: uuid(10), label: "代码评审：只看正确性", template: false, hidden: false, revision: 1 },
+  { projectId: "prj_monitor", itemId: uuid(12), label: "排查线上告警", template: false, hidden: false, revision: 1 },
+  { projectId: "prj_web", itemId: uuid(11), label: "写一条 CHANGELOG", template: false, hidden: false, revision: 1 },
+] };
+/** Launch records: started (agents live in preview/live.js), one whose agent was archived, one refused. */
+const launchRecords = scenario === "empty" ? [] : [
+  { launchId: "launch-preview-1", itemId: uuid(5), stage: "started", workspaceId: "wks_agent_7c21e0", agentId: "agent_7c21e0", error: null, at: new Date(NOW - 90 * 60_000).toISOString() },
+  { launchId: "launch-preview-2", itemId: uuid(6), stage: "started", workspaceId: "wks_agent_51d2a4", agentId: "agent_51d2a4", error: null, at: new Date(NOW - 80 * 60_000).toISOString() },
+  { launchId: "launch-preview-3", itemId: uuid(7), stage: "started", workspaceId: "wks_agent_93be10", agentId: "agent_93be10", error: null, at: new Date(NOW - 4 * 1440 * 60_000).toISOString() },
+  { launchId: "launch-preview-4", itemId: uuid(1), stage: "started", workspaceId: "wks_archived", agentId: "agent_archived", error: null, at: new Date(NOW - 26 * 60 * 60_000).toISOString() },
+  { launchId: "launch-preview-5", itemId: uuid(3), stage: "rejected", workspaceId: null, agentId: null, error: "所选 provider 当前不可用，请刷新模型列表。尚未创建工作区或代理。", at: new Date(NOW - 3 * 1440 * 60_000).toISOString() },
+];
 const snapshot = value => structuredClone({ projectId: value.projectId, revision: value.revision, items: value.items });
 const receipts = new Map();
 const histories = new Map();
@@ -172,6 +187,22 @@ export async function call(method, input) {
       launches.set(input.launchId, launch);
       progress(launch);
       return { ...launch, replayed: false };
+    }
+    case "project-notes.launches": {
+      if (input.itemId) return { revision: "launches-1", records: launchRecords.filter(record => record.itemId === input.itemId),
+        agents: input.itemId === uuid(1) ? [{ agentId: "agent_archived", launchId: "launch-preview-4", workspaceId: "wks_archived", title: "弱网重试提示", provider: "claude", status: "idle", archivedAt: new Date(NOW - 20 * 60 * 60_000).toISOString(), createdAt: launchRecords[3].at, updatedAt: launchRecords[3].at }] : [] };
+      return input.revision === "launches-1" ? { unchanged: true, revision: "launches-1" } : { revision: "launches-1", records: launchRecords };
+    }
+    case "settings.quick-prompts.read": return { status: "ready", values: { prompts: quickState.prompts }, revision: quickState.revision };
+    case "settings.quick-prompts.write": {
+      if (input.revision !== quickState.revision) return { status: "conflict", error: "Settings changed on another client. Reload before saving again." };
+      const revision = `quick-${Number(quickState.revision.slice(6)) + 1}`;
+      Object.assign(quickState, { prompts: structuredClone(input.values.prompts), revision });
+      return { status: "saved", values: input.values, revision };
+    }
+    case "project-notes.quick.note": {
+      const found = board(input.projectId).items.find(item => item.id === input.itemId && !item.deletedAt && item.kind === "prompt");
+      return found ? { ...structuredClone(found), projectName: projects.find(project => project.id === input.projectId)?.name ?? "" } : null;
     }
     case "project-notes.launch-status": {
       const launch = launches.get(input.launchId);

@@ -1,94 +1,117 @@
 import { t } from "../shared/text";
 import { onTextChange } from "../shared/i18n";
 import { useI18n } from "./i18n-client";
-import type { PaseoAgentListResult, PaseoAgentUpdate } from "./paseo-types";
 import type { PluginButtonContentProps, PluginButtonIconProps, PluginButtonRegistration, PluginClientContext } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
-import { useEffect, type ComponentType } from "react";
-import { onComposerNotice } from "./composer-notice";
+import { createElement, useEffect, type ComponentType } from "react";
+import { Dimensions } from "react-native";
+import { onComposerNotice, showComposerNotice } from "./composer-notice";
+import type { AgentDirectory, AgentLite } from "./agent-directory";
+import type { QuickStore } from "./quick-store";
+import { createQuickPills } from "./quick-pills";
+import { composerCapabilitiesRpc } from "../shared/composer-boot";
+import { quickRef, type QuickEntry } from "../shared/quick";
+import type { QuickActions } from "./quick-send";
 
-/** Keep the kit's violet mark and light/dark contrast rule without importing its lazy UI text into the resident. */
-function promptIconColor(surface: string): string {
+/** Pick the light or the dark shade of a mark for the composer's ground, by the same contrast rule as the kit. */
+function markColor(surface: string, light: string, dark: string): string {
   const short = /^#([a-f\d])([a-f\d])([a-f\d])$/i.exec(surface);
   const hex = short ? short.slice(1).map(part => part + part).join("") : /^#([a-f\d]{6})(?:[a-f\d]{2})?$/i.exec(surface)?.[1];
-  if (!hex) return "#8B5CF6";
+  if (!hex) return light;
   const [r, g, b] = [0, 2, 4].map(offset => { const channel = parseInt(hex.slice(offset, offset + 2), 16) / 255; return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4; });
   const luminance = 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-  return 1.05 / (luminance + 0.05) > (luminance + 0.05) / 0.05 ? "#A78BFA" : "#8B5CF6";
+  return 1.05 / (luminance + 0.05) > (luminance + 0.05) / 0.05 ? dark : light;
 }
+/** The kit's violet (prompts) and amber (waits for something) marks. */
+const VIOLET: [string, string] = ["#8B5CF6", "#A78BFA"], AMBER: [string, string] = ["#D97706", "#FBBF24"];
+const mark = (name: string, colors: [string, string]) => function PillMark({ theme, size }: PluginButtonIconProps) {
+  return <Icon name={name} color={markColor(theme.colors.surface0, colors[0], colors[1])} size={size} />;
+};
 
-/** One metadata observation, no timeline reads or per-agent polling; the library is read only when a picker opens. */
-export function contributePromptPills(client: PluginClientContext, PromptPopover: ComponentType<PluginButtonContentProps>) {
+/**
+ * Composer pills: 「提示词」 (the library) on every agent, then the quick prompts. One shared observation of the agent
+ * directory, no timeline reads or per-agent polling; the library and each prompt's text are read only when used, and
+ * the send itself (`actions`, the quick chunk) comes with the first press.
+ */
+export function contributePromptPills(client: PluginClientContext, PromptPopover: ComponentType<PluginButtonContentProps & { quick?: QuickEntry }>, services: { directory: AgentDirectory; quick: QuickStore }, actions: () => Promise<QuickActions>) {
   if (typeof client.addComposerPill !== "function") return () => {};
+  const { directory, quick: store } = services;
   function PromptIcon({ theme, size }: PluginButtonIconProps) {
     useI18n();
     const toast = useToast();
     useEffect(() => onComposerNotice(client.paseo, message => toast.show(message, { variant: "success" })), [toast]);
-    return <Icon name="MessageSquareText" color={promptIconColor(theme.colors.surface0)} size={size} />;
+    return <Icon name="MessageSquareText" color={markColor(theme.colors.surface0, VIOLET[0], VIOLET[1])} size={size} />;
   }
-  const pills = new Map<string, { workspaceId: string; registration: PluginButtonRegistration }>();
-  const lifetime = new AbortController();
-  let observation: PaseoAgentListResult["subscription"];
-  let unsubscribe: (() => void) | undefined, retry: ReturnType<typeof setTimeout> | undefined;
-  let delay = 2_000;
-  let snapshotVersion = 0, pendingChanges: PaseoAgentUpdate[] | null = null;
-  function remove(id: string) { pills.get(id)?.registration.remove(); pills.delete(id); }
-  function put(agent: { id: string; workspaceId?: string; archivedAt?: string | null }) {
-    if (lifetime.signal.aborted) return;
-    if (!agent.workspaceId || agent.archivedAt) { remove(agent.id); return; }
-    if (pills.get(agent.id)?.workspaceId === agent.workspaceId) return;
-    remove(agent.id);
-    pills.set(agent.id, { workspaceId: agent.workspaceId, registration: client.addComposerPill({ id: "note-prompts", workspaceId: agent.workspaceId, agentId: agent.id, button: { title: t("boot.pillTitle"), label: t("boot.pillLabel"), icon: PromptIcon, behavior: { kind: "popover", Content: PromptPopover } } }) });
-  }
-  async function snapshot(list: PaseoAgentListResult) {
-    if (lifetime.signal.aborted) return;
-    delay = 2_000;
-    const version = ++snapshotVersion, entries = [...list.entries];
-    pendingChanges = [];
-    try {
-      const cursors = new Set<string>();
-      while (list.pageInfo?.hasMore && list.pageInfo.nextCursor && !cursors.has(list.pageInfo.nextCursor)) {
-        const cursor = list.pageInfo.nextCursor; cursors.add(cursor);
-        list = await client.paseo.agents.list({ filter: { includeArchived: false }, page: { limit: 200, cursor }, signal: lifetime.signal });
-        if (lifetime.signal.aborted || snapshotVersion !== version) return;
-        entries.push(...list.entries);
-      }
-      const changes = pendingChanges; pendingChanges = null;
-      const ids = new Set(entries.map(entry => entry.agent.id));
-      for (const id of pills.keys()) if (!ids.has(id)) remove(id);
-      for (const { agent } of entries) put(agent);
-      for (const change of changes) update(change);
-    } catch { if (snapshotVersion === version) { pendingChanges = null; failed(); } }
-  }
-  function update(change: PaseoAgentUpdate) {
-    if (lifetime.signal.aborted) return;
-    pendingChanges?.push(change);
-    if (change.kind === "remove") remove(change.agentId); else put(change.agent);
-  }
-  function failed() {
-    unsubscribe?.(); unsubscribe = undefined;
-    void observation?.release().catch(() => {}); observation = undefined;
-    if (lifetime.signal.aborted || retry) return;
-    retry = setTimeout(() => { retry = undefined; void open(); }, delay);
-    delay = Math.min(delay * 2, 60_000);
-  }
-  async function open() {
-    try {
-      const result = await client.paseo.agents.list({ filter: { includeArchived: false }, subscribe: {}, signal: lifetime.signal });
-      if (lifetime.signal.aborted) { await result.subscription?.release(); return; }
-      observation = result.subscription;
-      snapshot(result);
-      if (observation) unsubscribe = observation.subscribe({ snapshot, update: message => { if (message.type === "agent_update") update(message.payload); }, error: failed });
-      else unsubscribe = client.paseo.agents.subscribe(update);
-    } catch { failed(); }
-  }
-  const stopText = onTextChange(() => {
-    for (const pill of pills.values()) pill.registration.update({ title: t("boot.pillTitle"), label: t("boot.pillLabel") });
+  // One stable fill form per prompt: the prompt picker opened on it.
+  const forms = new Map<string, ComponentType<PluginButtonContentProps>>();
+  const fill = (entry: QuickEntry) => {
+    let form = forms.get(quickRef(entry));
+    if (!form) {
+      const ref = { ...entry };
+      form = (props: PluginButtonContentProps) => createElement(PromptPopover, { ...props, quick: ref });
+      forms.set(quickRef(entry), form);
+    }
+    return form;
+  };
+  const quick = createQuickPills({
+    addComposerPill: contribution => client.addComposerPill(contribution),
+    // A chunk that will not load sent nothing (pressing again is safe); a lost answer is the sender's to word.
+    send: (request, hooks) => actions().then(loaded => loaded.quickSend(request, hooks), (error: unknown) => { throw new Error(hooks.notSent(error instanceof Error ? error.message.slice(0, 300) : String(error))); }),
+    notice: message => showComposerNotice(client.paseo, message),
+    openManager: () => { if (typeof client.openScreen === "function") client.openScreen({ screenId: "notes", params: { view: "quick" } }); else client.openSurface("notes"); },
+    fill,
+    openFill: (agentId, entry) => { if (typeof client.openScreen === "function") client.openScreen({ screenId: "prompts", params: { agentId, projectId: entry.projectId, itemId: entry.itemId } }); else client.openSurface("prompts"); },
+    icons: { send: mark("Zap", VIOLET), ask: mark("Zap", AMBER), fill: mark("Braces", VIOLET) },
   });
-  void open();
+  // Paseo's pill row is one line that neither wraps nor scrolls: separate one-tap pills would squeeze every plugin's
+  // label to a letter on a phone, and on a window under 1024 px with the sidebar (a 900 px window leaves the composer
+  // about 550 px). There they fold into one menu pill, following rotation and resizing. Known before the first pill
+  // registers, so nothing unfolds and folds again.
+  const narrow = () => { const { width } = Dimensions.get("window"); return width > 0 && width < 1024; };
+  quick.setNarrow(narrow());
+  const resized = Dimensions.addEventListener?.("change", () => quick.setNarrow(narrow()));
+  const library = new Map<string, { workspaceId: string; registration: PluginButtonRegistration }>();
+  let stopped = false, capabilities: "none" | "loading" | "loaded" = "none";
+  // Whether a running agent takes a message mid-turn depends on the daemon's provider config: read it once a prompt shows.
+  const loadCapabilities = () => {
+    if (capabilities !== "none" || !quick.active()) return;
+    capabilities = "loading";
+    client.rpc(composerCapabilitiesRpc, {}).then(result => { if (stopped) return; capabilities = "loaded"; quick.setSteerable(result.steerableProviders); }, () => { capabilities = "none"; });
+  };
+  function remove(id: string) { library.get(id)?.registration.remove(); library.delete(id); quick.removeAgent(id); }
+  function put(agent: AgentLite) {
+    if (stopped) return;
+    if (!agent.workspaceId) { remove(agent.id); return; }
+    if (library.get(agent.id)?.workspaceId !== agent.workspaceId) {
+      remove(agent.id);
+      library.set(agent.id, { workspaceId: agent.workspaceId, registration: client.addComposerPill({ id: "note-prompts", workspaceId: agent.workspaceId, agentId: agent.id, button: { title: t("boot.pillTitle"), label: t("boot.pillLabel"), icon: PromptIcon, behavior: { kind: "popover", Content: PromptPopover } } }) });
+    }
+    // After the library pill: registration order is display order.
+    quick.setAgent(agent);
+  }
+  const stopDirectory = directory.subscribe(changed => {
+    if (changed === null) {
+      const live = new Set<string>();
+      for (const agent of directory.list()) { live.add(agent.id); put(agent); }
+      for (const id of [...library.keys()]) if (!live.has(id)) remove(id);
+      loadCapabilities();
+      return;
+    }
+    changed.forEach(id => { const agent = directory.get(id); if (agent) put(agent); else remove(id); });
+  });
+  if (directory.ready()) for (const agent of directory.list()) put(agent);
+  const showEntries = () => { if (store.ready()) { quick.setEntries(store.entries()); loadCapabilities(); } };
+  const stopStore = store.subscribe(showEntries);
+  showEntries();
+  const stopText = onTextChange(() => {
+    // Presentation only (no behavior): an open library popover stays open.
+    for (const pill of library.values()) pill.registration.update({ title: t("boot.pillTitle"), label: t("boot.pillLabel") });
+    quick.refreshText();
+  });
   return () => {
-    stopText(); lifetime.abort(); if (retry) clearTimeout(retry); unsubscribe?.();
-    void observation?.release().catch(() => {});
-    for (const id of pills.keys()) remove(id);
+    stopped = true;
+    stopText(); stopStore(); stopDirectory(); resized?.remove();
+    quick.removeAll();
+    for (const id of [...library.keys()]) remove(id);
   };
 }

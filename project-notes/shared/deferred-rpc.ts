@@ -24,6 +24,8 @@ export const DeferredViewSchema = z.object({
   at: z.number(),
   state: z.enum(["queued", "held", "sending", "sent", "maybe-sent", "canceled", "discarded", "expired"]),
   note: z.string(),
+  /** A scheduled message's time (UTC ms); only on messages queued with `notBefore`. */
+  notBefore: z.number().optional(),
 });
 export type DeferredView = z.infer<typeof DeferredViewSchema>;
 
@@ -74,20 +76,29 @@ export function deferredSendContracts(prefix: string) {
     /**
      * Queue a message (or send it now if the agent is already free); the same `messageId` again returns its state.
      * Content already on its way (same agent and key), or the answer to its `group`, answers with that message under its own
-     * id. A `guard` that no longer holds is answered with the message dropped (未发送, its note says why).
+     * id. A `guard` that no longer holds is answered with the message dropped (未发送, its note says why). `notBefore`
+     * (UTC ms, at most a week ahead) schedules it: it is not delivered before that time.
      */
     enqueue: defineRpc({
       name: `${prefix}.deferred.enqueue`,
       input: z.object({ agentId: z.string().min(1), text: z.string().min(1).max(200_000), messageId: z.string().min(8).max(100), source: z.string().max(200).optional(), key: sendKey.optional(),
-        group: sendKey.optional(), guard: DeferredGuardSchema.optional() }),
+        group: sendKey.optional(), guard: DeferredGuardSchema.optional(), notBefore: z.number().int().positive().optional() }),
       output: DeferredViewSchema,
     }),
     /** Queued, held and sending messages, plus the last half hour's outcomes; newest first. */
     list: defineRpc({ name: `${prefix}.deferred.list`, input: z.object({ agentId: z.string().optional() }), output: z.array(DeferredViewSchema) }),
     cancel: defineRpc({ name: `${prefix}.deferred.cancel`, input: z.object({ messageId: z.string().min(1) }), output: DeferredViewSchema.nullable() }),
-    /** Send a held message anyway (same id and options, once the agent is free). */
-    resume: defineRpc({ name: `${prefix}.deferred.resume`, input: z.object({ messageId: z.string().min(1) }), output: DeferredViewSchema.nullable() }),
+    /**
+     * Send a held message anyway (same id and options, once the agent is free). `now`: a scheduled message goes without
+     * waiting for its time (立即发送); without it a scheduled message keeps its time.
+     */
+    resume: defineRpc({ name: `${prefix}.deferred.resume`, input: z.object({ messageId: z.string().min(1), now: z.boolean().optional() }), output: DeferredViewSchema.nullable() }),
   };
+}
+
+/** Queued for a time still ahead (`notBefore`): it waits for that time before anything else. */
+export function isScheduled(view: Pick<DeferredView, "state" | "notBefore">, now = Date.now()): boolean {
+  return view.state === "queued" && typeof view.notBefore === "number" && view.notBefore > now;
 }
 
 /** Still on its way: queued, held for the user's OK, or sending. At most one per agent and key. */

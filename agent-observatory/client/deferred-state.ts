@@ -1,5 +1,5 @@
 import { t } from "../shared/text";
-import { deferOffer, isOnItsWay, type DeferredView } from "../shared/deferred-rpc";
+import { deferOffer, isOnItsWay, isScheduled, type DeferredView } from "../shared/deferred-rpc";
 import { contentKey, newMessageId, type Consent } from "./send-plan";
 
 /**
@@ -41,10 +41,19 @@ export function quickReplyGuard(prompt: string | null | undefined, round: string
   return { prompt: prompt ?? null, round: round ?? null };
 }
 
-/** While a message is on its way and the app is in front, the list is read again this often; otherwise never. */
+/**
+ * While a message is on its way and the app is in front, the list is read again this often; otherwise never. A message
+ * scheduled for later (定时发送) does not count: `scheduledPollInterval` reads for it, slowly, until its time.
+ */
 export const DEFERRED_POLL_MS = 5_000;
-export function deferredPollInterval(views: readonly Pick<DeferredView, "state">[] | undefined, foreground: boolean): number | false {
-  return foreground && !!views?.some(isOnItsWay) ? DEFERRED_POLL_MS : false;
+export function deferredPollInterval(views: readonly Pick<DeferredView, "state" | "notBefore">[] | undefined, foreground: boolean, now = Date.now()): number | false {
+  return foreground && !!views?.some(view => isOnItsWay(view) && !isScheduled(view, now)) ? DEFERRED_POLL_MS : false;
+}
+/** Only scheduled messages on their way: once a minute, and just after the next one's time; never in the background. */
+export function scheduledPollInterval(views: readonly Pick<DeferredView, "state" | "notBefore">[] | undefined, foreground: boolean, now = Date.now()): number | false {
+  const times = (views ?? []).filter(view => isOnItsWay(view)).map(view => view.notBefore ?? now);
+  if (!foreground || !times.length) return false;
+  return Math.max(DEFERRED_POLL_MS, Math.min(60_000, Math.min(...times) - now + 3_000));
 }
 
 /** How long an outcome stays after this app first saw it: 已送达 / 已取消 briefly, the ones to look at longer. */

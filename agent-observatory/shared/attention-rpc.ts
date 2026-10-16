@@ -9,6 +9,7 @@ import { z } from "zod";
 import { ATTENTION_PHASES } from "./attention-phases";
 import { REPLY_NUDGES } from "./reply";
 import { TIME_ZONE } from "./time-zone";
+import { chimeSchema } from "./alerts";
 
 const id = z.string().min(1).max(256);
 const pendingSchema = z.object({ kind: z.enum(["tool", "plan", "question", "mode", "other"]), title: z.string().max(240).nullable(), detail: z.string().max(240).nullable(), options: z.array(z.string().max(60)).max(4) });
@@ -48,6 +49,8 @@ const summarySchema = z.object({
   ready: z.boolean(),
   /** The server's latest directory read failed: no number either, and the popover says so. */
   failed: z.boolean(),
+  /** 提示音 (2.17): every waiting entry's event while the chime is on, null while it is off; older servers send none. */
+  chime: chimeSchema.nullable().optional(),
 });
 export type AttentionSummary = z.infer<typeof summarySchema>;
 export const getAttention = defineRpc({

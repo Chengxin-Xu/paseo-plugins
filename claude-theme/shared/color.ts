@@ -53,6 +53,21 @@ function fitToSrgb(colour: Oklch): Linear {
   return toLinear({ ...colour, c: reachable });
 }
 
+/**
+ * The most chroma sRGB can show at lightness `l` and hue `h`. The custom theme scales its accent by this, so 100 %
+ * vividness is the most colourful accent each hue allows, whatever the hue.
+ */
+export function maxChroma(l: number, h: number): number {
+  let reachable = 0;
+  let tooColourful = 0.5;
+  for (let step = 0; step < 24; step += 1) {
+    const middle = (reachable + tooColourful) / 2;
+    if (fits(toLinear({ l, c: middle, h }))) reachable = middle;
+    else tooColourful = middle;
+  }
+  return reachable;
+}
+
 const encode = (value: number) => {
   const clamped = Math.min(1, Math.max(0, value));
   const gamma = clamped <= 0.0031308 ? clamped * 12.92 : 1.055 * clamped ** (1 / 2.4) - 0.055;

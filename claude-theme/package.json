@@ -2,13 +2,14 @@
   "name": "paseo-terracotta-themes",
   "private": true,
   "type": "module",
-  "version": "0.5.1",
-  "description": "Twelve color themes for Paseo, six dark and six light, derived from one perceptual tonal ladder",
+  "version": "0.6.0",
+  "description": "Twelve color themes for Paseo, six dark and six light, derived from one perceptual tonal ladder, plus a live custom theme tuned with sliders",
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "preview": "node --experimental-strip-types scripts/preview.mjs"
+    "test": "node --test --experimental-strip-types --import ./tests/support/register.mjs tests/*.test.ts",
+    "preview": "node --experimental-strip-types scripts/preview.mjs",
+    "generate": "node --experimental-strip-types scripts/generate-themes.mjs"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.11.0",

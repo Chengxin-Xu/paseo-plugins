@@ -90,8 +90,6 @@
     "takeManualControlAndReload": "切到手动并刷新",
     "reloading": "正在刷新…",
     "takeManualControlAndOpenAUrl": "切到手动并打开网址",
-    "workspaceServices": "本工作区服务",
-    "openThisWorkspaceSDevelopmentServiceIn": "在新标签页打开这个工作区的开发服务",
     "matchWindow": "匹配窗口",
     "fullWidth": "完整宽度",
     "fittingThePageWidth": "正在适应页面宽度…",
@@ -447,6 +445,35 @@
     "recoveryCountWithLast": "{count} 次 · 最近 {time}",
     "tabLabel": "标签页 {title}"
   },
+  "agentPorts": {
+    "title": "Agent 开的端口",
+    "menuLabel": "服务与端口",
+    "menuHint": "本工作区的开发服务和 Agent 开的端口",
+    "empty": "这个工作区的 Agent 还没有在监听端口。Agent 启动开发服务后会出现在这里，点一下就在新标签页打开。",
+    "others": "其他工作区",
+    "showOthers": {
+      "other": "展开其他工作区的 {count} 个端口"
+    },
+    "hideOthers": "收起其他工作区的端口",
+    "local": "仅本机",
+    "all": "所有地址",
+    "address": "仅 {address}",
+    "running": "Agent 运行中",
+    "idle": "Agent 空闲",
+    "error": "Agent 出错，端口仍占用",
+    "closed": "Agent 已停止，端口仍占用",
+    "archived": "Agent 已归档，端口仍占用",
+    "untitled": "未命名 Agent",
+    "unnamedProcess": "未知进程",
+    "openLabel": "在新标签页打开端口 {port}：{agent}，{process}，{scope}，{state}",
+    "opening": "正在打开端口 {port}",
+    "opened": "已在新标签页打开端口 {port}",
+    "partial": "进程或端口太多，只列出了一部分。",
+    "uncertain": "有些端口暂时查不到是哪个 Agent 开的，稍后自动重试。",
+    "failed": "暂时无法读取端口，稍后自动重试。",
+    "notOpenable": "这个地址不能在共享浏览器里打开",
+    "new": "新"
+  },
   "browserWeb": {
     "typeInThePageView": "在网页画面中输入"
   },
@@ -544,7 +571,9 @@
     "requestTooLarge": "Request too large",
     "forbidden": "Forbidden",
     "invalidOwner": "Invalid control owner",
-    "notFound": "Not found"
+    "notFound": "Not found",
+    "portNotListed": "端口 {port} 不在 Agent 开的端口列表里，没有打开。请刷新列表再试。",
+    "portNotOpenable": "端口 {port} 监听的地址不能在共享浏览器里打开。"
   },
   "runtime": {
     "sandboxUnavailable": "没有可用的沙箱，需要非特权用户命名空间或 setuid 沙箱",

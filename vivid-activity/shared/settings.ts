@@ -68,6 +68,15 @@ export const DEFAULT_FOLD = true;
 /** 0.6.0: 「钉住本轮提问」 (shared/prompt-pin.ts). */
 export const DEFAULT_PIN_PROMPT = true;
 
+/**
+ * 0.8.0: 「运行中动画」, the mark at the end of a running row: the spinner (default, the observatory's running mark too),
+ * or one of the animations in shared/loaders.ts, drawn by the lazy fx chunk.
+ */
+export const LOADER_KINDS = ["spinner", "sparkle", "orb", "snake", "matrix"] as const;
+export type LoaderKind = (typeof LOADER_KINDS)[number];
+export const DEFAULT_LOADER: LoaderKind = "spinner";
+export const loaderSchema = z.enum(LOADER_KINDS);
+
 export const activitySettings = defineSettings({
   id: "display",
   scope: "host",
@@ -81,6 +90,8 @@ export const activitySettings = defineSettings({
     density: densitySchema.default(DEFAULT_DENSITY),
     // 0.6.0：同上，旧设置没有这一项，读出来取默认值。
     pinPrompt: z.boolean().default(DEFAULT_PIN_PROMPT),
+    // 0.8.0：同上。
+    loader: loaderSchema.default(DEFAULT_LOADER),
   }),
 });
 

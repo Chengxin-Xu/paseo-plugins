@@ -1,10 +1,11 @@
 import { defineRpc } from "@getpaseo/plugin";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
+import { MAX_CALL_FILES, toolChanges, toolExitCode, type CallChanges } from "./changes";
 import { reasoningKey, toolKey, type IndexRow, type StepStatus } from "./fold";
 import { comparableResult, isForegroundNotice, noticeLook, readTaskNotice, rowResultText, TASK_NOTICE_TOOL, type ComparableResult } from "./notice";
 import { piNoticeStatus, readPiNotice } from "./pi-notice";
-import { extractApplyPatchEdits, isApplyPatchTool, normalizeToolCallDetail, resolveToolCallPresentation } from "./presentation";
+import { extractApplyPatchEdits, isApplyPatchTool, normalizeToolCallDetail, resolveToolCallPresentation, withMetadataEditDiff } from "./presentation";
 import { pluginCardOf } from "./plugin-cards";
 import { lookFor, type LookKey } from "./vivid-model";
 
@@ -51,12 +52,28 @@ export const wireRowSchema = z.object({
   u: z.number().int().nonnegative().optional(),
   /** 0.6.0: about how many lines an Agent's text takes (shared/prompt-pin.ts measures how far the question is). */
   ln: z.number().int().min(1).max(TEXT_LINES_CAP).optional(),
+  /** 0.8.0: lines a finished call added and removed per file, [file id (a short hash of its path), added, removed] (shared/changes.ts). */
+  ch: z.array(z.tuple([z.string().min(1).max(16), z.number().int().nonnegative(), z.number().int().nonnegative()])).min(1).max(MAX_CALL_FILES).optional(),
+  /** 0.8.0: changes of the call whose lines are not known (a write, a deletion, a diff cut short, a patch Paseo kept only part of). */
+  nc: z.number().int().min(1).max(MAX_CALL_FILES).optional(),
+  /** 0.8.0: a failed command's exit code, when it reports one. */
+  x: z.number().int().optional(),
 });
 export type WireRow = z.output<typeof wireRowSchema>;
 
 /** A turn of the page: Paseo's `turnId` and its start when the plugin server knows it (`turn_started`, `activeTurn`). */
 const turnSchema = z.object({ id: z.string().min(1).max(200), at: z.number().nonnegative().nullable() });
 export type WireTurn = z.output<typeof turnSchema>;
+
+const tokenCount = z.number().int().nonnegative();
+/**
+ * 0.8.0: the tokens of one turn the plugin server watched live (server/turn-usage.ts): fresh input, cache reads (null when
+ * the provider does not say) and output. `live`: the turn is still running and the figures still grow.
+ */
+const turnTokensSchema = z.object({ id: z.string().min(1).max(200), i: tokenCount, c: tokenCount.nullable(), o: tokenCount, live: z.boolean().optional() });
+export type WireTurnTokens = z.output<typeof turnTokensSchema>;
+/** Most turns one answer reports tokens for. */
+export const MAX_TOKEN_TURNS = 8;
 
 export const foldIndexRpc = defineRpc({
   name: "fold-index",
@@ -85,6 +102,8 @@ export const foldIndexRpc = defineRpc({
     turns: z.array(turnSchema).max(1000).optional(),
     /** The turn running now, from the Agent snapshot; null when none is. */
     active: turnSchema.nullable().optional(),
+    /** 0.8.0: tokens of the page's turns and the latest ones, where the server watched them live. */
+    tok: z.array(turnTokensSchema).max(MAX_TOKEN_TURNS).optional(),
   }),
 });
 export type FoldIndexInput = z.input<typeof foldIndexRpc.input>;
@@ -180,16 +199,28 @@ export function exceedsTextBudget(value: unknown, budget: number): boolean {
 
 /** The row look the client draws for a tool call (apply_patch rows draw as edits). */
 export function toolLook(item: Pick<ToolItem, "name" | "detail" | "metadata">): LookKey {
+  return toolFacts(item).look;
+}
+
+/**
+ * The look of a tool call, and (0.8.0) the lines it changed per file and a failed command's exit code (shared/changes.ts).
+ * The detail is normalized once for all three, after `withMetadataEditDiff` as the row itself does (createToolCallData).
+ */
+export function toolFacts(item: Pick<ToolItem, "name" | "detail" | "metadata"> & { status?: string; error?: unknown }, cwd?: string | null): { look: LookKey; changes: CallChanges | null; exit: number | null } {
   const notice = readTaskNotice(item);
-  if (notice) return noticeLook(notice.kind);
+  if (notice) return { look: noticeLook(notice.kind), changes: null, exit: null };
   const pi = readPiNotice(item);
-  if (pi) return pi.look;
+  if (pi) return { look: pi.look, changes: null, exit: null };
   if (isApplyPatchTool(item.name)) {
     const edits = extractApplyPatchEdits(item.detail, item.detail?.type === "unknown" ? item.detail.output : undefined, item.metadata);
-    if (edits.length > 0) return edits.every((edit) => edit.operation === "add") ? "write" : "edit";
+    if (edits.length > 0) return { look: edits.every((edit) => edit.operation === "add") ? "write" : "edit", changes: toolChanges(item, cwd), exit: null };
   }
-  const detail = normalizeToolCallDetail(item.detail, item.name);
-  return lookFor(item.name, detail, resolveToolCallPresentation({ name: item.name, detail }));
+  const detail = normalizeToolCallDetail(withMetadataEditDiff(item).detail, item.name);
+  return {
+    look: lookFor(item.name, detail, resolveToolCallPresentation({ name: item.name, detail })),
+    changes: toolChanges(item, cwd, detail),
+    exit: toolExitCode(item, detail),
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -200,7 +231,7 @@ function record(value: unknown): Record<string, unknown> {
  * One projected timeline entry → its wire row. `rowResult` gives the final result of a tool row of the same page by call
  * id, as compared (`wirePageFromEntries`), so a notice that repeats the result its row already shows folds into that row.
  */
-export function wireRowFromEntry(entry: unknown, rowResult?: (callId: string) => ComparableResult | null | undefined): WireRow | null {
+export function wireRowFromEntry(entry: unknown, rowResult?: (callId: string) => ComparableResult | null | undefined, cwd?: string | null): WireRow | null {
   const source = record(entry);
   const item = record(source.item);
   const type = typeof item.type === "string" ? item.type : null;
@@ -234,9 +265,14 @@ export function wireRowFromEntry(entry: unknown, rowResult?: (callId: string) =>
       ? piNoticeStatus(pi.state)
       : ["running", "completed", "failed", "canceled"].includes(tool.status) ? tool.status : "completed";
   let look: LookKey = pi ? pi.look : "other";
+  let changes: CallChanges | null = null;
+  let exit: number | null = null;
   if (small && !pi) {
     try {
-      look = toolLook(tool);
+      const facts = notice ? { look: noticeLook(notice.kind), changes: null, exit: null } : toolFacts(tool, cwd);
+      look = facts.look;
+      changes = facts.changes;
+      exit = facts.exit;
     } catch {
       look = "other";
     }
@@ -249,6 +285,9 @@ export function wireRowFromEntry(entry: unknown, rowResult?: (callId: string) =>
     look,
     ...(notice?.ref ? { ref: notice.ref } : {}),
     ...(notice ? { fg: isForegroundNotice(notice, notice.ref ? rowResult?.(notice.ref) : undefined) } : {}),
+    ...(changes && changes.files.length > 0 ? { ch: changes.files.map(([file, added, removed]): [string, number, number] => [file, added, removed]) } : {}),
+    ...(changes && changes.uncounted > 0 ? { nc: Math.min(changes.uncounted, MAX_CALL_FILES) } : {}),
+    ...(exit !== null ? { x: exit } : {}),
   };
 }
 
@@ -281,13 +320,13 @@ function resultsForRepeats(entries: readonly unknown[]): Map<string, ComparableR
  * One page of projected entries → wire rows plus the table of their turns. `turnStart` gives the start the server knows
  * for a turn id (null when unknown).
  */
-export function wirePageFromEntries(entries: readonly unknown[], turnStart: (turnId: string) => number | null): { rows: WireRow[]; turns: WireTurn[] } {
+export function wirePageFromEntries(entries: readonly unknown[], turnStart: (turnId: string) => number | null, cwd?: string | null): { rows: WireRow[]; turns: WireTurn[] } {
   const rows: WireRow[] = [];
   const turns: WireTurn[] = [];
   const index = new Map<string, number>();
   const results = resultsForRepeats(entries);
   for (const entry of entries) {
-    const row = wireRowFromEntry(entry, (callId) => results.get(callId));
+    const row = wireRowFromEntry(entry, (callId) => results.get(callId), cwd);
     if (!row) continue;
     const turnId = record(entry).turnId;
     if (typeof turnId === "string" && turnId && turnId.length <= 200) {
@@ -320,5 +359,8 @@ export function indexRowFromWire(row: WireRow, turns?: readonly WireTurn[]): Ind
     ...(row.w ? { what: row.w } : {}),
     ...(row.ln !== undefined ? { lines: row.ln } : {}),
     ...(turn ? { turn } : {}),
+    ...(row.ch ? { changes: row.ch.map(([file, added, removed]) => ({ file, added, removed })) } : {}),
+    ...(row.nc ? { uncounted: row.nc } : {}),
+    ...(row.x !== undefined ? { exit: row.x } : {}),
   };
 }

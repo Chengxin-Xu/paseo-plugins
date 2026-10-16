@@ -7,13 +7,16 @@ import { BoardStore } from "./server/store";
 import { DashboardService, ProjectDirectory, boardProjects } from "./server/dashboard";
 import { projectsRpc, readBoardRpc, readDashboardRpc, readHistoryRpc, writeBoardRpc } from "./shared/board";
 import { LaunchService, loadLaunchOptions } from "./server/launch";
-import { launchOptionsRpc, launchRpc, launchStatusRpc } from "./shared/launch";
+import { launchesRpc, launchOptionsRpc, launchRpc, launchStatusRpc } from "./shared/launch";
 import { ComposerLibrary } from "./server/composer";
 import { probeProject } from "./server/enhance";
 import { promptEnvironmentRpc } from "./shared/enhance";
 import { composerAttachmentsRpc, composerCapabilitiesRpc, composerSearchRpc, notesDeferred } from "./shared/composer";
 import { DeferredSend } from "./server/deferred-send";
 import { daemonHome, readSendCapabilities } from "./server/steerable-providers";
+import { QuickPrompts } from "./server/quick";
+import { quickSendRpc } from "./shared/quick-send";
+import { quickNoteRpc, quickSettings } from "./shared/quick-settings";
 
 export default function contribute(server: PluginServerContext) {
   const locales = createLocaleService(server, { pluginId: "project-notes", builtins: BUILTIN_CATALOGS });
@@ -28,6 +31,9 @@ export default function contribute(server: PluginServerContext) {
   // picker read.
   const deferred = new DeferredSend({ file: join(daemonHome(), "plugin-data", "project-notes", "deferred-send.json"), capabilities: readSendCapabilities });
   const handle: PluginServerContext["handle"] = (contract, handler) => server.handle(contract, (input, context) => { deferred.use(context?.paseo); return handler(input, context); });
+  // 一键发送: the list is a host setting (every app follows a change at once); the server only reads the note to send it.
+  if (typeof server.registerSettings === "function") server.registerSettings(quickSettings);
+  const quick = new QuickPrompts(store, deferred, projects);
   registerClientChunks({ handle });
   handle(promptEnvironmentRpc, ({ projectId }, { paseo }) => probeProject(projectId, paseo, projects));
   handle(composerSearchRpc, (input, { paseo }) => composer.search(paseo, input.query, input.promptsOnly));
@@ -41,9 +47,15 @@ export default function contribute(server: PluginServerContext) {
   handle(notesDeferred.list, input => deferred.list(input));
   handle(notesDeferred.cancel, ({ messageId }) => deferred.cancel(messageId));
   handle(notesDeferred.resume, ({ messageId }, { paseo }) => deferred.resume(messageId, paseo));
+  handle(quickSendRpc, (input, { paseo }) => quick.send(input, paseo));
+  handle(quickNoteRpc, ({ projectId, itemId }, { paseo }) => quick.note(paseo, projectId, itemId));
   handle(launchOptionsRpc, (input, { paseo }) => loadLaunchOptions(paseo, input.projectId, () => projects.list(paseo)));
   handle(launchRpc, (input, { paseo }) => launches.start(input, paseo));
   handle(launchStatusRpc, (input, { paseo }) => launches.status(input.launchId, paseo));
+  handle(launchesRpc, async ({ revision, itemId }, { paseo }) => {
+    const result = await launches.records(itemId ? { itemId, paseo } : {});
+    return !itemId && revision === result.revision ? { unchanged: true as const, revision } : result;
+  });
   handle(projectsRpc, async (_input, { paseo }) => ({ projects: boardProjects(await projects.list(paseo)) }));
   handle(readBoardRpc, async ({ projectId }) => store.read(projectId));
   handle(readDashboardRpc, (input, { paseo }) => dashboard.read(paseo, input.revision, input.refreshProjectIds));

@@ -1,5 +1,6 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { wirePageFromEntries, type FoldIndexInput, type FoldIndexOutput, type WireTurn } from "../shared/fold-index.js";
+import type { TurnUsage } from "./turn-usage.js";
 
 const DEFAULT_LIMIT = 150;
 
@@ -13,7 +14,7 @@ type TimelinePayload = {
   reset?: unknown;
   staleCursor?: unknown;
   gap?: unknown;
-  agent?: { status?: unknown; activeTurn?: { turnId?: unknown; startedAt?: unknown } | null } | null;
+  agent?: { status?: unknown; cwd?: unknown; provider?: unknown; lastUsage?: unknown; activeTurn?: { turnId?: unknown; startedAt?: unknown } | null } | null;
   error?: unknown;
 };
 
@@ -93,8 +94,10 @@ function isMissing(message: unknown): boolean {
 /**
  * Reads one page of the Agent's projected timeline inside the daemon and returns its compact index. Only Agents a client
  * is showing ask for this, and showing an Agent already loads it, so the read does not wake idle sessions.
+ * 0.8.0: the Agent record that comes with the page also feeds the turn tokens (`usage`, server/turn-usage.ts); nothing
+ * more is read for them.
  */
-export async function handleFoldIndex(input: FoldIndexInput, context: PluginHandlerContext): Promise<FoldIndexOutput> {
+export async function handleFoldIndex(input: FoldIndexInput, context: PluginHandlerContext, usage?: TurnUsage): Promise<FoldIndexOutput> {
   let payload: TimelinePayload;
   try {
     const handle = context.paseo.agents.ref(input.agentId);
@@ -117,8 +120,15 @@ export async function handleFoldIndex(input: FoldIndexInput, context: PluginHand
     active = { id: activeTurn.turnId.slice(0, 200), at: knownTurnStart(input.agentId, activeTurn.turnId) };
   }
   const entries = Array.isArray(payload.entries) ? payload.entries : [];
-  const { rows, turns } = wirePageFromEntries(entries, (turnId) => knownTurnStart(input.agentId, turnId));
+  const cwd = typeof payload.agent?.cwd === "string" ? payload.agent.cwd : null;
+  const { rows, turns } = wirePageFromEntries(entries, (turnId) => knownTurnStart(input.agentId, turnId), cwd);
   const status = payload.agent?.status;
+  let tok: FoldIndexOutput["tok"];
+  try {
+    tok = usage ? await usage.observe(input.agentId, payload.agent, turns.map((turn) => turn.id)) : undefined;
+  } catch {
+    tok = undefined;
+  }
   return {
     status: "ok",
     epoch: typeof payload.epoch === "string" ? payload.epoch : "",
@@ -132,5 +142,6 @@ export async function handleFoldIndex(input: FoldIndexInput, context: PluginHand
     now: Date.now(),
     turns,
     active,
+    ...(tok ? { tok } : {}),
   };
 }

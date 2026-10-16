@@ -64,6 +64,32 @@ describe("fold-index RPC", () => {
     expect(JSON.stringify(out)).not.toMatch(/secret-build|SECRET OUTPUT/);
   });
 
+  it("adds lines changed, exit codes and the turns' tokens from the record that came with the page (0.8.0)", async () => {
+    const cwd = "/home/user/demo-app";
+    const page = {
+      ...payload,
+      entries: [
+        { provider: "my-claude", turnId: "foreground-turn-1", item: { type: "tool_call", callId: "e1", name: "Edit", status: "completed", error: null, detail: { type: "edit", filePath: `${cwd}/src/a.ts`, oldString: "a", newString: "b\nc" } }, timestamp: "2026-10-09T10:00:01.000Z", seqStart: 4, seqEnd: 4 },
+        { provider: "my-claude", turnId: "foreground-turn-1", item: { type: "tool_call", callId: "b1", name: "Bash", status: "failed", error: { type: "tool_result", content: "Exit code 2\nboom", is_error: true }, detail: { type: "shell", command: "npm run secret-build" } }, timestamp: "2026-10-09T10:00:02.000Z", seqStart: 5, seqEnd: 5 },
+      ],
+      agent: { status: "idle", cwd, provider: "my-claude", lastUsage: { inputTokens: 6, cachedInputTokens: 900, outputTokens: 40 }, activeTurn: null },
+    };
+    const seen: unknown[] = [];
+    const usage = { observe: async (agentId: string, agent: unknown, turns: readonly string[]) => (seen.push({ agentId, agent, turns }), [{ id: "foreground-turn-1", i: 6, c: 900, o: 40 }]) };
+    const out = await handleFoldIndex({ agentId: "a1", direction: "after" }, context(async () => page), usage as never);
+    expect(out.rows).toEqual([
+      expect.objectContaining({ key: "t:e1", ch: [[expect.any(String), 2, 1]] }),
+      expect.objectContaining({ key: "t:b1", st: "failed", x: 2 }),
+    ]);
+    expect(out.tok).toEqual([{ id: "foreground-turn-1", i: 6, c: 900, o: 40 }]);
+    expect(seen).toEqual([{ agentId: "a1", agent: page.agent, turns: ["foreground-turn-1"] }]);
+    // Still no paths, commands or output on the wire.
+    expect(JSON.stringify(out)).not.toMatch(/src\/a\.ts|secret-build|boom/);
+    // A ledger that fails costs the tokens, never the page.
+    const broken = { observe: async () => { throw new Error("nope"); } };
+    expect(await handleFoldIndex({ agentId: "a1", direction: "after" }, context(async () => page), broken as never)).not.toHaveProperty("tok");
+  });
+
   it("drops the cursor for tail reads and reports stale cursors and gaps as a reset", async () => {
     const calls: unknown[] = [];
     const out = await handleFoldIndex({ agentId: "a1", direction: "tail", cursor: { epoch: "e1", seq: 3 } }, context(async () => ({ ...payload, staleCursor: true, agent: null }), calls));
@@ -151,6 +177,6 @@ describe("turn starts of closed Agents (0.5.0)", () => {
     handlers.get("agent.closed")!({ agent: { id: "agent-z" } });
     expect(knownTurnStart("agent-z", "foreground-turn-1")).toBeNull();
     stop();
-    expect(removed.sort()).toEqual(["agent.closed", "agent.turn_started"]);
+    expect(removed.sort()).toEqual(["agent.closed", "agent.turn_ended", "agent.turn_started"]);
   });
 });

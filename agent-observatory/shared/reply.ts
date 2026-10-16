@@ -114,16 +114,17 @@ export const REPLY_NUDGES = ["go-ahead", "keep-going"] as const;
 export type ReplyNudge = (typeof REPLY_NUDGES)[number];
 /**
  * A quick reply. `rearm`: clear the answered turn's host attention first, so the turn it starts is announced (pushed) when
- * it ends; a hold only gets an acknowledgement back, which is not worth a notification.
+ * it ends; a hold only gets an acknowledgement back, which is not worth a notification. `ai`: the 建议回复 a recap's model
+ * suggested (shared/recap.ts), sent word for word rather than as the button's sentence.
  */
-export interface QuickReply { key: string; text: string; tone: "green" | "amber"; icon: string; rearm: boolean }
+export interface QuickReply { key: string; text: string; tone: "green" | "amber" | "fuchsia"; icon: string; rearm: boolean; ai?: boolean }
 /** What each kind of reply offers under it (`client/quick-replies.tsx`). The button says exactly what is sent. */
 export let QUICK_REPLIES: Record<ReplyNudge, readonly QuickReply[]> = {
   "go-ahead": [{ key: "go", text: t("sharedReply.m004"), tone: "green", icon: "Play", rearm: true }, { key: "hold", text: t("sharedReply.m005"), tone: "amber", icon: "CirclePause", rearm: false }],
   "keep-going": [{ key: "finish", text: t("sharedReply.m006"), tone: "green", icon: "Play", rearm: true }, { key: "hold", text: t("sharedReply.m007"), tone: "amber", icon: "CirclePause", rearm: false }],
 };
-/** The message a quick reply sends: its button text as a sentence. */
-export const quickReplyText = (reply: Pick<QuickReply, "text">) => t("sharedReply.sentence", { text: reply.text });
+/** The message a quick reply sends: its button text as a sentence; a suggested reply as the model wrote it. */
+export const quickReplyText = (reply: Pick<QuickReply, "text" | "ai">) => reply.ai ? reply.text : t("sharedReply.sentence", { text: reply.text });
 
 // Rules, not a model, and only on the closing sentences (courtesy closes dropped, quotes and code masked). A missed one costs
 // a reply typed in the conversation; a wrong 「继续」 sends an Agent off doing what nobody asked. So every pattern is anchored

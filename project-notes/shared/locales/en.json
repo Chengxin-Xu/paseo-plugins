@@ -25,7 +25,23 @@
     "attachmentPickerTitle": "Attach a note",
     "attachmentSearchPlaceholder": "Search titles, content, or projects",
     "quickNoteEmpty": "Enter the text to save after /notes.",
-    "quickNoteTooLong": "An inbox note cannot exceed {count} characters."
+    "quickNoteTooLong": "An inbox note cannot exceed {count} characters.",
+    "quickNotSent": "“{title}” was not sent: {error}. You can tap again.",
+    "quickUnconfirmed": "No send result for “{title}”: {error}. It may have been delivered; check the Prompts pill's queue or the conversation first. Tapping again during this connection reuses the message ID and will not send it twice; after a reconnect, another tap may send it again.",
+    "quickWhyApproval": "The agent is waiting for approval; sending now cancels it",
+    "quickWhyBusy": "The agent is running and cannot take a message mid-turn",
+    "quickAfterApproval": "Send after the approval",
+    "quickAfterTurn": "Send when this turn ends",
+    "quickSendAnyway": "Send anyway",
+    "quickInterrupt": "Interrupt and send",
+    "quickUntitled": "Untitled prompt",
+    "quickFillTitle": "Fill in and send “{title}”",
+    "quickSendTitle": "Send “{title}” with one tap",
+    "quickAskTitle": "Send “{title}”: the agent is busy, choose how",
+    "quickMenuTitle": "One-tap prompts",
+    "quickMenuLabel": "One-tap {count}",
+    "quickMenuNarrow": "{count}",
+    "quickManage": "Manage one-tap prompts…"
   },
   "settings": {
     "description": "Tasks, prompts and ideas organized by project."
@@ -106,7 +122,11 @@
       "other": "{count} revision snapshots are missing. Try restoring from a backup first, or confirm discarding the missing snapshots while keeping the current body and remaining snapshots."
     },
     "revision": "Version {revision}",
-    "restoreRevision": "Restore version {revision}"
+    "restoreRevision": "Restore version {revision}",
+    "quickOff": "One-tap send",
+    "quickOn": "One-tap send on",
+    "quickHint": "Shown above every agent's composer. A tap sends it, and asks first when that would interrupt a turn or cancel an approval.",
+    "quickTemplateHint": "Has variables: tapping the pill opens the fill form first."
   },
   "board": {
     "allProjects": "All projects",
@@ -187,7 +207,10 @@
     "trashDetail": "Trash · {kind} details",
     "taskNoun": "task",
     "promptNoun": "prompt",
-    "ideaNoun": "idea"
+    "ideaNoun": "idea",
+    "quickAdded": "Added to one-tap prompts",
+    "quickAddedTemplate": "Added to one-tap prompts. It has variables, so a tap opens the fill form",
+    "quickRemoved": "Removed from one-tap prompts"
   },
   "composer": {
     "operationFailed": "The action did not finish. Try again.",
@@ -249,7 +272,8 @@
     "previewSource": "Preview · Source note #{id}",
     "source": "Prompt \"{title}\"",
     "truncatedTitle": "{title}…",
-    "noteContext": "Source: note #{id}\n{title}{body}"
+    "noteContext": "Source: note #{id}\n{title}{body}",
+    "quickGone": "This prompt was deleted, is in the trash, or is no longer a prompt."
   },
   "deferred": {
     "heldState": "is waiting for your confirmation",
@@ -263,6 +287,59 @@
     "prompt": "prompt",
     "sendAnyway": "Send anyway",
     "rowLabel": "{label}: {text}"
+  },
+  "quick": {
+    "invalid": "The one-tap list was not saved: {error}",
+    "conflict": "Another device is changing the one-tap list. Try again in a moment.",
+    "full": "One-tap send holds up to {count} prompts. Remove one first.",
+    "menuPreview": "One-tap {count}",
+    "untitled": "Untitled prompt",
+    "stripLabel": "Manage one-tap prompts ({count})",
+    "stripTitle": "One-tap prompts",
+    "stripCount": {
+      "one": "{count} prompt",
+      "other": "{count} prompts"
+    },
+    "stripEmpty": "Turn on “One-tap send” in a prompt's details to show it above every agent's composer",
+    "manage": "Manage",
+    "missing": "Deleted",
+    "hidden": "In the trash or no longer a prompt",
+    "template": "Has variables: fill in first",
+    "managerTitle": "One-tap prompts",
+    "managerHint": "These prompts show above every agent's composer in this order; more than {count} fold into one menu pill. A tap sends at once when the agent is idle or takes messages mid-turn. When it is running without that, or waits for an approval, you first choose “Send when this turn ends” or “Interrupt and send”, so a tap never interrupts on its own. Prompts with variables open their fill form first.",
+    "previewTitle": "Above the composer",
+    "moveUp": "Move “{title}” up",
+    "moveDown": "Move “{title}” down",
+    "removeEntry": "Remove “{title}” from one-tap prompts",
+    "emptyTitle": "No one-tap prompts yet",
+    "emptyMessage": "Open a prompt's details and tap “One-tap send”."
+  },
+  "launchStatus": {
+    "needs": "Needs you",
+    "failed": "Error",
+    "running": "Running",
+    "starting": "Starting",
+    "launching": "Launching",
+    "check": "Check needed",
+    "unread": "Done, unread",
+    "idle": "Idle",
+    "rejected": "Not started",
+    "ended": "Ended",
+    "more": "+{count} more",
+    "children": {
+      "one": "{count} sub-agent",
+      "other": "{count} sub-agents"
+    },
+    "chipLabel": "Agent status: {status}",
+    "openAgent": "Open agent ({status})",
+    "historyTitle": "Launches · {count}",
+    "childrenRunning": {
+      "one": "{count} sub-agent, {running} running",
+      "other": "{count} sub-agents, {running} running"
+    },
+    "agentShort": "Agent {id}",
+    "noAgent": "No agent yet",
+    "open": "Open"
   },
   "launchUi": {
     "prepared": "Launch request confirmed",
@@ -522,5 +599,15 @@
     "megabytes": "{count} MB",
     "validationIssue": "{field}: {message}",
     "projectReference": "{id} ({path})"
+  },
+  "serverQuick": {
+    "missing": "This prompt was deleted, is in the trash, or is no longer a prompt, so it cannot be sent with one tap.",
+    "sent": "Sent “{title}”",
+    "sending": "Sending “{title}”; the Prompts pill shows the result",
+    "onItsWay": "“{title}” is already on its way and will not be sent twice",
+    "queued": "Queued: “{title}” goes out when this turn ends and no approval is pending",
+    "held": "No result came back for “{title}”. Check it in the Prompts pill",
+    "template": "“{title}” now has variables. Tap the pill again to fill them in",
+    "askNext": "The agent just became busy, so “{title}” was not sent. Tap the pill again to wait for the turn or interrupt it"
   }
 }

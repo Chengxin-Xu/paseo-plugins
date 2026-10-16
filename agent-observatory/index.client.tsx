@@ -9,14 +9,16 @@ import { getClientChunk } from "./shared/ui-chunk";
 import { UI_CHUNK } from "./shared/generated/ui-chunk-manifest";
 import { ArchivesSidebarItem, ObservatorySidebarItem, ScheduleSidebarItem } from "./client/sidebar";
 import { createAttentionStores } from "./client/use-attention";
+import { createChime } from "./client/chime";
 
 // The manifest requires Paseo 0.11.1, whose screen and sidebar APIs are always present.
 export default function contribute(client: PluginClientContext) {
   // Only views opened later need the full catalog; the resident stub draws boot text.
   const i18n = createClientI18n(client, { pluginId: "agent-observatory", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } }, load: "lazy" });
   const lazy = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n });
-  // One set of attention stores per registration, shared by resident badges and lazy views.
-  const attentionStores = createAttentionStores();
+  // One set of attention stores per registration, shared by resident badges and lazy views; 提示音 listens to their reads.
+  const chime = createChime(source => typeof client.playAudio === "function" ? client.playAudio(source) : Promise.resolve());
+  const attentionStores = createAttentionStores(chime.onRead);
   const surface = (id: string): ComponentType<any> => { const Surface = lazy(id); return (props: any) => <Surface {...props} attentionStores={attentionStores} />; };
   const AttentionPopover = lazy("attention-popover");
   const Sidebar = (props: PluginSidebarItemProps) => <ObservatorySidebarItem {...props} stores={attentionStores} AttentionPopover={AttentionPopover} />;
@@ -54,6 +56,6 @@ export default function contribute(client: PluginClientContext) {
       client.addSlashCommand({ name: "observe", argumentHint: "", description: t("boot.observeDescription"), context: "agent", onSubmit({ openPanel }) { openPanel("agent-inspector"); } }));
     return commands;
   }));
-  cleanups.push(() => i18n.dispose());
+  cleanups.push(() => i18n.dispose(), () => chime.dispose());
   return () => { for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch { /* the host is tearing down already */ } } };
 }

@@ -19,6 +19,17 @@ const record = (value: unknown): Record<string, unknown> => value !== null && ty
   && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const REQUEST_PREFIX = "observatory-read-";
+/**
+ * How a bridge request failed, as a code callers can rely on (their texts are translated): `timeout` and `closed` mean the
+ * request may have reached the host and taken effect (no answer came back); `rejected` is the host's own error answer;
+ * `busy` and `disposed` were never sent.
+ */
+export type BridgeErrorCode = "timeout" | "closed" | "rejected" | "busy" | "disposed";
+const bridgeError = (message: string, code: BridgeErrorCode) => Object.assign(new Error(message), { code });
+export const bridgeErrorCode = (error: unknown): BridgeErrorCode | null => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "timeout" || code === "closed" || code === "rejected" || code === "busy" || code === "disposed" ? code : null;
+};
 /** Requests in flight, and those held while the host session is closed (a separate, smaller cap). */
 const MAX_PENDING = 24, MAX_WAITING = 16;
 export type ProviderBridge = ReturnType<typeof createProviderSubagentBridge>;
@@ -32,7 +43,7 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
     const envelope = record(raw);
     if (envelope.type === "paseo_close") {
       hostOpen = false;
-      for (const [id, item] of pending) if (item.sent) { pending.delete(id); clearTimeout(item.timer); item.reject(new Error(t("serverProviderSubagents.m001"))); }
+      for (const [id, item] of pending) if (item.sent) { pending.delete(id); clearTimeout(item.timer); item.reject(bridgeError(t("serverProviderSubagents.m001"), "closed")); }
       return;
     }
     if (envelope.type !== "paseo_frame" || envelope.isBinary !== false || typeof envelope.data !== "string") return;
@@ -47,16 +58,16 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
     const request = pending.get(id);
     if (!request || (message.type !== request.type && message.type !== "rpc_error")) return;
     pending.delete(id); clearTimeout(request.timer);
-    if (payload.error || message.type === "rpc_error") request.reject(new Error(errorText(payload.error || t("serverProviderSubagents.m002"))));
+    if (payload.error || message.type === "rpc_error") request.reject(bridgeError(errorText(payload.error || t("serverProviderSubagents.m002")), "rejected"));
     else request.resolve(payload);
   });
   /** `timeout` overrides the bridge's default for slow requests (a session restore). */
   const request = (message: Record<string, unknown>, responseType: string, timeout = timeoutMs): Promise<Record<string, unknown>> => {
-    if (disposed) return Promise.reject(new Error(t("serverProviderSubagents.m003")));
-    if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(new Error(t("serverProviderSubagents.m004")));
+    if (disposed) return Promise.reject(bridgeError(t("serverProviderSubagents.m003"), "disposed"));
+    if (pending.size >= MAX_PENDING || (!hostOpen && waiting.size >= MAX_WAITING)) return Promise.reject(bridgeError(t("serverProviderSubagents.m004"), "busy"));
     return new Promise((resolve, reject) => {
       const requestId = `${REQUEST_PREFIX}${randomUUID()}`;
-      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(new Error(t("serverProviderSubagents.m005"))); }, timeout);
+      const timer = setTimeout(() => { pending.delete(requestId); waiting.delete(requestId); reject(bridgeError(t("serverProviderSubagents.m005"), "timeout")); }, timeout);
       const entry = { type: responseType, resolve, reject, timer, sent: false };
       pending.set(requestId, entry);
       const send = () => {
@@ -69,7 +80,7 @@ export function createProviderSubagentBridge(port: ProviderIpcPort, timeoutMs = 
   };
   return { request, /** Requests held for a closed session (tests). */ get queued() { return waiting.size; },
     dispose() { if (disposed) return; disposed = true; unsubscribe(); waiting.clear();
-    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(t("serverProviderSubagents.m006"))); }
+    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(bridgeError(t("serverProviderSubagents.m006"), item.sent ? "closed" : "disposed")); }
     pending.clear(); } };
 }
 interface ContentBudget { characters: number; nodes: number; truncated: boolean }

@@ -10,8 +10,8 @@ Each workspace has its own browser and profile; logins stay separate and survive
 - A browser view with tabs, address bar, typing tray, device presets, reader, diagnostics and activity list, in the sidebar, workspace panels, the Command Center and `/server-browser`.
 - Typing straight onto the page, input methods included; input meant for a page that has since changed is dropped, never replayed. The panel or the Agent answers web dialogs.
 - In Agent mode, navigating asks first, switches to manual and acts only if the confirmed page is still there.
-- Workspace service scripts open in a new tab.
-- Archiving a workspace stops its browser and keeps its profile; leftovers of missing workspaces can be stopped or deleted, and a restored workspace's browser starts again.
+- One tap opens a workspace service, or a port one of your agents opened, in a new tab; a port held after its agent stopped shows amber.
+- Archiving a workspace stops its browser and keeps its profile; leftovers of missing workspaces can be stopped or deleted.
 
 ## Setup
 
@@ -45,10 +45,12 @@ Each workspace keeps its data in `~/.local/share/paseo-server-browser/visual/<wo
 
 - `profile/`: cookies, logins, history and cache.
 - `state.json`: mode, size, settings and tab addresses for restoring, without credentials, fragments or parameters whose names look one-time (a heuristic).
-- `session.json`: connection details and a per-start token for this browser only; one left by a crash is ignored and removed.
-- `artifacts/`: files Agent tools save and, while an Agent session is attached, every tab's console output (`console-*.log`) and possibly page downloads under the site's file name, all deleted after 48 hours or beyond 256 MB.
+- `session.json`: connection details and a per-start token for this browser only; a crash leftover is ignored and removed.
+- `artifacts/`: files Agent tools save and, while an Agent session is attached, every tab's console output (`console-*.log`) and possibly page downloads, all deleted after 48 hours or beyond 256 MB.
 
 Other downloads go to a temporary `playwright-artifacts-*` folder, deleted when the browser stops. The activity list keeps 12 actions in memory, without typed text or queries.
+
+To list agents' ports, the plugin reads /proc while the services or tabs sheet is open: the daemon user's listening sockets, process names and socket links, and from a port holder's environment only PASEO_AGENT_ID and PASEO_AGENT_CWD.
 
 The plugin reads the daemon's workspace list and agent profiles, and keeps its language state, translation templates and the translations you add in `~/.paseo/plugin-data/server-browser/`. Frames, titles and addresses go only to your Paseo clients; error messages lose page addresses.
 
@@ -66,5 +68,5 @@ The plugin reads the daemon's workspace list and agent profiles, and keeps its l
 - Chromium's debugging port on 127.0.0.1 has no authentication: any local account that connects gets the profile's cookies and logins, runs scripts on logged-in sites and bypasses manual takeover. No command line shows the address, but `/proc/net/tcp` shows the port to every account (`hidepid` does not hide sockets); an authenticated pipe is deferred. Use a host you do not share.
 - Linux only, tested on x86-64; elsewhere set `PASEO_SERVER_BROWSER_EXECUTABLE`.
 - No download manager, audio, video or full keyboard mapping; paste is plain text, one way only.
-- Typing stops whenever a frame loads a new document. Input methods were tested with simulated composition events.
+- Typing stops whenever a frame loads a new document.
 - Single sign-on, captchas and server-blocking sites need checking per site. A crash can lose unsaved cookies and unsent forms.

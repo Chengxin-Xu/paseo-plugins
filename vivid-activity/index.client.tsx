@@ -8,11 +8,14 @@ import { z } from "zod";
 import { createChunkLoader, lazySurfaces } from "./client/lazy-chunk";
 import { ActivityDetailsContext, PlainDetail } from "./client/activity-lazy";
 import { getClientChunk } from "./shared/ui-chunk";
+import { FX_CHUNK } from "./shared/generated/fx-chunk-manifest";
 import { PI_CHUNK } from "./shared/generated/pi-chunk-manifest";
 import { UI_CHUNK } from "./shared/generated/ui-chunk-manifest";
 import { ActivityIndicator } from "react-native";
 import { ColorfulReasoning, ColorfulToolCall } from "./client/activity";
 import { FoldRow } from "./client/fold-row";
+import { configureFx } from "./client/fx";
+import { LoaderMark } from "./client/vivid";
 import { foldRuntime } from "./client/fold-runtime";
 import { BOUNDARY_ITEM_TYPES, configurePiNotices, observeBoundary, transformReasoning, transformToolCall } from "./client/transform";
 import { applyTakeover, isSettingsChange, setLiveTakeover, startTakeover, type TakeoverPart } from "./client/takeover";
@@ -75,7 +78,7 @@ export default function contribute(client: PluginClientContext) {
   const surface = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n, fallback: (id, props) => id === "settings" ? <ActivityIndicator color={props.theme?.colors.foregroundMuted} /> : <PlainDetail {...props} /> });
   const details = { DetailBody: surface("detail"), ReasoningText: surface("reasoning") };
   const LazySettings = surface("settings");
-  const actions = { onFoldSettings: foldRuntime.setSettings, onTakeover: applyTakeover };
+  const actions = { onFoldSettings: foldRuntime.setSettings, onTakeover: applyTakeover, LoaderMark };
   const ActivitySettings = (props: any) => <LazySettings {...props} actions={actions} />;
   const ReasoningRow = (props: any) => <ActivityDetailsContext.Provider value={details}><ColorfulReasoning {...props} /></ActivityDetailsContext.Provider>;
   const ToolRow = (props: any) => <ActivityDetailsContext.Provider value={details}><ColorfulToolCall {...props} /></ActivityDetailsContext.Provider>;
@@ -123,6 +126,8 @@ export default function contribute(client: PluginClientContext) {
   // 0.6.0-local.5: the Pi notice reader comes in its own small chunk, the first time a Pi notice row is drawn.
   const piChunk = createChunkLoader(client, { rpc: getClientChunk, manifest: PI_CHUNK, label: () => t("boot.piNotice"), text: i18n });
   configurePiNotices({ load: () => piChunk.load().then((surfaces) => surfaces.readPiNotice as unknown as PiNoticeReader), redraw: nudge });
+  // 0.8.0: running animations other than the spinner and the change list of an expanded summary (client/fx.ts).
+  configureFx(createChunkLoader(client, { rpc: getClientChunk, manifest: FX_CHUNK, label: () => t("boot.name"), text: i18n }));
 
   const readSettings = settingsRpc(activitySettings.id).read;
   const register = (part: TakeoverPart) => {
@@ -160,6 +165,7 @@ export default function contribute(client: PluginClientContext) {
     setLiveTakeover(null);
     takeover.stop();
     configurePiNotices(null);
+    configureFx(null);
     setPiNoticeReader(null);
     foldRuntime.configure(null);
     nudgeRegistration = null;

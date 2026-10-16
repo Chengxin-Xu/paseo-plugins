@@ -4,7 +4,9 @@ import { memo, useMemo, type ReactNode, type Ref } from "react";
 import { Pressable, Text, View, type FlatList as NativeFlatList, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { FlatList, Icon, useToast } from "@getpaseo/plugin/client/react-native";
-import { contextPressure, type AgentRecord, type AgentTodo, type AgentTreeNode } from "../shared/model";
+import { contextPressure, ownTurnRunning, type AgentRecord, type AgentTodo, type AgentTreeNode } from "../shared/model";
+import { recapLook, type RecapView } from "../shared/recap";
+import { RecapLine } from "./recap";
 import type { DashboardGroup, DashboardRow } from "../shared/dashboard-model";
 import { reasonLine, type AttentionPhase, type ReasonLine } from "../shared/attention";
 import type { HeartbeatSummary } from "../shared/schedules";
@@ -15,6 +17,7 @@ import { LiveTimer, PhasePill, PhaseTag, Spinner, StatusGlyph, activePhases, hue
 import { ScheduleBadge } from "./schedule-looks";
 import { HeartbeatBadge } from "./heartbeat-card";
 import { openExternalUrl } from "./open-url";
+import { CacheChip } from "./cache-clock";
 
 export const groupTitles: Record<DashboardGroup, string> = { get attention() { return t("secondarySessionList.needsYou"); }, get running() { return t("secondarySessionList.running"); }, get recent() { return t("secondarySessionList.recent"); } };
 export type SessionItem =
@@ -61,12 +64,14 @@ function rowReason(agent: AgentRecord, phase: Phase, now: number): ReasonLine | 
 }
 
 /** Memoized: a clock tick re-renders only rows whose time label or signal changed; running timers tick on their own. */
-export const SessionRow = memo(function SessionRow({ item, theme, compact, selected, expanded, timeLabel, signal, rate, heartbeats, day, marked = false, onToggle, onSelect }: {
+export const SessionRow = memo(function SessionRow({ item, theme, compact, selected, expanded, timeLabel, signal, rate, heartbeats, recap, day, marked = false, onToggle, onSelect }: {
   item: Extract<SessionItem, { kind: "row" }>; theme: PluginTheme; compact: boolean; selected: boolean; expanded: boolean; timeLabel: string; signal?: string;
   /** Output tokens per second of a running agent (from the local provider logs), when it is writing. */
   rate?: number;
   /** Heartbeats that wake this Agent (opus-B8). */
   heartbeats?: readonly HeartbeatSummary[];
+  /** Its 每轮小结, judged here against the turn the row shows. */
+  recap?: RecapView | null;
   /** The device's day (a limit's row: the clock): reasons say 明天 / 今天 relative to it. */
   day: number;
   /** Picked for 归档已读完成 and waiting for the confirmation (opus-B18). */
@@ -78,6 +83,7 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
   const agent = row.node.agent, children = row.node.children.length;
   const phase = phaseOf(agent, snoozed), active = activePhases.has(phase), color = hueColor(theme, phases[phase].hue), muted = phases[phase].hue === "muted";
   const reason = useMemo(() => rowReason(agent, phase, day), [agent, phase, day]);
+  const look = useMemo(() => recap ? recapLook(recap, { startedAt: agent.observedTurnStartedAt ?? null, endedAt: agent.observedTurnEndedAt ?? null, running: ownTurnRunning(agent) }) : null, [recap, agent]);
   // A closed session's context matters only once it is loaded again, also when its row shows the turn the host cut off.
   const pressure = agent.archivedAt || agent.status === "closed" ? null : contextPressure(agent.usage);
   const link = agent.changeRequest ?? null;
@@ -112,6 +118,8 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
             <Text numberOfLines={2} style={{ flex: 1, color: settled ? colors.foregroundMuted : colors.foreground, fontSize: fontSize.body, lineHeight: 20, fontWeight: active ? "600" : "500" }}>{agent.title || t("secondarySessionList.unnamedAgent")}</Text>
             <View style={{ minHeight: 20, justifyContent: "center", alignItems: "flex-end" }}>{trailing.node}</View>
           </View>
+          {/* 每轮小结: the second line, the goal, progress and next step in a few words. */}
+          {look ? <RecapLine theme={theme} look={look} /> : null}
           {/* Chips first; when they leave too little room the project and time wrap to their own line instead of vanishing. */}
           <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 5, rowGap: 3, paddingRight: link && !reason ? reserve : 0 }}>
             {agent.background && phase === "running" ? <BackgroundChip theme={theme} agent={agent} /> : null}
@@ -121,6 +129,8 @@ export const SessionRow = memo(function SessionRow({ item, theme, compact, selec
               <Text style={{ color: hueColor(theme, "orange", "text"), fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }}>{rate >= 100 ? Math.round(rate) : rate.toFixed(1).replace(/\.0$/, "")}{t("secondarySessionList.tokS")}</Text>
             </View> : null}
             {pressure ? <ContextChip theme={theme} percent={pressure.percent} critical={pressure.level === "critical"} /> : null}
+            {/* 提示缓存倒计时 (2.17): not on running rows (each request warms it again); a cold cache only where it waits for you. */}
+            {phase !== "running" && phase !== "starting" && !agent.archivedAt ? <CacheChip theme={theme} agentId={agent.id} showCold={active} /> : null}
             {heartbeats?.length ? <HeartbeatBadge theme={theme} heartbeats={heartbeats} /> : null}
             {agent.labels["paseo.schedule-id"] ? <ScheduleBadge theme={theme} /> : null}
             <View style={{ flex: 1, minWidth: 120, flexDirection: "row", alignItems: "center", gap: 5 }}>
@@ -213,10 +223,12 @@ function GroupHeader({ theme, group, title, count }: { theme: PluginTheme; group
   </View>;
 }
 
-export function SessionList({ items, theme, compact, selectedId, expanded, forceExpanded = false, now, signals, rates, heartbeats, marked, empty, listRef, onScrollEnd, onToggle, onSelect }: {
+export function SessionList({ items, theme, compact, selectedId, expanded, forceExpanded = false, now, signals, rates, heartbeats, recaps, recapsRevision = "", marked, empty, listRef, onScrollEnd, onToggle, onSelect }: {
   items: readonly SessionItem[]; theme: PluginTheme; compact: boolean; selectedId: string | null; expanded: ReadonlySet<string>; forceExpanded?: boolean; now: number; signals: ReadonlyMap<string, string>;
   rates?: ReadonlyMap<string, number>;
   heartbeats?: ReadonlyMap<string, HeartbeatSummary[]>;
+  /** 每轮小结 by Agent (absent while they are off), and their revision, so rows draw again when one changes. */
+  recaps?: ReadonlyMap<string, RecapView>; recapsRevision?: string;
   /** Rows waiting for the 归档 confirmation. */
   marked?: ReadonlySet<string>;
   empty: ReactNode; listRef?: Ref<NativeFlatList<SessionItem>>; onScrollEnd?: (offset: number) => void;
@@ -227,13 +239,13 @@ export function SessionList({ items, theme, compact, selectedId, expanded, force
   const scrollEnd = onScrollEnd ? (event: NativeSyntheticEvent<NativeScrollEvent>) => onScrollEnd(event.nativeEvent.contentOffset.y) : undefined;
   return <FlatList ref={listRef} data={items as SessionItem[]} keyExtractor={item => item.key} style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ paddingHorizontal: space.xs, paddingBottom: space.xl }}
     onScrollEndDrag={scrollEnd} onMomentumScrollEnd={scrollEnd}
-    initialNumToRender={18} maxToRenderPerBatch={20} windowSize={7} keyboardShouldPersistTaps="handled" extraData={`${now}:${selectedId}:${expanded.size}:${forceExpanded}:${signals.size}:${ratesKey}:${heartbeats?.size ?? 0}:${marked?.size ?? 0}`}
+    initialNumToRender={18} maxToRenderPerBatch={20} windowSize={7} keyboardShouldPersistTaps="handled" extraData={`${now}:${selectedId}:${expanded.size}:${forceExpanded}:${signals.size}:${ratesKey}:${heartbeats?.size ?? 0}:${marked?.size ?? 0}:${recapsRevision}`}
     ListEmptyComponent={<View>{empty}</View>}
     renderItem={({ item }) => {
       if (item.kind === "section") return <GroupHeader theme={theme} group={item.group} title={item.title} count={item.count} />;
       const id = item.row.node.agent.id, beats = heartbeats?.get(id);
       return <SessionRow item={item} theme={theme} compact={compact} selected={id === selectedId} expanded={forceExpanded || expanded.has(id)} timeLabel={agentTimeLabel(item.row.node.agent, now)}
-        signal={signals.get(id)} rate={rates?.get(id)} heartbeats={beats} day={item.row.node.agent.stop ? now : dayOf(now)} marked={marked?.has(id) ?? false} onToggle={onToggle} onSelect={onSelect} />;
+        signal={signals.get(id)} rate={rates?.get(id)} heartbeats={beats} recap={recaps?.get(id) ?? null} day={item.row.node.agent.stop ? now : dayOf(now)} marked={marked?.has(id) ?? false} onToggle={onToggle} onSelect={onSelect} />;
     }} />;
 }
 /** Midnight of the device's day: rows without a live clock re-render once a day for 明天 / 今天. */

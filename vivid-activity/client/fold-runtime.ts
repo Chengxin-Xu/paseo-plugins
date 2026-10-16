@@ -1,6 +1,6 @@
 import { planFolds, roleSignature, SHOW, type FoldPlan, type FoldRole, type IndexRow, type StepStatus } from "../shared/fold";
 import { estimateStarts } from "../shared/timing";
-import { indexRowFromWire, type FoldIndexInput, type FoldIndexOutput, type WireTurn } from "../shared/fold-index";
+import { indexRowFromWire, type FoldIndexInput, type FoldIndexOutput, type WireTurn, type WireTurnTokens } from "../shared/fold-index";
 import { promptPin, samePin, type PromptPin } from "../shared/prompt-pin";
 import type { TakeoverScope } from "../shared/settings";
 
@@ -65,6 +65,8 @@ export const FOLD_MEMORY = {
   contested: 10_000,
   /** Agents the rows' 「最新一行」 times are kept for (client/latest-rows.ts); a forgotten Agent drops its own. */
   latestAgents: 1_000,
+  /** 0.8.0: turns whose tokens are kept per Agent. */
+  tokens: 200,
 } as const;
 
 /** Drops the older half (insertion order) of a set or map holding more than `limit` entries; true when it did. */
@@ -123,6 +125,9 @@ interface AgentFolds {
   pinListeners: Set<() => void>;
   /** When the pin last moved from one row to another (a live run went on), for the strip's entrance; 0: it appeared. */
   pinMovedAt: number;
+  /** 0.8.0: tokens of the turns the plugin server watched live (server/turn-usage.ts), and the rows listening for them. */
+  tokens: Map<string, WireTurnTokens>;
+  tokenListeners: Set<() => void>;
 }
 
 /** When a row ran, on the daemon's clock. `start` is an estimate (see shared/timing.ts); null when unknown. */
@@ -170,11 +175,21 @@ function newAgent(agentId: string): AgentFolds {
     pin: null,
     pinListeners: new Set(),
     pinMovedAt: 0,
+    tokens: new Map(),
+    tokenListeners: new Set(),
   };
 }
 
 function sortRows(rows: Iterable<IndexRow>): IndexRow[] {
   return [...rows].sort((left, right) => left.seq - right.seq);
+}
+
+/** 0.8.0: whether two index rows report the same changed lines, uncounted changes and exit code. */
+function sameChanges(left: IndexRow, right: IndexRow): boolean {
+  if (left.exit !== right.exit || left.uncounted !== right.uncounted) return false;
+  const a = left.changes ?? [];
+  const b = right.changes ?? [];
+  return a.length === b.length && a.every((change, index) => change.file === b[index]!.file && change.added === b[index]!.added && change.removed === b[index]!.removed);
 }
 
 export interface FoldRuntime {
@@ -210,6 +225,9 @@ export interface FoldRuntime {
   pinMovedAt(agentId: string): number;
   /** The Agent's timeline epoch, as its index last read it. */
   epoch(agentId: string): string | null;
+  /** 0.8.0: tokens of one turn, when the plugin server watched it live; the same object until it changes. */
+  turnTokens(agentId: string, turn: string): WireTurnTokens | null;
+  subscribeTokens(agentId: string, listener: () => void): () => void;
   /** Now on the daemon's clock (the local clock corrected by the last answer's `now`). */
   serverNow(): number;
   /** For tests and diagnostics. */
@@ -314,6 +332,27 @@ export function createFoldRuntime(): FoldRuntime {
     return changed;
   }
 
+  /** 0.8.0: tokens of one answer's turns; rows showing them hear about a change. */
+  function noteTokens(agent: AgentFolds, page: FoldIndexOutput): void {
+    let changed = false;
+    // A new history (the session was loaded again) counts its turn ids from the start again: the figures of an old
+    // `foreground-turn-1` must not show on the new one.
+    if (agent.epoch !== null && page.epoch && page.epoch !== agent.epoch && agent.tokens.size > 0) {
+      agent.tokens.clear();
+      changed = true;
+    }
+    for (const entry of page.tok ?? []) {
+      const known = agent.tokens.get(entry.id);
+      if (known && known.i === entry.i && known.c === entry.c && known.o === entry.o && Boolean(known.live) === Boolean(entry.live)) continue;
+      agent.tokens.delete(entry.id);
+      agent.tokens.set(entry.id, entry);
+      changed = true;
+    }
+    if (!changed) return;
+    trimOldest(agent.tokens, FOLD_MEMORY.tokens);
+    for (const listener of agent.tokenListeners) listener();
+  }
+
   /** Turn starts and the running turn of one answer; true when either changed. */
   function noteTurns(agent: AgentFolds, page: FoldIndexOutput): boolean {
     let changed = noteTurnStarts(agent, page.turns);
@@ -380,7 +419,7 @@ export function createFoldRuntime(): FoldRuntime {
     let changed = false;
     for (const row of rows) {
       const previous = agent.bySeq.get(row.seq);
-      if (previous && previous.key === row.key && previous.status === row.status && previous.kind === row.kind && previous.at === row.at && previous.look === row.look && previous.turn === row.turn) continue;
+      if (previous && previous.key === row.key && previous.status === row.status && previous.kind === row.kind && previous.at === row.at && previous.look === row.look && previous.turn === row.turn && sameChanges(previous, row)) continue;
       if (previous?.key && previous.key !== row.key) agent.byKey.delete(previous.key);
       agent.bySeq.set(row.seq, row);
       if (row.key) {
@@ -417,6 +456,7 @@ export function createFoldRuntime(): FoldRuntime {
       const page = await rpc({ agentId: agent.agentId, direction: "tail", limit: FOLD_TIMING.tailLimit });
       if (page.status !== "ok") throw new Error(page.status);
       noteClock(page);
+      noteTokens(agent, page);
       firstLoad = firstLoad || !agent.loaded;
       replace(agent, page);
       changed = true;
@@ -432,6 +472,7 @@ export function createFoldRuntime(): FoldRuntime {
             const page: FoldIndexOutput = await rpc({ agentId: agent.agentId, direction: "after", cursor, limit: FOLD_TIMING.pageLimit });
             if (page.status !== "ok") throw new Error(page.status);
             noteClock(page);
+            noteTokens(agent, page);
             if (page.reset || (page.epoch && page.epoch !== agent.epoch)) {
               reset = true;
               break;
@@ -450,6 +491,7 @@ export function createFoldRuntime(): FoldRuntime {
           if (page.status !== "ok") throw new Error(page.status);
           if (page.reset || (page.epoch && page.epoch !== agent.epoch)) reset = true;
           else {
+            noteTokens(agent, page);
             changed = noteTurnStarts(agent, page.turns) || changed;
             const rows = rowsOf(page);
             witness(agent, rows);
@@ -653,7 +695,7 @@ export function createFoldRuntime(): FoldRuntime {
    */
   function forget(agent: AgentFolds): void {
     if (agent.refs > 0 || agents.get(agent.agentId) !== agent) return;
-    if (agent.inflight || agent.timingListeners.size > 0 || agent.pinListeners.size > 0) {
+    if (agent.inflight || agent.timingListeners.size > 0 || agent.pinListeners.size > 0 || agent.tokenListeners.size > 0) {
       agent.releaseTimer = setTimer(() => {
         agent.releaseTimer = null;
         forget(agent);
@@ -868,6 +910,19 @@ export function createFoldRuntime(): FoldRuntime {
     },
     epoch(agentId) {
       return agents.get(agentId)?.epoch ?? null;
+    },
+    turnTokens(agentId, turn) {
+      return agents.get(agentId)?.tokens.get(turn) ?? null;
+    },
+    subscribeTokens(agentId, listener) {
+      let agent = agents.get(agentId);
+      if (!agent) {
+        agent = newAgent(agentId);
+        agents.set(agentId, agent);
+      }
+      const target = agent;
+      target.tokenListeners.add(listener);
+      return () => void target.tokenListeners.delete(listener);
     },
     debugAgent(agentId) {
       const agent = agents.get(agentId);

@@ -1,10 +1,11 @@
 import { t } from "../shared/text";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { launchInputSchema, launchReceiptSchema, type LaunchInput, type LaunchOptions, type LaunchReceipt } from "../shared/launch";
+import { launchInputSchema, launchReceiptSchema, type LaunchAgent, type LaunchInput, type LaunchOptions, type LaunchReceipt, type LaunchRecord } from "../shared/launch";
 import { INBOX_PROJECT_ID, type BoardItem } from "../shared/board";
 import { ProjectDirectory, withTimeout, type PaseoProject } from "./dashboard";
 import { BoardStore, defaultStorageRoot } from "./store";
@@ -13,6 +14,8 @@ type Paseo = PluginHandlerContext["paseo"];
 type ListProjects = () => Promise<PaseoProject[]>;
 const journalSchema = launchReceiptSchema.omit({ replayed: true }).extend({
   inputHash: z.string(), projectId: launchInputSchema.shape.projectId.optional(), isolation: launchInputSchema.shape.isolation.optional(),
+  // Since 0.12: the note it started from and when, for the status on task cards. Older records lack them.
+  itemId: launchInputSchema.shape.itemId.optional(), sourceProjectId: launchInputSchema.shape.sourceProjectId.optional(), createdAt: z.string().max(40).optional(),
 });
 type Journal = z.infer<typeof journalSchema>;
 type Prepared = { project: LaunchOptions["projects"][number]; attachment: ReturnType<typeof sourceAttachment>; featureValues?: Record<string, unknown> };
@@ -41,6 +44,14 @@ function sourceAttachment(note: BoardItem, projectName: string) {
 }
 
 const launchSuffix = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 12);
+/** Launch records are a few hundred bytes; anything far larger is not one of ours and is skipped. */
+const MAX_JOURNAL_BYTES = 64 * 1024;
+/** The board-wide list carries at most this many records, newest first. */
+const MAX_LISTED_RECORDS = 500;
+const JOURNAL_FILE = /^[a-zA-Z0-9_-]{8,100}\.json$/;
+const PENDING_STAGES = new Set<LaunchReceipt["stage"]>(["prepared", "creating_workspace", "workspace_ready", "creating_agent", "agent_ready", "sending"]);
+/** The labels `start()` puts on the agent it creates. */
+export const LAUNCH_LABEL = "project-notes.launch-id", ITEM_LABEL = "project-notes.item-id";
 const terminal = (stage: LaunchReceipt["stage"]) => stage === "started" || stage === "rejected" || stage === "uncertain";
 
 export async function loadLaunchOptions(paseo: Paseo, projectId?: string, listProjects: ListProjects = async () => (await paseo.projects.list()).projects): Promise<LaunchOptions> {
@@ -112,7 +123,7 @@ export class LaunchService {
     } finally { await unlink(tmp).catch(() => {}); }
   }
   private receipt(record: Journal, replayed = false): LaunchReceipt {
-    const { inputHash: _hash, projectId: _project, isolation: _isolation, ...receipt } = record;
+    const { inputHash: _hash, projectId: _project, isolation: _isolation, itemId: _item, sourceProjectId: _source, createdAt: _created, ...receipt } = record;
     // Room for the capped cause plus the guidance after it; also caps records written before the cap existed.
     return { ...receipt, error: receipt.error === null ? null : clip(receipt.error, MAX_ERROR_CHARS + 100), replayed };
   }
@@ -162,8 +173,8 @@ export class LaunchService {
     return this.receipt(record, true);
   }
   private async findAgent(paseo: Paseo, id: string): Promise<{ agentId: string; workspaceId: string | null } | null> {
-    const result = await withTimeout(paseo.agents.list({ filter: { labels: { "project-notes.launch-id": id }, includeArchived: true }, page: { limit: 5 } }), 5_000, t("serverLaunch.agentLookupTimeout"));
-    const agent = result.entries.find(entry => entry.agent.labels?.["project-notes.launch-id"] === id)?.agent;
+    const result = await withTimeout(paseo.agents.list({ filter: { labels: { [LAUNCH_LABEL]: id }, includeArchived: true }, page: { limit: 5 } }), 5_000, t("serverLaunch.agentLookupTimeout"));
+    const agent = result.entries.find(entry => entry.agent.labels?.[LAUNCH_LABEL] === id)?.agent;
     return agent ? { agentId: agent.id, workspaceId: agent.workspaceId ?? null } : null;
   }
   private async findWorkspace(paseo: Paseo, id: string, projectId?: string) {
@@ -208,7 +219,7 @@ export class LaunchService {
       if (existing.inputHash !== this.hash(input)) throw new Error(t("serverLaunch.idReusedCheck"));
       return (await this.status(input.launchId, paseo))!;
     }
-    const record: Journal = { launchId: input.launchId, inputHash: this.hash(input), projectId: input.projectId, isolation: input.isolation, stage: "prepared", workspaceId: null, agentId: null, error: null };
+    const record: Journal = { launchId: input.launchId, inputHash: this.hash(input), projectId: input.projectId, isolation: input.isolation, itemId: input.itemId, sourceProjectId: input.sourceProjectId, createdAt: new Date().toISOString(), stage: "prepared", workspaceId: null, agentId: null, error: null };
     await this.save(record);
     const run = Promise.resolve().then(() => this.run(record, input, paseo));
     this.active.set(input.launchId, { record, done: run });
@@ -269,7 +280,7 @@ export class LaunchService {
           ...(prepared.featureValues ? { featureValues: prepared.featureValues } : {}),
         },
         title: input.title, autoArchive: false,
-        labels: { "project-notes.launch-id": input.launchId, "project-notes.item-id": input.itemId },
+        labels: { [LAUNCH_LABEL]: input.launchId, [ITEM_LABEL]: input.itemId },
       });
       record.agentId = agent.id; record.stage = "agent_ready"; await this.save(record);
       this.checkAlive(); record.stage = "sending"; await this.save(record); this.checkAlive();
@@ -285,6 +296,63 @@ export class LaunchService {
       record.error = t(failure, { cause });
       try { await this.save(record); } catch { /* A prior durable stage still prevents automatic replay after restart. */ }
     }
+  }
+  /**
+   * Launch records for task cards (every note, newest first) or one note's detail (`itemId`). Reads only this plugin's
+   * own small record files: regular files, no symbolic links, at most 64 KiB, parsed again only after they change. The
+   * revision covers what the list shows, so polling it answers `unchanged` cheaply. With `itemId` and a daemon, the
+   * note's agents come from the agent directory by their note label (archived ones too), which also finds launches
+   * whose records predate the note id. Never reads a timeline, so it wakes no unloaded agent.
+   */
+  async records(options: { itemId?: string; paseo?: Paseo } = {}): Promise<{ revision: string; records: LaunchRecord[]; agents?: LaunchAgent[] }> {
+    // A launch this process no longer runs (a reload or crash cut it short) is uncertain, as status() would report it.
+    const records = (await this.scanRecords()).map(record => PENDING_STAGES.has(record.stage) && !this.active.has(record.launchId) && !this.accepting.has(record.launchId) ? { ...record, stage: "uncertain" as const } : record);
+    const revision = createHash("sha256").update(JSON.stringify(records)).digest("hex").slice(0, 16);
+    if (!options.itemId) return { revision, records: records.filter(record => record.itemId !== null).slice(0, MAX_LISTED_RECORDS) };
+    const agents = options.paseo ? await this.itemAgents(options.paseo, options.itemId) : [];
+    const launched = new Set(agents.flatMap(agent => agent.launchId ? [agent.launchId] : []));
+    return { revision, records: records.filter(record => record.itemId === options.itemId || (record.itemId === null && launched.has(record.launchId))), agents };
+  }
+  private scanned = new Map<string, { key: string; record: LaunchRecord | null }>();
+  private async scanRecords(): Promise<LaunchRecord[]> {
+    let names: string[];
+    try { names = (await readdir(this.root)).filter(name => JOURNAL_FILE.test(name)); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") names = []; else throw e; }
+    const seen = new Set(names), records: LaunchRecord[] = [];
+    for (const name of [...this.scanned.keys()]) if (!seen.has(name)) this.scanned.delete(name);
+    for (const name of names) {
+      const record = await this.scanOne(name);
+      if (record) records.push(record);
+    }
+    return records.sort((a, b) => b.at.localeCompare(a.at) || a.launchId.localeCompare(b.launchId));
+  }
+  private async scanOne(name: string): Promise<LaunchRecord | null> {
+    let handle;
+    try { handle = await open(path.join(this.root, name), constants.O_RDONLY | constants.O_NOFOLLOW); }
+    catch { this.scanned.delete(name); return null; }
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.size > MAX_JOURNAL_BYTES) { this.scanned.delete(name); return null; }
+      const key = `${info.ino}:${info.size}:${info.mtimeMs}`, cached = this.scanned.get(name);
+      if (cached?.key === key) return cached.record;
+      let record: LaunchRecord | null = null;
+      try {
+        const journal = journalSchema.parse(JSON.parse(await handle.readFile("utf8")));
+        if (`${journal.launchId}.json` === name) {
+          record = { launchId: journal.launchId, itemId: journal.itemId ?? null, stage: journal.stage, workspaceId: journal.workspaceId, agentId: journal.agentId,
+            error: journal.error === null ? null : clip(journal.error, MAX_ERROR_CHARS + 100), at: journal.createdAt ?? info.mtime.toISOString() };
+        }
+      } catch { /* Not a launch record (or half written by an older version): leave it out. */ }
+      this.scanned.set(name, { key, record });
+      return record;
+    } finally { await handle.close(); }
+  }
+  private async itemAgents(paseo: Paseo, itemId: string): Promise<LaunchAgent[]> {
+    const result = await withTimeout(paseo.agents.list({ filter: { labels: { [ITEM_LABEL]: itemId }, includeArchived: true }, page: { limit: 50 } }), 5_000, t("serverLaunch.agentLookupTimeout"));
+    return result.entries.filter(entry => entry.agent.labels?.[ITEM_LABEL] === itemId).map(({ agent }) => ({
+      agentId: agent.id, launchId: agent.labels?.[LAUNCH_LABEL] ?? null, workspaceId: agent.workspaceId ?? null, title: agent.title ?? null,
+      provider: agent.provider, status: agent.status, archivedAt: agent.archivedAt ?? null, createdAt: agent.createdAt, updatedAt: agent.updatedAt,
+    }));
   }
   async stop() {
     this.stopping = true;

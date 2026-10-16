@@ -1,12 +1,12 @@
 import { t } from "../shared/text";
 import { currentLanguage, joinList } from "../shared/i18n";
-import { useRpc, useWorkspace, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import { useRpc, useWorkspace, type PluginScreenProps, type PluginSurfaceProps, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { FlatList, Icon, Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text, View, type LayoutChangeEvent } from "react-native";
 import { BOARD_FILE_LIMIT_BYTES, INBOX_PROJECT_ID, OVERVIEW_LIMIT_BYTES, readDashboardRpc, writeBoardRpc, type BoardItem, type BoardProject, type BoardSnapshot, type NoteKind, type TaskStatus, type UnavailableBoard, type WriteBoardInput } from "../shared/board";
-import { NoteDetail } from "./detail";
+import { NoteDetail, type QuickToggle } from "./detail";
 import { EditorForm, editorFor, newFields, type Editor } from "./editor";
 import { ActionMenu, Banner, Button, EmptyState, IconButton, SearchField, Segmented, Skeleton, Spacer, SplitView, SyncStatus, Toolbar, fontSize, hairline, radius, relativeTime, space, toneColor, type MenuAction } from "./kit";
 import { LaunchDialog } from "./launch";
@@ -15,10 +15,18 @@ import { mergeDashboard, patchDashboard, pollInterval, type DashboardData } from
 import { ALL_PROJECT_ID, GroupHeader, KINDS, KIND_ICONS, KIND_LABELS, KIND_TONES, NoteCard, NoteRow, PickerButton, PrimaryIconButton, STATUSES, STATUS_LABELS, STATUS_TONES, ScopeMark, StatusGlyph, itemKey, statusColor, statusText, type NoteActions } from "./ui";
 import { useForeground } from "./visibility";
 import { searchText } from "./search";
+import type { AgentDirectory } from "./agent-directory";
+import type { QuickStore } from "./quick-store";
+import { useLaunchLinks } from "./launch-ui";
+import { QuickManager, QuickStrip, isTemplate, quickChanges, quickCorrections, useQuickList, useQuickSave } from "./quick-ui";
+import { quickRef, type QuickEntry } from "../shared/quick";
+
+/** Live copies the resident plugin keeps for the board: the agent directory and the quick prompt list. */
+export interface NotesServices { directory: AgentDirectory; quick: QuickStore }
 
 const kindNoun = (kind: NoteKind) => kind === "task" ? t("board.taskNoun") : kind === "prompt" ? t("board.promptNoun") : t("board.ideaNoun");
 
-type HostProps = PluginSurfaceProps;
+type HostProps = PluginSurfaceProps & { services?: NotesServices; params?: PluginScreenProps["params"] };
 type Sheet = { mode: "detail"; key: string } | { mode: "editor"; editor: Editor; returnTo: string | null };
 type Section = { key: string; title: string; items: BoardItem[]; collapsible: boolean; status?: TaskStatus; projectId?: string };
 const NO_PROJECTS: BoardProject[] = [];
@@ -49,9 +57,9 @@ function unavailableText(boards: readonly UnavailableBoard[], projectName: (proj
   return t("board.unavailableProjects", { projects: who, reason: unavailableReason(boards) });
 }
 
-export function NotesSurface(props: PluginSurfaceProps) { return <NotesApp key={props.host.id} {...props} />; }
+export function NotesSurface(props: PluginSurfaceProps & { services?: NotesServices; params?: PluginScreenProps["params"] }) { return <NotesApp key={props.host.id} {...props} />; }
 
-export function NotesWorkspacePanel(props: PluginWorkspacePanelProps) {
+export function NotesWorkspacePanel(props: PluginWorkspacePanelProps & { services?: NotesServices }) {
   const workspace = useWorkspace(props.workspaceId, value => ({ projectId: value.projectId, name: value.projectDisplayName }));
   return <NotesApp key={props.host.id} {...props} defaultProjectId={workspace?.projectId} />;
 }
@@ -94,12 +102,12 @@ function NotesApp(props: HostProps & { defaultProjectId?: string }) {
   }, []);
   const compact = layout.compact || (width > 0 && width < COMPACT_BELOW);
   return <View style={{ flex: 1, minHeight: 0, backgroundColor: theme.colors.surface0 }} onLayout={onLayout}>
-    <Board {...props} dashboard={dashboard} queryKey={queryKey} patchBoard={patchBoard} compact={compact} width={width} />
+    <Board {...props} dashboard={dashboard} queryKey={queryKey} patchBoard={patchBoard} compact={compact} width={width} visible={visible} />
   </View>;
 }
 
-function Board({ theme, host, layout, navigation, dashboard: board, queryKey, patchBoard, compact, width, defaultProjectId }: HostProps & {
-  dashboard: UseQueryResult<DashboardData, Error>; queryKey: readonly unknown[]; patchBoard: (board: BoardSnapshot) => void; compact: boolean; width: number; defaultProjectId?: string;
+function Board({ theme, host, layout, navigation, dashboard: board, queryKey, patchBoard, compact, width, defaultProjectId, services, params, visible }: HostProps & {
+  dashboard: UseQueryResult<DashboardData, Error>; queryKey: readonly unknown[]; patchBoard: (board: BoardSnapshot) => void; compact: boolean; width: number; defaultProjectId?: string; visible: boolean;
 }) {
   const { colors } = theme;
   const write = useRpc(writeBoardRpc);
@@ -109,7 +117,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   const inFlight = useRef(false);
   const lastRequest = useRef<{ fingerprint: string; id: string } | null>(null);
   const [scopeId, setScopeId] = useState(ALL_PROJECT_ID);
-  const [kind, setKind] = useState<NoteKind>("task");
+  const [kind, setKind] = useState<NoteKind>(params?.view === "quick" ? "prompt" : "task");
   const [search, setSearch] = useState("");
   const [trash, setTrash] = useState(false);
   const [groupByProject, setGroupByProject] = useState(false);
@@ -129,6 +137,16 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   const [refreshing, setRefreshing] = useState(false);
   const mutation = useMutation({ mutationFn: (input: WriteBoardInput) => write(input), onSuccess: result => { patchBoard(result.board); } });
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  // What the agents each note started are doing (cards, detail): the shared directory plus the plugin's launch records.
+  const openAgent = useMemo(() => navigation?.openAgent ? (agentId: string) => navigation.openAgent({ agentId, serverId: host.id }) : undefined, [navigation, host.id]);
+  const launches = useLaunchLinks({ directory: services?.directory, hostId: host.id, enabled: visible, open: openAgent });
+  // 一键发送: the list the pills show, its manager, and keeping it in line with the notes.
+  const quickList = useQuickList(services?.quick), saveQuick = useQuickSave(services?.quick);
+  const quickRefs = useMemo(() => new Set(quickList.map(quickRef)), [quickList]);
+  const [quickOpen, setQuickOpen] = useState(params?.view === "quick");
+  const [quickBusy, setQuickBusy] = useState(false);
+  const [quickError, setQuickError] = useState<string | null>(null);
+  useEffect(() => { if (params?.view === "quick") { setKind("prompt"); setTrash(false); setQuickOpen(true); } }, [params?.view]);
 
   const perform = async (projectId: string, operation: WriteBoardInput["operation"], key: string | null = null) => {
     if (inFlight.current) return null;
@@ -153,6 +171,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
         const item = erase.item;
         if (!await perform(item.projectId, { type: "purge", id: item.id, expectedRevision: item.revision }, itemKey(item))) return;
         setSheet(current => current?.mode === "detail" && current.key === itemKey(item) ? null : current);
+        dropQuick([itemKey(item)]);
       } else {
         // The id is an argument, not the loop's `snapshot`: the app's Hermes gives a loop variable one slot for every
         // iteration, and React may run this update after the next iteration has started.
@@ -161,6 +180,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
           if (!await perform(snapshot.projectId, { type: "emptyTrash", expectedRevision: snapshot.revision })) return;
           // Completed projects leave the confirmation, so retry after a later failure does not erase twice.
           erased(snapshot.projectId);
+          dropQuick(snapshot.items.filter(item => item.deletedAt !== null).map(itemKey));
         }
       }
       setErase(null); toast.show(t("board.deleted"), { variant: "success" });
@@ -169,6 +189,21 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   const copy = async (value: string) => {
     try { await copyText(value); toast.show(t("board.copied"), { variant: "success" }); }
     catch (error) { setOperationError(t("board.copyFailed", { error: errorText(error) })); }
+  };
+  /** Saves a change to the quick prompt list; a failure shows in the manager when it is open, else above the board. */
+  const changeQuick = async (change: (entries: QuickEntry[]) => QuickEntry[] | null, done?: string) => {
+    if (quickBusy) return;
+    setQuickBusy(true); setQuickError(null);
+    try { if (await saveQuick(change) && done && mounted.current) toast.show(done, { variant: "success" }); }
+    catch (error) { if (mounted.current) (quickOpen ? setQuickError : setOperationError)(errorText(error)); }
+    finally { if (mounted.current) setQuickBusy(false); }
+  };
+  /** Notes deleted for good leave the list (in the background: the deletion itself already succeeded). */
+  const dropQuick = (refs: readonly string[]) => { if (refs.some(ref => quickRefs.has(ref))) void saveQuick(quickChanges.remove(refs)).catch(() => undefined); };
+  const quickFor = (item: BoardItem): QuickToggle | undefined => {
+    if (!services || item.kind !== "prompt" || item.deletedAt !== null) return undefined;
+    const on = quickRefs.has(itemKey(item)), template = isTemplate(item);
+    return { on, template, toggle: () => void changeQuick(quickChanges.toggle(item, on), on ? t("board.quickRemoved") : template ? t("board.quickAddedTemplate") : t("board.quickAdded")) };
   };
   const restoreVersion = (item: BoardItem, revision: number) => void perform(item.projectId, { type: "restoreVersion", id: item.id, expectedRevision: item.revision, revision }, itemKey(item)).then(result => {
     if (result && mounted.current) toast.show(t("board.restoredRevision", { revision }), { variant: "success" });
@@ -186,6 +221,17 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
 
   const projects = board.data?.projects ?? NO_PROJECTS;
   const boards = board.data?.boards ?? NO_BOARDS;
+  // Quick prompt titles, {{variables}} and trash follow the notes; each entry only from a copy of its note newer than it.
+  const latestBoards = useRef(boards);
+  latestBoards.current = boards;
+  useEffect(() => {
+    if (!services?.quick.ready() || !board.data || !quickCorrections(quickList, boards)) return;
+    void saveQuick(entries => quickCorrections(entries, latestBoards.current)).catch(() => undefined);
+  }, [quickList, boards, services, board.data, saveQuick]);
+  const quickNote = (entry: QuickEntry): BoardItem | null | undefined => {
+    const snapshot = boards.find(candidate => candidate.projectId === entry.projectId);
+    return snapshot ? snapshot.items.find(item => item.id === entry.itemId) ?? null : undefined;
+  };
   const unavailable = board.data?.unavailable ?? NO_UNAVAILABLE;
   const unavailableIds = useMemo(() => new Set(unavailable.flatMap(entry => entry.projectId ? [entry.projectId] : [])), [unavailable]);
   // One stable object per project (memoized rows compare it by reference); boards without a listed project get a stand-in.
@@ -363,7 +409,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     if (trash) return <EmptyState theme={theme} icon="Trash2" tone="neutral" title={t("board.trashEmpty")} />;
     return <EmptyState theme={theme} icon={KIND_ICONS[kind]} tone={KIND_TONES[kind]} title={scopeId === ALL_PROJECT_ID ? t("board.noKind", { kind: kindNoun(kind) }) : t("board.projectNoKind", { project: scope.name, kind: kindNoun(kind) })} action={{ label: createLabel, icon: "Plus", onPress: () => openCreate() }} />;
   };
-  const row = (item: BoardItem) => <NoteRow key={itemKey(item)} theme={theme} item={item} project={showProject && !groupByProject ? projectOf(item.projectId) : null} selected={selectedItem !== null && itemKey(item) === itemKey(selectedItem)} busy={pendingKey === itemKey(item)} actions={actions} />;
+  const row = (item: BoardItem) => <NoteRow key={itemKey(item)} theme={theme} item={item} project={showProject && !groupByProject ? projectOf(item.projectId) : null} selected={selectedItem !== null && itemKey(item) === itemKey(selectedItem)} busy={pendingKey === itemKey(item)} actions={actions} launches={launches} />;
   type ListEntry = { key: string; item: BoardItem } | { key: string; section: Section; open: boolean } | { key: string; empty: true };
   const listEntries = useMemo<ListEntry[]>(() => sections.flatMap(section => {
     const open = !section.collapsible || Boolean(needle) || !closedSections.has(section.key);
@@ -394,7 +440,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     <View style={{ height: 2, marginBottom: space.sm, borderRadius: 1, backgroundColor: status === "todo" ? colors.border : statusColor(theme, status) }} />
     <FlatList data={byStatus[status]} keyExtractor={itemKey} initialNumToRender={10} maxToRenderPerBatch={10} windowSize={5}
       style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: space.xl }} ItemSeparatorComponent={() => <View style={{ height: space.sm }} />}
-      renderItem={({ item }) => <NoteCard theme={theme} item={item} project={showProject ? projectOf(item.projectId) : null} busy={pendingKey === itemKey(item)} actions={actions} />}
+      renderItem={({ item }) => <NoteCard theme={theme} item={item} project={showProject ? projectOf(item.projectId) : null} busy={pendingKey === itemKey(item)} actions={actions} launches={launches} />}
       ListEmptyComponent={<View style={{ minHeight: 64, alignItems: "center", justifyContent: "center", borderRadius: radius.md, borderWidth: 1, borderStyle: "dashed", borderColor: toneColor(theme, STATUS_TONES[status], "line") }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("board.none")}</Text>
       </View>} />
@@ -406,7 +452,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
   else if (boardView) content = <View style={{ flex: 1, minHeight: 0, flexDirection: "row", gap: space.md, paddingHorizontal: space.md }}>{STATUSES.map(column)}</View>;
   else if (split) content = <SplitView theme={theme} compact={false} showDetail listWidth={Math.round(Math.min(420, Math.max(320, width * 0.36)))} list={list}
     detail={selectedItem ? <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: space.xl, maxWidth: 760 }}>
-      <NoteDetail key={itemKey(selectedItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: selectedItem }); }} item={selectedItem} project={projectOf(selectedItem.projectId)} actions={actions} busy={pendingKey === itemKey(selectedItem)} compact={false} onRestoreVersion={revision => restoreVersion(selectedItem, revision)} onRepairHistory={revision => repairHistory(selectedItem, revision)} />
+      <NoteDetail key={itemKey(selectedItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: selectedItem }); }} item={selectedItem} project={projectOf(selectedItem.projectId)} actions={actions} busy={pendingKey === itemKey(selectedItem) || quickBusy} compact={false} onRestoreVersion={revision => restoreVersion(selectedItem, revision)} onRepairHistory={revision => repairHistory(selectedItem, revision)} quick={quickFor(selectedItem)} launches={launches} />
     </ScrollView> : null} />;
   else content = list;
 
@@ -416,6 +462,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
     {operationError && !sheet ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="danger" message={operationError} onDismiss={() => setOperationError(null)} /></View> : null}
     {board.isError && board.data ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="warning" message={t("board.syncInterrupted")} action={{ label: t("board.retry"), onPress: () => void refresh() }} /></View> : null}
     {unavailable.length > 0 && scopeUnavailable.length === 0 ? <View style={{ paddingHorizontal: space.md, paddingTop: space.sm }}><Banner theme={theme} tone="warning" message={unavailableText(unavailable, projectName)} /></View> : null}
+    {services && kind === "prompt" && !trash ? <QuickStrip theme={theme} entries={quickList} compact={compact} onManage={() => { setQuickError(null); setQuickOpen(true); }} /> : null}
     <View style={{ flex: 1, minHeight: 0 }}>{content}</View>
 
     <Modal title={sheetTitle} open={sheet !== null && (sheet.mode === "editor" || sheetItem !== null)} onOpenChange={open => { if (!open) closeSheet(); }}>
@@ -423,7 +470,7 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
       <Modal.Content scrollable={!editor} contentContainerStyle={editor ? { padding: 0, gap: 0 } : { padding: space.xl, gap: space.lg }}>
         {sheet?.mode === "detail" && sheetItem ? <>
           {operationError ? <Banner theme={theme} tone="danger" message={operationError} onDismiss={() => setOperationError(null)} /> : null}
-          <NoteDetail key={itemKey(sheetItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: sheetItem }); }} item={sheetItem} project={projectOf(sheetItem.projectId)} actions={actions} busy={pendingKey === itemKey(sheetItem)} compact={compact} onRestoreVersion={revision => restoreVersion(sheetItem, revision)} onRepairHistory={revision => repairHistory(sheetItem, revision)} />
+          <NoteDetail key={itemKey(sheetItem)} theme={theme} hostId={host.id} onPurge={() => { setOperationError(null); setErase({ item: sheetItem }); }} item={sheetItem} project={projectOf(sheetItem.projectId)} actions={actions} busy={pendingKey === itemKey(sheetItem) || quickBusy} compact={compact} onRestoreVersion={revision => restoreVersion(sheetItem, revision)} onRepairHistory={revision => repairHistory(sheetItem, revision)} quick={quickFor(sheetItem)} launches={launches} />
         </> : null}
         {editor ? <EditorForm theme={theme} editor={editor} projects={projects} projectName={projectName} busy={mutation.isPending} compact={compact} error={operationError} changedElsewhere={editorChangedElsewhere}
           onChange={updateDraft} onProject={projectId => setSheet(current => current?.mode === "editor" && !current.editor.original ? { ...current, editor: { ...current.editor, projectId } } : current)}
@@ -447,6 +494,8 @@ function Board({ theme, host, layout, navigation, dashboard: board, queryKey, pa
       </Modal.Content>
     </Modal>
     <ActionMenu theme={theme} title={t("board.more")} open={menuOpen} onClose={() => setMenuOpen(false)} actions={menuActions} />
+    {services ? <QuickManager theme={theme} open={quickOpen} onClose={() => { setQuickOpen(false); setQuickError(null); }} entries={quickList} find={quickNote} busy={quickBusy} error={quickError}
+      onMove={(entry, delta) => void changeQuick(quickChanges.move(quickRef(entry), delta))} onRemove={entry => void changeQuick(quickChanges.remove([quickRef(entry)]), t("board.quickRemoved"))} /> : null}
     {launchItem ? <LaunchDialog key={`${host.id}:${itemKey(launchItem)}`} theme={theme} host={host} layout={{ ...layout, compact }} navigation={navigation}
       item={allItems.find(item => itemKey(item) === itemKey(launchItem)) ?? launchItem} open={launchOpen} onOpenChange={setLaunchOpen} /> : null}
   </View>;

@@ -39,6 +39,12 @@ export interface IndexRow {
   lines?: number;
   /** Paseo's `turnId` of the entry (0.3.0-local.3): timing never reaches into an earlier turn, and a new turn starts a new segment. */
   turn?: string;
+  /** 0.8.0: lines a finished call added and removed, per file id (shared/changes.ts); absent when not countable. */
+  changes?: ReadonlyArray<{ file: string; added: number; removed: number }>;
+  /** 0.8.0: the call's changes whose lines are not known (shared/changes.ts); they are counted, never guessed. */
+  uncounted?: number;
+  /** 0.8.0: a failed command's exit code, when it reported one. */
+  exit?: number;
 }
 
 export interface FoldOptions {
@@ -93,7 +99,35 @@ export interface FoldSummary {
   canceled: number;
   /** done: from the content before the segment to its last step; null when unknown. */
   durationMs: number | null;
+  /**
+   * 0.8.0: files the steps changed whose lines are known (edits with a diff; writes and edits without one are left out),
+   * and the lines added and removed across them.
+   */
+  files: number;
+  added: number;
+  removed: number;
+  /** Changes whose lines are not known (writes, deletions, diffs cut short, patches Paseo kept only part of): shown as a count. */
+  uncounted: number;
+  /** The most changed files (at most FOLD_FILES), each with the key of a step that changed it, to find its path on the client. */
+  changed: FoldFile[];
+  /** Failed commands (at most FOLD_FAILS), oldest first, with their exit code when known. */
+  fails: FoldFail[];
+  /**
+   * 0.8.0: the segment's turn, and whether this is the last summary of that turn in the index (it shows the turn's tokens).
+   * A turn whose last stretch is too short to fold shows them on its last folded one; a turn with no summary shows none.
+   */
+  turn: string | null;
+  lastOfTurn: boolean;
 }
+
+// Type aliases, not interfaces: a summary is timeline item data, which must be JSON.
+export type FoldFile = { key: string; file: string; added: number; removed: number };
+export type FoldFail = { key: string; exit: number | null };
+
+/** Most files a summary lists when expanded; the rest are counted in 「还有 N 个文件」. */
+export const FOLD_FILES = 8;
+/** Most failed commands a summary lists when expanded. */
+export const FOLD_FAILS = 5;
 
 export type FoldRole = { kind: "show" } | { kind: "hide" } | { kind: "fold"; summary: FoldSummary };
 
@@ -148,7 +182,10 @@ export function reasoningKey(text: string): string {
 export function roleSignature(role: FoldRole): string {
   if (role.kind !== "fold") return role.kind === "hide" ? "h" : "s";
   const s = role.summary;
-  return `f|${s.segment}|${s.mode}|${s.expanded ? 1 : 0}|${s.steps}|${s.hidden}|${s.failed}|${s.canceled}|${s.durationMs ?? ""}|${s.counts.map(([look, n]) => `${look}${n}`).join(",")}`;
+  const changed = s.changed.map((file) => `${file.key}:${file.file}:${file.added}:${file.removed}`).join(",");
+  const fails = s.fails.map((fail) => `${fail.key}:${fail.exit ?? ""}`).join(",");
+  return `f|${s.segment}|${s.mode}|${s.expanded ? 1 : 0}|${s.steps}|${s.hidden}|${s.failed}|${s.canceled}|${s.durationMs ?? ""}|${s.counts.map(([look, n]) => `${look}${n}`).join(",")}`
+    + `|${s.files}|${s.added}|${s.removed}|${s.uncounted}|${changed}|${fails}|${s.turn ?? ""}|${s.lastOfTurn ? 1 : 0}`;
 }
 
 interface Step {
@@ -182,6 +219,42 @@ function isMember(row: IndexRow, scope: FoldOptions["scope"]): boolean {
 
 function callIdOf(key: string): string | null {
   return key.startsWith("t:") ? key.slice(2) : null;
+}
+
+/**
+ * 0.8.0: what the steps a summary stands for changed, and which of their commands failed. Adapted from
+ * lthieu96/paseo-chat-polish `shared/recap.ts` `changeSummary` (MIT, see NOTICE): there a turn's timeline items are read
+ * after it ends and a row is appended; here the plugin server counts each call's lines while it builds the fold index
+ * (shared/changes.ts), so the summary only adds up numbers. Calls whose lines are not known are left out, not guessed.
+ */
+export function summarizeChanges(steps: ReadonlyArray<{ key: string; row: IndexRow; status: StepStatus; look: LookKey; notice?: boolean }>): Pick<FoldSummary, "files" | "added" | "removed" | "uncounted" | "changed" | "fails"> {
+  const files = new Map<string, FoldFile & { order: number }>();
+  const fails: FoldFail[] = [];
+  let added = 0;
+  let removed = 0;
+  let uncounted = 0;
+  for (const step of steps) {
+    uncounted += step.row.uncounted ?? 0;
+    for (const change of step.row.changes ?? []) {
+      added += change.added;
+      removed += change.removed;
+      const known = files.get(change.file);
+      if (known) {
+        known.added += change.added;
+        known.removed += change.removed;
+        known.key = step.key;
+      } else {
+        files.set(change.file, { key: step.key, file: change.file, added: change.added, removed: change.removed, order: files.size });
+      }
+    }
+    if (step.look === "shell" && step.status === "failed" && !step.notice && fails.length < FOLD_FAILS) fails.push({ key: step.key, exit: step.row.exit ?? null });
+  }
+  // Most changed first; ties keep the order the files were first changed in.
+  const changed = [...files.values()]
+    .sort((left, right) => right.added + right.removed - (left.added + left.removed) || left.order - right.order)
+    .slice(0, FOLD_FILES)
+    .map(({ key, file, added: plus, removed: minus }) => ({ key, file, added: plus, removed: minus }));
+  return { files: files.size, added, removed, uncounted, changed, fails };
 }
 
 function countLooks(steps: readonly Step[]): Array<[LookKey, number]> {
@@ -291,8 +364,12 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
   const minHidden = options.minHidden ?? 2;
   const roles = new Map<string, FoldRole>();
   const infos: SegmentInfo[] = [];
-  for (const segment of segmentRows(rows, options)) {
+  const segments = segmentRows(rows, options);
+  // 0.8.0: the last summary of each turn shows the turn's tokens (marked once every segment is planned).
+  const lastOfTurn = new Map<string, FoldSummary>();
+  for (const segment of segments) {
     const first = segment.steps[0]!;
+    const turn = segment.turn ?? null;
     const id = String(first.row.seq);
     for (const step of segment.steps) if (step.merged && !step.ambiguous) roles.set(step.key, HIDE);
     const foldable = segment.steps.filter((step) => !step.merged);
@@ -329,7 +406,11 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
         failed: loaded.filter((step) => step.status === "failed").length + failedNotices,
         canceled: loaded.filter((step) => step.status === "canceled").length,
         durationMs,
+        ...summarizeChanges(loaded),
+        turn,
+        lastOfTurn: false,
       };
+      if (turn !== null) lastOfTurn.set(turn, summary);
       info.mode = "done";
       info.anchor = anchor.key;
       for (const step of foldable) {
@@ -365,11 +446,16 @@ export function planFolds(rows: readonly IndexRow[], options: FoldOptions): Fold
       failed: 0,
       canceled: earlierSteps.filter((step) => step.status === "canceled").length,
       durationMs: null,
+      ...summarizeChanges(earlierSteps),
+      turn,
+      lastOfTurn: false,
     };
+    if (turn !== null) lastOfTurn.set(turn, summary);
     info.mode = "earlier";
     info.anchor = anchor.key;
     for (const step of earlier) roles.set(step.key, step === anchor ? { kind: "fold", summary } : expanded ? SHOW : HIDE);
   }
+  for (const summary of lastOfTurn.values()) summary.lastOfTurn = true;
   return { roles, segments: infos };
 }
 
@@ -393,12 +479,15 @@ export function foldTitle(summary: Pick<FoldSummary, "mode" | "steps" | "hidden"
 
 /** Screen-reader label: 「展开 12 步：思考 2、命令 5，失败 1，用时 1 分 20 秒」. */
 export function foldAccessibilityLabel(
-  summary: Pick<FoldSummary, "mode" | "steps" | "hidden" | "expanded" | "failed" | "canceled" | "durationMs"> & { counts: ReadonlyArray<readonly [string, number]> },
+  summary: Pick<FoldSummary, "mode" | "steps" | "hidden" | "expanded" | "failed" | "canceled" | "durationMs"> & Partial<Pick<FoldSummary, "files" | "added" | "removed" | "uncounted">> & { counts: ReadonlyArray<readonly [string, number]> },
 ): string {
   const parts = joinList(foldCountParts(summary.counts).map((part) => part.text));
   const extras = [
     summary.failed > 0 ? t("fold.failed", { count: summary.failed }) : null,
     summary.canceled > 0 ? t("fold.canceled", { count: summary.canceled }) : null,
+    // 0.8.0: 「改动 3 个文件 +12 −4」, and the changes whose lines are not known: 「另有 1 处改动未计行数」.
+    summary.files ? t("fold.changes", { files: t("fold.files", { count: summary.files }), added: summary.added ?? 0, removed: summary.removed ?? 0 }) : null,
+    summary.uncounted ? t(summary.files ? "fold.uncountedLabel" : "fold.uncountedOnly", { count: summary.uncounted }) : null,
     summary.mode === "done" ? (formatFoldDuration(summary.durationMs) ? t("fold.duration", { duration: formatFoldDuration(summary.durationMs) }) : null) : null,
   ].filter(Boolean);
   return t(summary.expanded ? "fold.collapse" : "fold.expand", {

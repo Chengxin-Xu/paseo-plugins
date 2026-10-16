@@ -4,13 +4,17 @@ import { boot as bootZh } from "./shared/locales/zh-CN.json";
 import { t } from "./shared/text";
 import type { PluginClientContext, PluginCommandCapabilities, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { lazySurfaces } from "./client/lazy-chunk";
+import { createChunkLoader, lazySurfaces } from "./client/lazy-chunk";
 import { getClientChunk } from "./shared/ui-chunk";
+import { QUICK_CHUNK } from "./shared/generated/quick-chunk-manifest";
 import { UI_CHUNK } from "./shared/generated/ui-chunk-manifest";
 import { contributePromptPills } from "./client/composer-pills";
-import { notesAttachmentSource, quickNoteFields } from "./shared/composer";
-import { INBOX_PROJECT_ID, writeBoardRpc } from "./shared/board";
+import { notesAttachmentSource } from "./shared/composer-boot";
 import { showComposerNotice } from "./client/composer-notice";
+import { createAgentDirectory } from "./client/agent-directory";
+import { createQuickStore } from "./client/quick-store";
+import type { QuickActions } from "./client/quick-send";
+import { createElement, type ComponentType } from "react";
 
 function NotesSidebar({ currentScreen, openScreen }: PluginSidebarItemProps) {
   useI18n();
@@ -19,13 +23,20 @@ function NotesSidebar({ currentScreen, openScreen }: PluginSidebarItemProps) {
 function openNotes(host: PluginCommandCapabilities) {
   if (typeof host.openScreen === "function") host.openScreen({ screenId: "notes" }); else host.openSurface("notes");
 }
-let quickSequence = 0;
-
 export default function contribute(client: PluginClientContext) {
   // Only views opened later need the full catalog; the resident stub draws boot text.
   const i18n = createClientI18n(client, { pluginId: "project-notes", boot: { "zh-CN": { boot: bootZh }, en: { boot: bootEn } }, load: "lazy" });
   const lazy = lazySurfaces(client, { rpc: getClientChunk, manifest: UI_CHUNK, label: () => t("boot.name"), text: i18n });
-  const NotesSurface = lazy("notes"), PromptScreen = lazy("prompts"), NotesWorkspacePanel = lazy("project-notes");
+  // The one-tap send and the /notes capture: a small chunk fetched with the first use, in the stub's boot text (it
+  // does not wait for the full catalog, which only the views need).
+  const quickChunk = createChunkLoader(client, { rpc: getClientChunk, manifest: QUICK_CHUNK, label: () => t("boot.name"),
+    text: { ready: () => Promise.resolve(), translator: () => i18n.translator(), subscribe: listener => i18n.subscribe(listener) } });
+  const actions = () => quickChunk.load() as unknown as Promise<QuickActions>;
+  // One live copy of the agent directory and of the quick prompt list, shared by the pills and the board (task-card
+  // status, the quick prompt manager), which get them as a prop.
+  const services = { directory: createAgentDirectory(client.paseo), quick: createQuickStore(client) };
+  const withServices = (Lazy: ComponentType<any>) => function NotesView(props: object) { return createElement(Lazy, { ...props, services }); };
+  const NotesSurface = withServices(lazy("notes")), PromptScreen = lazy("prompts"), NotesWorkspacePanel = withServices(lazy("project-notes"));
   const removers: (() => void)[] = [];
   const own = (remove: () => void) => { removers.push(remove); };
   if (typeof client.addScreen === "function") {
@@ -42,7 +53,7 @@ export default function contribute(client: PluginClientContext) {
   own(i18n.localized(() => client.addCommandCenterItem({ id: "open-project-notes", title: t("boot.openProjects"), icon: "NotebookPen", context: "workspace", keywords: ["notes", t("boot.keywordProjects"), t("boot.keywordTasks")], onSelect({ openPanel }) { openPanel("project-notes"); } })));
   own(i18n.localized(() => client.addSlashCommand({ name: "notes", description: t("boot.notesDescription"), argumentHint: t("boot.notesArgument"), context: "workspace", async onSubmit(context) {
     if (!context.args.trim()) { context.openPanel("project-notes"); return; }
-    await context.rpc(writeBoardRpc, { projectId: INBOX_PROJECT_ID, requestId: `quick-${Date.now().toString(36)}-${++quickSequence}-${Math.random().toString(36).slice(2)}`, operation: { type: "create", fields: quickNoteFields(context.args) } });
+    await (await actions()).captureNote(context.args);
     showComposerNotice(context.paseo, t("boot.noteSaved"));
   } })));
   own(i18n.localized(() => client.addSlashCommand({ name: "prompt", description: t("boot.promptDescription"), argumentHint: t("boot.promptArgument"), context: "agent", onSubmit(context) {
@@ -51,13 +62,13 @@ export default function contribute(client: PluginClientContext) {
   } })));
   if (typeof client.addAttachmentSource === "function") own(i18n.localized(() => client.addAttachmentSource(notesAttachmentSource())));
   if (typeof client.addSettingsScreen === "function") own(client.addSettingsScreen({ id: "language", title: t("boot.settingsTitle"), icon: "Languages", Component: lazy("language") }));
-  const stopPills = contributePromptPills(client, lazy("prompt-popover"));
+  const stopPills = contributePromptPills(client, lazy("prompt-popover"), services, actions);
   let stopped = false;
   return () => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
-    for (const remove of [stopPills, ...removers.reverse(), () => i18n.dispose()]) {
+    for (const remove of [stopPills, ...removers.reverse(), () => services.directory.dispose(), () => services.quick.dispose(), () => i18n.dispose()]) {
       try { remove(); } catch (error) { failures.push(error); }
     }
     if (failures.length) throw new AggregateError(failures, t("boot.unloadFailed"));

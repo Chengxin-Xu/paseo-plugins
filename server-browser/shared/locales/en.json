@@ -90,8 +90,6 @@
     "takeManualControlAndReload": "Take manual control and reload",
     "reloading": "Reloading…",
     "takeManualControlAndOpenAUrl": "Take manual control and open a URL",
-    "workspaceServices": "Workspace services",
-    "openThisWorkspaceSDevelopmentServiceIn": "Open this workspace's development service in a new tab",
     "matchWindow": "Match window",
     "fullWidth": "Full width",
     "fittingThePageWidth": "Fitting the page width…",
@@ -471,6 +469,36 @@
     },
     "tabLabel": "Tab {title}"
   },
+  "agentPorts": {
+    "title": "Ports agents opened",
+    "menuLabel": "Services and ports",
+    "menuHint": "This workspace's dev services and the ports its agents opened",
+    "empty": "No agent in this workspace is listening on a port yet. When one starts a dev server, it shows up here and opens in a new tab with one tap.",
+    "others": "Other workspaces",
+    "showOthers": {
+      "one": "Show {count} port in other workspaces",
+      "other": "Show {count} ports in other workspaces"
+    },
+    "hideOthers": "Hide ports in other workspaces",
+    "local": "Local only",
+    "all": "All addresses",
+    "address": "Only {address}",
+    "running": "Agent working",
+    "idle": "Agent idle",
+    "error": "Agent failed, port still in use",
+    "closed": "Agent stopped, port still in use",
+    "archived": "Agent archived, port still in use",
+    "untitled": "Untitled agent",
+    "unnamedProcess": "Unknown process",
+    "openLabel": "Open port {port} in a new tab: {agent}, {process}, {scope}, {state}",
+    "opening": "Opening port {port}",
+    "opened": "Opened port {port} in a new tab",
+    "partial": "Too many processes or ports; only some are listed.",
+    "uncertain": "Some ports can't be matched to an agent right now; trying again shortly.",
+    "failed": "Ports can't be read right now; trying again shortly.",
+    "notOpenable": "The shared browser can't open this address",
+    "new": "New"
+  },
   "browserWeb": {
     "typeInThePageView": "Type in the page view"
   },
@@ -568,7 +596,9 @@
     "requestTooLarge": "Request too large",
     "forbidden": "Forbidden",
     "invalidOwner": "Invalid control owner",
-    "notFound": "Not found"
+    "notFound": "Not found",
+    "portNotListed": "Port {port} is not in the list of ports agents opened, so it was not opened. Refresh the list and try again.",
+    "portNotOpenable": "Port {port} listens on an address the shared browser can't open."
   },
   "runtime": {
     "sandboxUnavailable": "No usable sandbox; unprivileged user namespaces or a setuid sandbox are required",

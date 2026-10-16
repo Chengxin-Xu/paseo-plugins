@@ -44,8 +44,14 @@ test("quick replies answer one turn: the popover only beside the sentence they a
   assert.match(replies, /sendChecked\(paseo, message, caps, deferred\.send, consent, \{ expect, precheck, \.\.\.\(reply\.rearm \? \{ beforeSend: clearAttention \} : \{\}\) \}\)/);
   // 「等这一轮结束再发」 passes the same turn checks before it is queued.
   assert.match(replies, /await checkFits\(paseo, message, \{ expect, precheck \}\);/);
-  // Both the send and the queueing; a tagged Error, never `instanceof` (no classes in the default Hermes).
-  assert.equal(replies.match(/if \(isSendRefused\(error\)\) \{ setProblem\(null\); setRefused\(error\.message\); return; \}/g)?.length, 2, "no retry");
+  // The send, the queueing and the scheduling (定时发, 2.17); a tagged Error, never `instanceof` (no classes in the default Hermes).
+  assert.equal(replies.match(/if \(isSendRefused\(error\)\) \{ setProblem\(null\); setRefused\(error\.message\); return; \}/g)?.length, 3, "no retry");
+  assert.match(replies, /const view = await deferred\.enqueue\(\{ \.\.\.ledgerInput\(message\), notBefore: at \}\);/, "a scheduled reply carries the same turn and group");
+  // A scheduled reply is listed under 定时消息 (detail, popover): here one line, not its row a second time.
+  assert.match(replies, /<DeferredList theme=\{theme\} queue=\{deferred\} only=\{view => keys\.has\(view\.key\) && !isScheduledView\(view\)\} compact=\{compact\} \/>/);
+  assert.match(replies, /t\("alertsSchedule\.repliesScheduled", \{ when: scheduleWhen\(scheduled\.view\.notBefore\), reply: scheduled\.reply\.text \}\)/);
+  // Due (its time came, or 立即发送 while the agent was busy): it says it waits for the agent, not the old time.
+  assert.match(replies, /\{isScheduled\(scheduled\.view\)\s+\? t\("alertsSchedule\.repliesScheduled"[^}]+\}\)\s+: t\("alertsSchedule\.repliesDue", \{ reply: scheduled\.reply\.text \}\)\}/);
   assert.match(replies, /nudge === "go-ahead" \? "它问：" : "它说接下来："/);
   // The turn goes to the server with every reply (codex-obs-attn-R3): one reply of it goes out, and only while it still fits.
   assert.match(replies, /const group = quickReplyGroup\(expectPrompt, expectRound\), guard = quickReplyGuard\(expectPrompt, expectRound\);/);
@@ -61,7 +67,8 @@ test("quick replies answer one turn: the popover only beside the sentence they a
 test("the stub hands one set of 需要处理 stores to the badge, the schedule count and every chunk surface; the detail reads it", () => {
   const root = (file: string) => readFileSync(join(__dirname, "..", file), "utf8");
   const stub = root("index.client.tsx"), chunk = root("ui-chunk.client.tsx");
-  assert.match(stub, /const attentionStores = createAttentionStores\(\);/);
+  // 提示音 (2.17) listens to every read of them; it keeps no RPC binding of its own.
+  assert.match(stub, /const attentionStores = createAttentionStores\(chime\.onRead\);/);
   assert.match(stub, /<Surface \{\.\.\.props\} attentionStores=\{attentionStores\} \/>/);
   assert.match(stub, /<ObservatorySidebarItem \{\.\.\.props\} stores=\{attentionStores\}/);
   assert.match(stub, /<ScheduleSidebarItem \{\.\.\.props\} stores=\{attentionStores\} \/>/);
@@ -69,7 +76,7 @@ test("the stub hands one set of 需要处理 stores to the badge, the schedule c
   assert.match(stub, /client\.addWorkspacePanel\(\{ id, title, icon, context, Component: surface\(id\) \}\)/);
   assert.doesNotMatch(stub, /Component: lazy\(/, "every screen and panel gets the stores");
   assert.match(chunk, /<AttentionStoresContext\.Provider value=\{props\.attentionStores \?\? null\}>/);
-  for (const surface of ["observatory: provide(Overview)", "archives: provide(Archives)", "\"workspace-observatory\": provide(Workspace)", "\"agent-inspector\": provide(Inspector)"])
+  for (const surface of ["observatory: provide(clocked(Overview))", "archives: provide(Archives)", "\"workspace-observatory\": provide(clocked(Workspace))", "\"agent-inspector\": provide(clocked(Inspector))"])
     assert.ok(chunk.includes(surface), surface);
   assert.match(source("agent-detail.tsx"), /invalidateAttention = useInvalidateAttention\(\)/);
   assert.doesNotMatch(source("use-attention.ts"), /globalThis/);

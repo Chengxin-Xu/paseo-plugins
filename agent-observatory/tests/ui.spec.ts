@@ -825,6 +825,91 @@ test("就地审批 answers one tool request with the provider's own choices, and
   expect(errors).toEqual([]);
 });
 
+test("每轮小结 is off on a new install: no recap lines, and the settings say what turning it on sends", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo);
+  await expect(page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true })).toBeVisible();
+  await expect(page.getByTestId("recap-line")).toHaveCount(0);
+  await menu(page, "观测设置");
+  const settings = page.getByRole("dialog", { name: "观测设置", exact: true }).getByTestId("recap-settings");
+  await expect(settings.getByRole("switch", { name: "每轮小结", exact: true })).toHaveAttribute("aria-checked", "false");
+  await expect(settings.getByRole("switch", { name: "顺带生成建议回复", exact: true })).toHaveAttribute("aria-disabled", "true");
+  await expect(settings.getByText(/把这一轮和之前最多 8 轮的对话文字/)).toBeVisible();
+  // Turned on here, the list asks again at once and shows the recaps.
+  await settings.getByRole("switch", { name: "每轮小结", exact: true }).click();
+  await expect(settings.getByRole("switch", { name: "每轮小结", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(settings.getByText("由谁写", { exact: true })).toBeVisible();
+  await page.getByRole("dialog", { name: "观测设置", exact: true }).getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(page.getByTestId("recap-line").first()).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("每轮小结 with a profile: the settings say what it leaves in the workspace and how often it runs, also once the choice is folded", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "recaps");
+  await menu(page, "观测设置");
+  const settings = page.getByRole("dialog", { name: "观测设置", exact: true }).getByTestId("recap-settings");
+  await expect(settings.getByRole("switch", { name: "每轮小结", exact: true })).toHaveAttribute("aria-checked", "true");
+  const note = settings.getByTestId("recap-provider-note");
+  // The Grok CLI leaves nothing behind: no note until the choices open.
+  await expect(note).toHaveCount(0);
+  await settings.getByRole("button", { name: "更换", exact: true }).click();
+  await expect(note).toContainText("同一个 Agent 30 分钟内最多这样写一次，只写最新一轮");
+  await settings.getByRole("radio", { name: /^实现 · 长程执行与交付/ }).click();
+  await expect(settings.getByRole("radio", { name: /^实现 · 长程执行与交付/ })).toHaveAttribute("aria-checked", "true");
+  await settings.getByRole("button", { name: "收起", exact: true }).click();
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("这些归档的子 Agent 和它们在宿主、Provider 里的会话记录会留在工作区里，越积越多，插件删不掉");
+  expect(errors).toEqual([]);
+});
+
+test("每轮小结 under each title, whole in the detail, and its AI 建议 sent word for word through the ledger", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await open(page, testInfo, "recaps");
+  const operations = () => page.evaluate(() => (globalThis as Fixture).__previewAgentOperations.filter(operation => operation.type === "send").map(operation => structuredClone(operation)));
+  // The second line of a row: ✦, the goal and progress, 下一步. A working Agent's is out of date; one is being written.
+  const row = page.getByRole("button", { name: "查看 整理性能基线，已完成", exact: true });
+  await expect(row.getByTestId("recap-line")).toContainText("整理性能基线：脚本和首页基线已跑完，报告待合入");
+  await expect(row.getByTestId("recap-line")).toContainText(/→\s把基线脚本加进 CI$/);
+  await expect(row.getByTestId("recap-line")).toHaveAttribute("aria-label", "每轮小结：整理性能基线：脚本和首页基线已跑完，报告待合入 下一步：把基线脚本加进 CI");
+  await expect(page.getByRole("button", { name: /^查看 重构支付服务，/ }).first().getByTestId("recap-line")).toContainText("过时 · 重构支付服务：幂等校验已上");
+  await expect(page.getByRole("button", { name: /^查看 准备移动端测试，/ }).getByTestId("recap-line")).toContainText("正在写小结…");
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "recap-list");
+  // The detail: the whole recap at the top, and the suggested reply under the latest reply, marked AI 建议.
+  await row.click();
+  const detail = page.getByTestId("agent-detail");
+  const card = detail.getByTestId("recap-card");
+  await expect(card.getByText("整理性能基线：脚本和首页基线已跑完，报告待合入", { exact: true })).toBeVisible();
+  await expect(card.getByText("把基线脚本加进 CI", { exact: true })).toBeVisible();
+  await expect(card.getByText("由 Grok 4.7 · low 写", { exact: true })).toBeVisible();
+  const suggestion = detail.getByTestId("quick-reply-ai-block");
+  await expect(suggestion.getByText("AI 建议", { exact: true })).toBeVisible();
+  await noHorizontalOverflow(page);
+  await screenshot(page, testInfo, "recap-detail");
+  await suggestion.getByRole("button", { name: "把 AI 建议「先把基线脚本加进 CI」发给 整理性能基线", exact: true }).click();
+  await expect.poll(operations).toEqual([expect.objectContaining({ agentId: "performance-baseline", input: "先把基线脚本加进 CI", options: expect.objectContaining({ messageId: expect.any(String) }) })]);
+  await expect(toast(page, "已回复「整理性能基线」：先把基线脚本加进 CI")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("每轮小结 in English reads naturally in the list, the detail and the settings", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto(`${query(testInfo, "recaps")}&language=en`);
+  await expect(page.getByRole("button", { name: "More actions", exact: true }).first()).toBeVisible();
+  await expect(page.getByTestId("recap-line").filter({ hasText: "Performance baseline" })).toHaveAttribute("aria-label", "Turn summary: Performance baseline: scripts and home page runs done, report not merged Next: Add the baseline script to CI");
+  await page.getByTestId("recap-line").filter({ hasText: "Performance baseline" }).click();
+  const detail = page.getByTestId("agent-detail");
+  await expect(detail.getByTestId("recap-card").getByText("Written by Grok 4.7 · low", { exact: true })).toBeVisible();
+  await expect(detail.getByTestId("quick-reply-ai-block").getByText("AI suggestion", { exact: true })).toBeVisible();
+  await screenshot(page, testInfo, "recap-detail-en");
+  expect(errors).toEqual([]);
+});
+
 test("就地审批 shows a long request to its end once expanded, and a Grep's pattern with its path (codex-obs-send-ui-F1)", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));

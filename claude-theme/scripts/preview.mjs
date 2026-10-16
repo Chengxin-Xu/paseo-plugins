@@ -5,6 +5,7 @@
 //   - Both:  user message bubble = border (surface3), composer input = control (surface2),
 //            placeholder / timestamps / toolbar icons = ring (surface4 / foregroundExtraMuted),
 //            primary button text = background (accentForeground) on accent.
+// The last card is the custom slot at its default parameters (shared/custom.ts).
 // Writes preview/dist/themes.png, which is git-ignored.
 // Usage: npm run preview
 import { deflateSync } from "node:zlib";
@@ -13,7 +14,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const { THEMES, resolveHostSurfaces } = await import(join(root, "shared/palette.ts"));
+const { THEMES: FIXED, resolveHostSurfaces } = await import(join(root, "shared/palette.ts"));
+const { customTheme, DEFAULT_CUSTOM } = await import(join(root, "shared/custom.ts"));
+const THEMES = [...FIXED, customTheme(DEFAULT_CUSTOM, "🎨 Custom")];
 
 const CARD = { width: 380, height: 232 };
 const GAP = 20;

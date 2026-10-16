@@ -470,12 +470,84 @@ test("workspace services open in a new tab from the tabs sheet and the menu (opu
   await tabs.getByTestId("server-browser-service-web").click();
   await expect.poll(async () => (await actions(page, "newTab")).map(call => call.input.action?.url)).toEqual(["http://127.0.0.1:5173/"]);
   await expect(page.getByRole("alert").filter({ hasText: "已在新标签页打开 web" })).toBeVisible();
-  await openMenuItem(page, "本工作区服务");
-  const sheet = page.getByRole("dialog", { name: "本工作区服务" });
+  await openMenuItem(page, "服务与端口");
+  const sheet = page.getByRole("dialog", { name: "服务与端口" });
+  await expect(sheet.getByText("本工作区服务")).toBeVisible();
   await expect(sheet.getByText("端口 8787 · 无响应")).toBeVisible();
   await sheet.getByTestId("server-browser-service-api").click();
   await expect.poll(async () => (await actions(page, "newTab")).length).toBe(2);
   expect(await noOverflow(page)).toBe(true);
+});
+
+const portCalls = async (page: Page) => (await calls(page)).filter(call => call.name === "browser.ports") as unknown as { input: { workspaceId: string; revision?: string } }[];
+
+test("ports Agents opened sit under the workspace services, in colour, and open by port only", async ({ page }) => {
+  const errors = await open(page); await selectBrowser(page, "ws-demo");
+  await openMenuItem(page, "服务与端口");
+  const sheet = page.getByRole("dialog", { name: "服务与端口" });
+  const group = sheet.getByTestId("server-browser-agent-ports");
+  await expect(group.getByText("Agent 开的端口")).toBeVisible();
+  const dev = group.getByTestId("server-browser-port-3000"), storybook = group.getByTestId("server-browser-port-6006");
+  for (const text of [":3000", "前端开发 Agent", "node", "仅本机", "Agent 运行中"]) await expect(dev).toContainText(text);
+  await expect(storybook).toContainText("Agent 已停止，端口仍占用");
+  await expect(storybook).toContainText("所有地址");
+  await expect(group.getByTestId("server-browser-port-8000")).toContainText("仅 192.0.2.10");
+  // Running blue, stopped amber: the state text carries the colour.
+  const colour = async (row: typeof dev, text: string) => (await row.getByText(text, { exact: true }).evaluate(element => getComputedStyle(element).color)).match(/\d+/g)!.slice(0, 3).map(Number);
+  expect(amber(await colour(storybook, "Agent 已停止，端口仍占用"))).toBe(true);
+  const [red, green, blue] = await colour(dev, "Agent 运行中");
+  expect(blue > red && blue > green).toBe(true);
+  await expect(dev).toHaveAttribute("aria-label", "在新标签页打开端口 3000：前端开发 Agent，node，仅本机，Agent 运行中");
+  // Another workspace's port waits behind a toggle and names its workspace.
+  await expect(group.getByTestId("server-browser-port-4321")).toHaveCount(0);
+  await group.getByTestId("server-browser-ports-others").click();
+  await expect(group.getByTestId("server-browser-port-4321")).toContainText("acme/web-app / feat/checkout-redesign");
+  expect(await noOverflow(page)).toBe(true);
+  await dev.click();
+  await expect.poll(async () => (await actions(page, "openPort")).map(call => call.input.action)).toEqual([{ kind: "openPort", port: 3000 }]);
+  expect(JSON.stringify(await actions(page, "openPort"))).not.toContain("127.0.0.1", "the client names the port, never an address");
+  await expect(page.getByRole("alert").filter({ hasText: "已在新标签页打开端口 3000" })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("ports are polled only while a sheet shows them, with a revision; a new port appears on the next poll", async ({ page }) => {
+  await open(page); await selectBrowser(page, "ws-demo");
+  await openPageTabs(page);
+  const tabs = page.getByRole("dialog", { name: /^标签页/ });
+  await expect(tabs.getByTestId("server-browser-port-3000")).toBeVisible();
+  await expect.poll(async () => (await portCalls(page)).length, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  const [first, second] = await portCalls(page);
+  expect(first.input.revision).toBeUndefined();
+  expect(second.input.revision, "later polls send the revision they render").toBeTruthy();
+  await page.evaluate(() => (globalThis as unknown as { __browserFixture: { addPort: (port: number) => void } }).__browserFixture.addPort(5174));
+  await expect(tabs.getByTestId("server-browser-port-5174")).toContainText("新服务 Agent", { timeout: 10_000 });
+  await page.keyboard.press("Escape");
+  await expect(tabs).toHaveCount(0);
+  const closed = (await portCalls(page)).length;
+  await page.waitForTimeout(4_800);
+  expect((await portCalls(page)).length, "no polling once the sheet is closed").toBe(closed);
+});
+
+test("in Agent mode ports are shown but do not open; a host that cannot list ports hides the group", async ({ page }) => {
+  await open(page); await selectBrowser(page, "ws-review");
+  await openMenuItem(page, "服务与端口");
+  const sheet = page.getByRole("dialog", { name: "服务与端口" });
+  await expect(sheet.getByTestId("server-browser-port-4321")).toHaveAttribute("aria-disabled", "true");
+  await expect(sheet.getByText("切换到手动后可打开")).toBeVisible();
+  await sheet.getByTestId("server-browser-port-4321").click({ force: true });
+  expect(await actions(page, "openPort")).toEqual([]);
+
+  const quiet = await page.context().newPage();
+  const errors: string[] = [];
+  quiet.on("pageerror", error => errors.push(error.message));
+  await quiet.goto("/?scenario=noports"); await selectBrowser(quiet, "ws-demo");
+  await openMenuItem(quiet, "服务与端口");
+  const services = quiet.getByRole("dialog", { name: "服务与端口" });
+  await expect(services.getByTestId("server-browser-service-web")).toBeVisible();
+  await quiet.waitForTimeout(4_800);
+  await expect(services.getByTestId("server-browser-agent-ports")).toHaveCount(0);
+  expect((await portCalls(quiet)).length, "an unsupported host is asked once per opening").toBe(1);
+  expect(errors).toEqual([]);
 });
 
 test("leftover Profiles of gone workspaces are listed with their size and deleted only after confirming (opus-F11)", async ({ page }) => {

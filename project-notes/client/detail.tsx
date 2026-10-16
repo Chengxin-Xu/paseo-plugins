@@ -8,12 +8,16 @@ import { Text, View } from "react-native";
 import { readHistoryRpc, type BoardItem, type BoardProject } from "../shared/board";
 import { Banner, Button, Chip, Divider, IconButton, Spacer, fontSize, space, toneColor } from "./kit";
 import { MARK_HUES, NoteMeta, StatusSegmented, type NoteActions } from "./ui";
+import { LaunchHistory, type LaunchLinks } from "./launch-ui";
+
+/** 一键发送 for a prompt in the detail: whether it is on, and turning it on or off. */
+export interface QuickToggle { on: boolean; template: boolean; toggle(): void }
 
 /**
  * Full text and every action of one note: the detail sheet on the board and phones, the right pane of list views.
  * Frequent actions come first (开始处理 / 复制 / 编辑, status); pin, priority and delete sit on a quieter second row.
  */
-export function NoteDetail({ theme, item, project, actions, busy, compact, hostId, onPurge, onRestoreVersion, onRepairHistory }: { theme: PluginTheme; item: BoardItem; project: Pick<BoardProject, "id" | "name" | "path" | "retired">; actions: NoteActions; busy: boolean; compact: boolean; hostId: string; onPurge?: () => void; onRestoreVersion?: (revision: number) => void; onRepairHistory?: (revision: number) => Promise<boolean> }) {
+export function NoteDetail({ theme, item, project, actions, busy, compact, hostId, onPurge, onRestoreVersion, onRepairHistory, quick, launches }: { theme: PluginTheme; item: BoardItem; project: Pick<BoardProject, "id" | "name" | "path" | "retired">; actions: NoteActions; busy: boolean; compact: boolean; hostId: string; onPurge?: () => void; onRestoreVersion?: (revision: number) => void; onRepairHistory?: (revision: number) => Promise<boolean>; quick?: QuickToggle; launches?: LaunchLinks }) {
   const { colors } = theme, trashed = item.deletedAt !== null, grow = compact, high = item.priority === "high";
   const [historyOpen, setHistoryOpen] = useState(false);
   const [previewRevision, setPreviewRevision] = useState<number | null>(null);
@@ -38,16 +42,19 @@ export function NoteDetail({ theme, item, project, actions, busy, compact, hostI
     {item.kind === "task" && !trashed ? <StatusSegmented theme={theme} value={item.status} onChange={status => { if (status !== item.status && !busy) actions.status(item, status); }} /> : null}
     <View style={{ gap: space.md }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>{primaryRow}</View>
-      {!trashed ? <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+      {!trashed ? <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
         {/* Colored only while on, so off reads as off. */}
         <Chip theme={theme} icon="Pin" label={item.pinned ? t("detail.pinned") : t("detail.pin")} selected={item.pinned} tone={item.pinned ? MARK_HUES.pinned : undefined} onPress={() => { if (!busy) actions.update(item, { pinned: !item.pinned }); }} />
         <Chip theme={theme} icon="Flag" label={high ? t("detail.priority") : t("detail.markPriority")} selected={high} tone={high ? MARK_HUES.high : undefined} onPress={() => { if (!busy) actions.update(item, { priority: high ? "normal" : "high" }); }} />
+        {quick && item.kind === "prompt" ? <Chip theme={theme} icon="Zap" label={quick.on ? t("detail.quickOn") : t("detail.quickOff")} selected={quick.on} tone={quick.on ? "violet" : undefined} onPress={() => { if (!busy) quick.toggle(); }} /> : null}
         <Spacer />
         {/* A red glyph, not a red button: deleting only moves the note to 回收站, and 重点 already uses red here. */}
         <IconButton theme={theme} icon="Trash2" label={t("detail.delete")} tone="danger" disabled={busy} onPress={() => actions.remove(item)} />
       </View> : null}
       {trashed && onPurge ? <Button theme={theme} label={t("detail.purge")} icon="Trash2" tone="danger" disabled={busy} onPress={onPurge} /> : null}
+      {quick?.on && item.kind === "prompt" && !trashed ? <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.meta, lineHeight: 17 }}>{quick.template ? t("detail.quickTemplateHint") : t("detail.quickHint")}</Text> : null}
     </View>
+    {launches ? <LaunchHistory theme={theme} links={launches} itemId={item.id} hostId={hostId} /> : null}
     <Divider theme={theme} />
     {item.body ? <Text selectable style={{ color: colors.foreground, fontSize: fontSize.content, lineHeight: 24 }}>{item.body}</Text>
       : <Text style={{ color: colors.foregroundMuted, fontSize: fontSize.small }}>{t("detail.noBody")}</Text>}

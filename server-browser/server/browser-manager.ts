@@ -650,6 +650,8 @@ export class BrowserManager{
  private manualContext(session:LiveSession){return {activeId:session.activeId,viewRevision:session.viewRevision,inputScope:this.inputScope(session)};}
  async action(workspaceId:string,action:BrowserAction,target?:BrowserTarget):Promise<BrowserSession>{
   if(action.kind==='takeover')return this.takeover(workspaceId,action,target);
+  // The panel's port entry is resolved to an address by the plugin entry (index.server.ts); a bare port opens nothing here.
+  if(action.kind==='openPort')throw new Error(t('serverError.portNotListed',{port:action.port}));
   const session=this.session(workspaceId);await this.load(session);
   // Stopping or restarting ends the browser itself, so it never queues behind a page call that does not return.
   const lifecycle=action.kind==='stop'||action.kind==='restart'||action.kind==='handleDialog'||action.kind==='mode';
