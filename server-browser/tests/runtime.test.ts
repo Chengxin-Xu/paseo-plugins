@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { TestBrowserManager as BrowserManager } from './manual-action';
-import { browserProxy, browserSandboxMode, chromiumArguments, chromiumEnvironment, defaultRuntimeRoot, inheritedEnvironment, MCP_ENVIRONMENT } from '../server/runtime';
+import { browserProxy, browserSandboxMode, chromiumArguments, chromiumEnvironment, defaultRuntimeRoot, headlessShellExecutable, inheritedEnvironment, MCP_ENVIRONMENT } from '../server/runtime';
 
 test('runtime and data directories default under the home directory and follow their environment variables', () => {
   assert.match(defaultRuntimeRoot({}), /[/\\]\.local[/\\]share[/\\]paseo-server-browser$/);
@@ -87,4 +87,47 @@ test('Chromium and Playwright MCP inherit an allowlisted environment; the runtim
   assert.equal(chromiumEnvironment({ ...daemon, LD_LIBRARY_PATH: '/opt/lib' }).LD_LIBRARY_PATH, '/opt/lib');
   const mcp = inheritedEnvironment(daemon, MCP_ENVIRONMENT.names, MCP_ENVIRONMENT.prefixes);
   assert.deepEqual(Object.keys(mcp).sort(), ['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR']);
+});
+
+test('the cached headless shell is looked up under the folder Playwright uses for this platform and CPU', async () => {
+  assert.equal(headlessShellExecutable('linux', 'x64'), 'chrome-headless-shell-linux64/chrome-headless-shell');
+  assert.equal(headlessShellExecutable('linux', 'arm64'), 'chrome-headless-shell-linux-arm64/chrome-headless-shell');
+  assert.equal(headlessShellExecutable('darwin', 'arm64'), 'chrome-headless-shell-mac-arm64/chrome-headless-shell');
+  assert.equal(headlessShellExecutable('darwin', 'x64'), 'chrome-headless-shell-mac-x64/chrome-headless-shell');
+  assert.equal(headlessShellExecutable('win32', 'x64'), 'chrome-headless-shell-win64/chrome-headless-shell.exe');
+  assert.equal(headlessShellExecutable('linux', 'riscv64'), undefined);
+  assert.equal(headlessShellExecutable('freebsd', 'x64'), undefined);
+  // scripts/setup-runtime.mjs cannot import TypeScript, so it keeps a copy of the table.
+  const script = await readFile(new URL('../scripts/setup-runtime.mjs', import.meta.url), 'utf8');
+  const table = Object.fromEntries([...script.matchAll(/'(\w+)-(\w+)':'([^']+)'/g)].map(match => [`${match[1]}-${match[2]}`, match[3]]));
+  assert.deepEqual(Object.keys(table).sort(), ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-arm64', 'win32-x64']);
+  for (const [key, file] of Object.entries(table)) { const [platform, arch] = key.split('-'); assert.equal(file, headlessShellExecutable(platform as NodeJS.Platform, arch), key); }
+
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), 'paseo-browser-arm64-'));
+  const cache = path.join(runtimeRoot, 'ms-playwright');
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH, previousExecutable = process.env.PASEO_SERVER_BROWSER_EXECUTABLE;
+  const arch = Object.getOwnPropertyDescriptor(process, 'arch')!, platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  delete process.env.PASEO_SERVER_BROWSER_EXECUTABLE;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
+  const manager = new BrowserManager({ dataRoot: path.join(runtimeRoot, 'data'), runtimeRoot });
+  const executable = () => (manager as unknown as { executable: () => Promise<string> }).executable();
+  try {
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    Object.defineProperty(process, 'arch', { ...arch, value: 'arm64' });
+    // An x86_64 build alone is not used on ARM64; the lookup falls through to Playwright's own Chromium (missing here).
+    await mkdir(path.join(cache, 'chromium_headless_shell-1246', 'chrome-headless-shell-linux64'), { recursive: true });
+    await writeFile(path.join(cache, 'chromium_headless_shell-1246', 'chrome-headless-shell-linux64', 'chrome-headless-shell'), '');
+    await assert.rejects(executable(), /setup-runtime\.mjs/);
+    const arm = path.join(cache, 'chromium_headless_shell-1246', 'chrome-headless-shell-linux-arm64', 'chrome-headless-shell');
+    await mkdir(path.dirname(arm), { recursive: true });
+    await writeFile(arm, '');
+    assert.equal(await executable(), arm);
+  } finally {
+    Object.defineProperty(process, 'arch', arch);
+    Object.defineProperty(process, 'platform', platform);
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH; else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    if (previousExecutable === undefined) delete process.env.PASEO_SERVER_BROWSER_EXECUTABLE; else process.env.PASEO_SERVER_BROWSER_EXECUTABLE = previousExecutable;
+    await manager.close();
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
 });

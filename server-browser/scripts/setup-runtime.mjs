@@ -40,13 +40,20 @@ const load=createRequire(path.join(runtime,'package.json'));
 for(const dependency of Object.keys(dependencies)){load.resolve(dependency);console.log(`${dependency}: available`);}
 const {chromium}=load('playwright');
 const exists=file=>access(file).then(()=>true,()=>false);
+// Same table as headlessShellExecutable() in server/runtime.ts.
+function headlessShell(){
+ const shells={'linux-x64':'chrome-headless-shell-linux64/chrome-headless-shell','linux-arm64':'chrome-headless-shell-linux-arm64/chrome-headless-shell',
+  'darwin-x64':'chrome-headless-shell-mac-x64/chrome-headless-shell','darwin-arm64':'chrome-headless-shell-mac-arm64/chrome-headless-shell',
+  'win32-x64':'chrome-headless-shell-win64/chrome-headless-shell.exe','win32-arm64':'chrome-headless-shell-win64/chrome-headless-shell.exe'};
+ return shells[`${process.platform}-${process.arch}`];
+}
 // Same lookup order as the plugin: an explicit executable, the newest cached headless shell, then Playwright's own build.
 async function findChromium(){
  const configured=process.env.PASEO_SERVER_BROWSER_EXECUTABLE;
  if(configured)return await exists(configured)?`${configured} (PASEO_SERVER_BROWSER_EXECUTABLE)`:null;
  const cache=process.env.PLAYWRIGHT_BROWSERS_PATH||path.join(homedir(),'.cache/ms-playwright');
- const builds=(await readdir(cache).catch(()=>[])).filter(item=>/^chromium_headless_shell-\d+$/.test(item)).sort((a,b)=>Number(b.split('-').at(-1))-Number(a.split('-').at(-1)));
- for(const build of builds){const file=path.join(cache,build,'chrome-headless-shell-linux64/chrome-headless-shell');if(await exists(file))return file;}
+ const shell=headlessShell(),builds=shell?(await readdir(cache).catch(()=>[])).filter(item=>/^chromium_headless_shell-\d+$/.test(item)).sort((a,b)=>Number(b.split('-').at(-1))-Number(a.split('-').at(-1))):[];
+ for(const build of builds){const file=path.join(cache,build,shell);if(await exists(file))return file;}
  const own=chromium.executablePath();return await exists(own)?own:null;
 }
 const browser=await findChromium();

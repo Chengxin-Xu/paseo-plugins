@@ -83,8 +83,8 @@ describe("client mobile bundle compatibility", () => {
     // Details/highlighting/settings must never drift back into the eager timeline bundle.
     // 0.8.0: 360 → 368 KiB for what every collapsed summary shows (the change stat with its uncounted changes, the turn's
     // tokens and their store) and exact-only diff counts on rows; the running animations and the expanded change list
-    // wait in the fx chunk.
-    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(368 * 1024);
+    // wait in the fx chunk. 0.9.0: 368 → 372 KiB for the code font setting every row reads (shared/typography.ts).
+    expect(Buffer.byteLength(bundle)).toBeLessThanOrEqual(372 * 1024);
     expect(bundle).toContain("function ChangeStat");
     expect(bundle).toContain("function TurnTokens");
     expect(bundle).not.toMatch(/function (?:RunningLoader|LoaderFrame|FoldChanges|sparkleStops|shiftStops)\b/);

@@ -1,6 +1,6 @@
 import { LanguageSettings } from "./language-settings";
 import { t } from "../shared/text";
-import { useMemo, type ComponentType } from "react";
+import { useMemo, useState, type ComponentType } from "react";
 import { Text } from "react-native";
 import {
   useSettings,
@@ -10,6 +10,7 @@ import {
 import {
   SettingsAction,
   SettingsCard,
+  SettingsInput,
   SettingsRow,
   SettingsSection,
   SettingsSelect,
@@ -28,7 +29,10 @@ import {
 import type { Density, ExpansionMode, ExpansionTarget, LoaderKind, TakeoverScope } from "../shared/settings";
 import { LOADER_KINDS } from "../shared/settings";
 import { toneColor } from "./kit";
+import { cmonoTextEscape } from "./web";
 import { LoaderPreview, loaderLabels } from "./loader-preview";
+import { LINE_SPACINGS, monoFontStack, TEXT_SIZES, type LineSpacing, type TextSize } from "../shared/typography";
+import { typesetStyle, useTypography } from "./typography";
 
 export interface SettingsActions {
   onFoldSettings(value: { enabled?: boolean; scope?: TakeoverScope }): void;
@@ -265,6 +269,86 @@ function PaletteControls({ settings, theme, actions }: { settings: ReadySettings
   );
 }
 
+const textSizeLabels: Record<TextSize, () => string> = {
+  small: () => t("settings.sizeSmall"),
+  standard: () => t("settings.sizeStandard"),
+  large: () => t("settings.sizeLarge"),
+  larger: () => t("settings.sizeLarger"),
+};
+
+const lineSpacingLabels: Record<LineSpacing, () => string> = {
+  compact: () => t("settings.compact"),
+  standard: () => t("settings.standard"),
+  relaxed: () => t("settings.relaxed"),
+};
+
+/** 0.9.0 (issue #3): font family, size and line spacing of the rows' code text (shared/typography.ts). */
+function FontControls({ settings, theme }: { settings: ReadySettings; theme: PluginSurfaceProps["theme"] }) {
+  const saved = settings.values.monoFont;
+  const [draft, setDraft] = useState(saved);
+  const [shown, setShown] = useState(saved);
+  // A save from this or another device remounts the input (key) with the stored value; the draft follows it.
+  if (shown !== saved) {
+    setShown(saved);
+    setDraft(saved);
+  }
+  const valid = monoFontStack(draft) !== null;
+  const type = useTypography();
+  const preview = useMemo(
+    () => typesetStyle({ color: theme.colors.foreground, fontFamily: "monospace", fontSize: 12, lineHeight: 17 }, type),
+    [theme.colors.foreground, type],
+  );
+  const apply = () => {
+    const value = draft.trim();
+    if (!valid || value === saved) return;
+    void settings.save({ ...settings.values, monoFont: value }, settings.revision);
+  };
+  const change = (key: "textSize" | "lineSpacing", options: readonly string[]) => (value: string) => {
+    if (!options.includes(value) || value === settings.values[key]) return;
+    void settings.save({ ...settings.values, [key]: value }, settings.revision);
+  };
+  return (
+    <SettingsSection title={t("settings.codeFont")}>
+      <SettingsCard>
+        <SettingsInput
+          key={saved}
+          label={t("settings.fontFamily")}
+          hint={t("settings.fontFamilyHint")}
+          error={valid ? null : t("settings.fontFamilyInvalid")}
+          initialValue={saved}
+          placeholder={'"JetBrains Mono", monospace'}
+          disabled={settings.saving}
+          onChangeText={setDraft}
+        />
+        <SettingsAction
+          label={t("settings.applyFont")}
+          actionLabel={t("settings.apply")}
+          disabled={settings.saving || !valid || draft.trim() === saved}
+          onPress={apply}
+        />
+        <SettingsSelect
+          label={t("settings.textSize")}
+          hint={t("settings.textSizeHint")}
+          value={settings.values.textSize}
+          options={TEXT_SIZES.map((size) => ({ value: size, label: textSizeLabels[size]() }))}
+          disabled={settings.saving}
+          onValueChange={change("textSize", TEXT_SIZES)}
+        />
+        <SettingsSelect
+          label={t("settings.lineSpacing")}
+          value={settings.values.lineSpacing}
+          options={LINE_SPACINGS.map((spacing) => ({ value: spacing, label: lineSpacingLabels[spacing]() }))}
+          disabled={settings.saving}
+          onValueChange={change("lineSpacing", LINE_SPACINGS)}
+        />
+        <SettingsRow label={t("settings.codeFontPreview")}>
+          <Text {...cmonoTextEscape} style={preview}>{"src/app.ts  +12 −3\n$ npm test -- --watch=false"}</Text>
+        </SettingsRow>
+      </SettingsCard>
+    </SettingsSection>
+  );
+}
+
 function DisplaySettings({ theme, actions }: PluginSurfaceProps & { actions: SettingsActions }) {
   const settings = useSettings(activitySettings);
   const textStyle = useMemo(() => ({ color: theme.colors.foreground }), [theme.colors.foreground]);
@@ -291,6 +375,7 @@ function DisplaySettings({ theme, actions }: PluginSurfaceProps & { actions: Set
       <TakeoverControls settings={settings} actions={actions} />
       <FoldControls settings={settings} actions={actions} />
       <PaletteControls settings={settings} theme={theme} actions={actions} />
+      <FontControls settings={settings} theme={theme} />
       <ExpansionControls settings={settings} />
     </>
   );

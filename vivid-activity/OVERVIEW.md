@@ -19,6 +19,7 @@ No setup is needed. Requires Paseo 0.11.1 or later. Open the Vivid Activity sett
 - Pin this turn's question: on by default.
 - Palette: vivid (default), follow the theme accent, soft, or high contrast.
 - Running animation: spinner (default), sparkle, orb, or a dot grid as a snake or a twinkle, with live previews.
+- Code font: family (web, desktop), size, line spacing.
 - Expansion for each kind of row: always, newest only, or collapsed.
 
 Settings live on the daemon and apply to every connected device. Agent output, prompts and paths keep their original text.

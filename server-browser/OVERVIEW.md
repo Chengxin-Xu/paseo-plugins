@@ -66,7 +66,7 @@ The plugin reads the daemon's workspace list and agent profiles, and keeps its l
 ## Limits
 
 - Chromium's debugging port on 127.0.0.1 has no authentication: any local account that connects gets the profile's cookies and logins, runs scripts on logged-in sites and bypasses manual takeover. No command line shows the address, but `/proc/net/tcp` shows the port to every account (`hidepid` does not hide sockets); an authenticated pipe is deferred. Use a host you do not share.
-- Linux only, tested on x86-64; elsewhere set `PASEO_SERVER_BROWSER_EXECUTABLE`.
+- Linux only (x86-64 tested, ARM64 supported); otherwise set `PASEO_SERVER_BROWSER_EXECUTABLE`.
 - No download manager, audio, video or full keyboard mapping; paste is plain text, one way only.
 - Typing stops whenever a frame loads a new document.
 - Single sign-on, captchas and server-blocking sites need checking per site. A crash can lose unsaved cookies and unsent forms.

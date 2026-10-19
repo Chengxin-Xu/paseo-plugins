@@ -768,7 +768,22 @@
     "loaderOrb": "光球",
     "loaderSnake": "点阵 · 蛇形",
     "loaderMatrix": "点阵 · 闪烁",
-    "loaderHint": "运行中的行末尾的标记：转圈（默认）、Claude Code 式的星芒、呼吸的光球，或 3×3 点阵。App 在后台时暂停，系统开启「减少动态效果」时静止。改动对所有设备生效。"
+    "loaderHint": "运行中的行末尾的标记：转圈（默认）、Claude Code 式的星芒、呼吸的光球，或 3×3 点阵。App 在后台时暂停，系统开启「减少动态效果」时静止。改动对所有设备生效。",
+    "codeFont": "代码字体",
+    "fontFamily": "字体",
+    "fontFamilyHint": "网页和桌面端生效。填打开 Paseo 的设备上已安装的字体，用逗号分隔，例如 \"JetBrains Mono\", monospace。留空用默认字体；设备上没有的字体会退回默认字体。手机 App 仍用系统等宽字体。",
+    "fontFamilyInvalid": "只能填字体名（字母、数字、空格和 . _ + -），用逗号分隔，最多 200 个字符。",
+    "apply": "应用",
+    "textSize": "字号",
+    "textSizeHint": "行里用代码字体画的内容：摘要、路径、命令、代码、差异、工具输出和思考正文。标题和标签的字号不变。",
+    "sizeSmall": "小（11 px）",
+    "sizeStandard": "标准（12 px）",
+    "sizeLarge": "大（14 px）",
+    "sizeLarger": "更大（16 px）",
+    "lineSpacing": "行距",
+    "relaxed": "宽松",
+    "codeFontPreview": "预览",
+    "applyFont": "使用上面的字体"
   },
   "childSummary": {
     "activity": "动态",

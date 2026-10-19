@@ -257,8 +257,8 @@ node scripts/setup-runtime.mjs --check  # 只检查，不安装
 - 尚未写盘的新 Cookie、未提交的表单和网页内存状态不能保证在崩溃后恢复。
 - Agent 开的端口只看 daemon 所在网络命名空间里的套接字：在容器、Codex 沙箱等其他网络命名空间里监听的端口看不到，共享浏览器也连不上它们。
   daemon 以 root 运行时只列 root 自己的进程。
-- 只支持 Linux daemon 主机，已在 x86-64 + Chromium headless shell 上验证；自动查找只认 x86-64（`linux64`）的 headless shell，
-  其他架构请用 `PASEO_SERVER_BROWSER_EXECUTABLE` 指定。
+- 只支持 Linux daemon 主机，已在 x86-64 + Chromium headless shell 上验证。自动查找按主机的 CPU 认 Playwright 的目录名
+  （x86-64 是 `chrome-headless-shell-linux64`，ARM64 是 `chrome-headless-shell-linux-arm64`）；找不到时用 `PASEO_SERVER_BROWSER_EXECUTABLE` 指定。
 - 没有下载管理、音视频和完整的键盘快捷键映射。剪贴板只能单向粘贴纯文本到网页，不能把网页里复制的内容带回本机。
 - 输入法在电脑网页端验证（用调试协议模拟 Chromium 的组合事件，没有逐一验证各系统的真实输入法）；手机打字使用输入栏，不在画面上弹出系统键盘。
 - 网页里的 iframe 每跳到一份新文档都会结束当前输入并提示，iframe 不停自动刷新的网页上打字会被打断。

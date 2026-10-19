@@ -10,6 +10,7 @@ import { Breathe, Flash, Ping, Pop, Spin, Sweep, useChangeCount } from "./motion
 import type { ActivityPalette } from "../shared/presentation";
 import { badgeInk, type Badge } from "../shared/brand";
 import { useFx, useLoader } from "./fx";
+import { typeset, useTypography } from "./typography";
 
 /**
  * 本地补丁（vivid-activity）：鲜明配色 + 状态动效。上游行布局与详情视图不动，只替换行头与调色板。
@@ -154,7 +155,8 @@ const GIVE_WAY = 1000;
 const TITLE_MAX = 240;
 
 export function useVividText(theme: PluginTheme, lineHeight = 18) {
-  return useMemo(() => ({
+  const type = useTypography();
+  return useMemo(() => typeset({
     // 0.6.0-local.2 (codex-vivid-F3): title, summary and meta share the row's one area that gives way (VividHeader). The
     // summary gives way first (GIVE_WAY), then the meta, the title last: 「命令」 keeps its words while a summary is left.
     // A long title (an unknown tool's own name) still stops at half of that area. Native Text does not shrink by default.
@@ -167,7 +169,7 @@ export function useVividText(theme: PluginTheme, lineHeight = 18) {
     meta: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, flexShrink: 0, fontVariant: ["tabular-nums"] } satisfies TextStyle,
     // The meta after a summary gives way after the summary and before the title.
     metaText: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight, flexShrink: 30, minWidth: 0, fontVariant: ["tabular-nums"] } satisfies TextStyle,
-  }), [lineHeight, theme]);
+  }, type), [lineHeight, theme, type]);
 }
 
 export interface VividHeaderProps {

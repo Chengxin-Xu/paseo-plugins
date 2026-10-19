@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1 - 2026-10-18
+
+- 修复 Linux ARM64 主机找不到 Chromium（issue #2）：自动查找 Playwright 缓存时写死了 x86-64 的目录名
+  `chrome-headless-shell-linux64`，ARM64 上的 `chrome-headless-shell-linux-arm64` 永远找不到，只能靠 `PASEO_SERVER_BROWSER_EXECUTABLE`。
+  现在插件和 `scripts/setup-runtime.mjs` 按主机的系统和 CPU 选 Playwright 的目录名（Linux x86-64 / ARM64，另有 macOS、Windows 的名字备用）。
+- 测试：目录名对照表、脚本里的副本与插件一致；模拟 ARM64 主机时只放 x86-64 的缓存不会被误用，放了 ARM64 的缓存就能找到。
+
 ## 0.13.0 - 2026-10-15
 
 - 新增「Agent 开的端口」：**⋯ → 服务与端口**（原「本工作区服务」）和标签页面板里，本工作区服务下面多了一组 Agent 开的端口。

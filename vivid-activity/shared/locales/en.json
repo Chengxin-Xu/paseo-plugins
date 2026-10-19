@@ -843,7 +843,22 @@
     "loaderOrb": "Orb",
     "loaderSnake": "Dot grid: snake",
     "loaderMatrix": "Dot grid: twinkle",
-    "loaderHint": "The mark at the end of a running row: a spinner (default), a Claude Code style sparkle, a breathing orb or a 3×3 dot grid. It pauses while the app is in the background and holds still when the system asks for reduced motion. Changes apply to all devices."
+    "loaderHint": "The mark at the end of a running row: a spinner (default), a Claude Code style sparkle, a breathing orb or a 3×3 dot grid. It pauses while the app is in the background and holds still when the system asks for reduced motion. Changes apply to all devices.",
+    "codeFont": "Code font",
+    "fontFamily": "Font family",
+    "fontFamilyHint": "Web and desktop. Fonts installed on the device that shows Paseo, separated by commas, for example \"JetBrains Mono\", monospace. Leave empty for the default. A font the device does not have falls back to the default; the phone app keeps its system monospace font.",
+    "fontFamilyInvalid": "Use font names only (letters, digits, spaces and . _ + -), separated by commas, at most 200 characters.",
+    "apply": "Apply",
+    "textSize": "Text size",
+    "textSizeHint": "Everything the rows draw in the code font: summaries, paths, commands, code, diffs, tool output and thinking text. Titles and labels keep their size.",
+    "sizeSmall": "Small (11 px)",
+    "sizeStandard": "Standard (12 px)",
+    "sizeLarge": "Large (14 px)",
+    "sizeLarger": "Larger (16 px)",
+    "lineSpacing": "Line spacing",
+    "relaxed": "Relaxed",
+    "codeFontPreview": "Preview",
+    "applyFont": "Use the fonts above"
   },
   "childSummary": {
     "activity": "Activity",

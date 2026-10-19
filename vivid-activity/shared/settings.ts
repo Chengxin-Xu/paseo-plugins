@@ -1,6 +1,7 @@
 import { t } from "./text";
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { DEFAULT_LINE_SPACING, DEFAULT_TEXT_SIZE, LINE_SPACINGS, MONO_FONT_MAX, TEXT_SIZES } from "./typography";
 
 export const paletteModeSchema = z.enum(["vivid", "soft", "high_contrast", "theme"]);
 export type PaletteMode = z.output<typeof paletteModeSchema>;
@@ -92,6 +93,10 @@ export const activitySettings = defineSettings({
     pinPrompt: z.boolean().default(DEFAULT_PIN_PROMPT),
     // 0.8.0：同上。
     loader: loaderSchema.default(DEFAULT_LOADER),
+    // 0.9.0（issue #3）：代码字体（shared/typography.ts）。同上，旧设置读出来取默认值。
+    monoFont: z.string().max(MONO_FONT_MAX).default(""),
+    textSize: z.enum(TEXT_SIZES).default(DEFAULT_TEXT_SIZE),
+    lineSpacing: z.enum(LINE_SPACINGS).default(DEFAULT_LINE_SPACING),
   }),
 });
 

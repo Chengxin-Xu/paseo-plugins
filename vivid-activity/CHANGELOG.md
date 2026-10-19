@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0 (2026-10-18)
+
+- **Code font** (issue #3): a new Code font section in settings changes
+  everything the rows draw in the code font: summaries, paths, commands, code, diffs, tool output and thinking text.
+  - Font family (web and desktop): fonts installed on the device that shows Paseo, separated by commas, saved with
+    Apply. A font the device does not have falls back to the default stack. Only letters, digits, spaces and
+    `. _ + -` are accepted, since the value goes into a stylesheet; anything else shows a hint and is not saved.
+  - Text size: small, standard (default), large or larger (11, 12, 14 or 16 px). Line spacing: compact, standard
+    (default) or relaxed. The phone app follows size and spacing and keeps its system monospace font.
+  - A live preview sits under the controls. Titles, labels and notes keep their typography, and the defaults change
+    nothing.
+- The resident bundle's test budget moves from 368 to 372 KiB for the setting every row reads.
+
 ## 0.8.0 (2026-10-15)
 
 - **What a run changed**: fold rows end with `3 files +12 −4` and a five-block diffstat (green added, red removed; phones

@@ -4,14 +4,15 @@ import { activitySettings } from "../shared/settings";
 
 const host = vi.hoisted(() => ({ settings: {} as any }));
 vi.mock("@getpaseo/plugin/client", () => ({ useSettings: () => host.settings }));
-vi.mock("@getpaseo/plugin/client/ui", () => ({ SettingsAction: "SettingsAction", SettingsCard: "SettingsCard", SettingsRow: "SettingsRow", SettingsSection: "SettingsSection", SettingsSelect: "SettingsSelect", SettingsSwitch: "SettingsSwitch" }));
+vi.mock("@getpaseo/plugin/client/ui", () => ({ SettingsAction: "SettingsAction", SettingsCard: "SettingsCard", SettingsInput: "SettingsInput", SettingsRow: "SettingsRow", SettingsSection: "SettingsSection", SettingsSelect: "SettingsSelect", SettingsSwitch: "SettingsSwitch" }));
 vi.mock("react-native", () => ({ Text: "Text" }));
 vi.mock("./language-settings", () => ({ LanguageSettings: () => null }));
 vi.mock("./i18n-client", () => ({ useI18n: () => undefined }));
 vi.mock("./kit", () => ({ toneColor: () => "#ffffff" }));
 // 0.8.0: the running animations preview draws live loaders (fx code); the settings logic is what this test covers.
 vi.mock("./loader-preview", () => ({ LoaderPreview: () => null, loaderLabels: { spinner: "转圈", sparkle: "星芒", orb: "光球", snake: "点阵 · 蛇形", matrix: "点阵 · 闪烁" } }));
-vi.mock("react", async (original) => ({ ...await original<typeof import("react")>(), useMemo: (compute: () => unknown) => compute() }));
+vi.mock("react", async (original) => ({ ...await original<typeof import("react")>(), useMemo: (compute: () => unknown) => compute(), useState: (value: unknown) => [value, () => undefined] }));
+vi.mock("./typography", async (original) => ({ ...await original<typeof import("./typography")>(), useTypography: () => ({ scale: 1, line: 1 }) }));
 
 import { ActivitySettings, type SettingsActions } from "./settings";
 import { PlainDetail } from "./activity-lazy";
@@ -54,6 +55,23 @@ describe("lazy activity surfaces", () => {
     await settle();
     expect(actions.onFoldSettings).not.toHaveBeenCalled();
     expect(actions.onTakeover).not.toHaveBeenCalled();
+  });
+
+  it("saves the code font only through Apply and only when it is a plain font list", async () => {
+    host.settings.values = { ...host.settings.values, monoFont: '"JetBrains Mono"' };
+    let rendered = renderSettings();
+    const apply = () => rendered.find((entry) => entry.type === "SettingsAction" && entry.props.actionLabel === "应用")!;
+    expect(rendered.find((entry) => entry.props.label === "字体" && "initialValue" in entry.props)!.props).toMatchObject({ initialValue: '"JetBrains Mono"', error: null });
+    expect(apply().props.disabled).toBe(true);
+    rendered.find((entry) => entry.props.label === "字号")!.props.onValueChange("large");
+    rendered.find((entry) => entry.props.label === "行距")!.props.onValueChange("double");
+    await settle();
+    expect(host.settings.save).toHaveBeenCalledTimes(1);
+    expect(host.settings.save).toHaveBeenCalledWith(expect.objectContaining({ textSize: "large", monoFont: '"JetBrains Mono"' }), "revision-1");
+    host.settings.values = { ...host.settings.values, monoFont: "Mono; } body {" };
+    rendered = renderSettings();
+    expect(rendered.find((entry) => "initialValue" in entry.props)!.props.error).toBe("只能填字体名（字母、数字、空格和 . _ + -），用逗号分隔，最多 200 个字符。");
+    expect(apply().props.disabled).toBe(true);
   });
 
   it("shows readable plain text before detail code loads, including file bodies and empty-output commands", () => {

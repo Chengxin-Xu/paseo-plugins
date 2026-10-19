@@ -21,7 +21,7 @@ import { STALE_CONFIRMATION, assertManualTarget, needsManualTarget } from './man
 import { captureBrowserFrame, frameScale, type FrameLimits } from './frame';
 import { contentRevision, sessionRevision } from './revision';
 import { fitPageWidth } from './page-fit';
-import { browserProxy, browserSandboxMode, chromiumArguments, chromiumEnvironment, defaultRuntimeRoot, missingChromium, missingRuntime, type SandboxMode } from './runtime';
+import { browserProxy, browserSandboxMode, chromiumArguments, chromiumEnvironment, defaultRuntimeRoot, headlessShellExecutable, missingChromium, missingRuntime, type SandboxMode } from './runtime';
 import { BUDGETS, withTimeout, type Budgets } from './budgets';
 import { normalizeNavigationUrl, restorableUrl, withoutCredentials } from './navigation';
 import { ensurePrivateDirectory, readPrivateJson } from './private-files';
@@ -206,8 +206,8 @@ export class BrowserManager{
  private async executable():Promise<string>{
   if(this.executableOverride){try{await access(this.executableOverride);}catch{throw new Error(t('runtime.executableMissing'));}return this.executableOverride;}
   const cache=process.env.PLAYWRIGHT_BROWSERS_PATH??path.join(homedir(),'.cache/ms-playwright');
-  const candidates=(await readdir(cache).catch(()=>[] as string[])).filter(item=>/^chromium_headless_shell-\d+$/.test(item)).sort((a,b)=>Number(b.split('-').at(-1))-Number(a.split('-').at(-1)));
-  for(const candidate of candidates){const file=path.join(cache,candidate,'chrome-headless-shell-linux64/chrome-headless-shell');try{await access(file);return file;}catch{}}
+  const shell=headlessShellExecutable(),candidates=shell?(await readdir(cache).catch(()=>[] as string[])).filter(item=>/^chromium_headless_shell-\d+$/.test(item)).sort((a,b)=>Number(b.split('-').at(-1))-Number(a.split('-').at(-1))):[];
+  for(const candidate of candidates){const file=path.join(cache,candidate,shell!);try{await access(file);return file;}catch{}}
   const file=this.playwright().chromium.executablePath();try{await access(file);}catch{throw new Error(missingChromium());}return file;
  }
  private async atomicPrivate(file:string,content:string):Promise<void>{const directory=path.dirname(file);await ensurePrivateDirectory(directory,directory===this.dataRoot?t('runtime.dataDirectory'):t('runtime.workspaceDirectory'));const tmp=`${file}.${randomUUID()}.tmp`;await writeFile(tmp,content,{mode:0o600});await rename(tmp,file);await chmod(file,0o600);}

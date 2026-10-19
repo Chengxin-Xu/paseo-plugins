@@ -8,7 +8,7 @@ import type { TextProps, ViewProps } from "react-native";
 // fallbacks are load-bearing on older engines.
 const UI_STACK =
   'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif';
-const MONO_STACK =
+export const MONO_STACK =
   'ui-monospace, "SF Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace';
 
 const STYLE_ELEMENT_ID = "colorful-activity-fonts";
@@ -51,6 +51,25 @@ declare const document:
     }
   | undefined;
 
+let monoStack = MONO_STACK;
+
+function fontRules(mono: string): string {
+  return [
+    `[data-cui][data-cui], [data-cui][data-cui] * { font-family: ${UI_STACK}; }`,
+    `[data-cmono][data-cmono], [data-cmono][data-cmono] * { font-family: ${mono}; }`,
+  ].join("\n");
+}
+
+/** 0.9.0: the code font setting for `[data-cmono]` subtrees; `stack` comes from shared/typography.ts monoFontStack. */
+export function setMonoFontStack(stack: string | undefined): void {
+  const next = stack || MONO_STACK;
+  if (next === monoStack) return;
+  monoStack = next;
+  if (Platform.OS !== "web" || typeof document === "undefined") return;
+  const node = document.getElementById(STYLE_ELEMENT_ID) as { textContent: string | null } | null;
+  if (node) node.textContent = fontRules(next);
+}
+
 /**
  * Installs the plugin's font stacks. Web-only: a no-op on native, where the
  * `fontFamily` styles apply. The doubled attribute selectors outscore React
@@ -64,10 +83,7 @@ export function installColorfulFonts(): () => void {
 
   const style = document.createElement("style");
   style.id = STYLE_ELEMENT_ID;
-  style.textContent = [
-    `[data-cui][data-cui], [data-cui][data-cui] * { font-family: ${UI_STACK}; }`,
-    `[data-cmono][data-cmono], [data-cmono][data-cmono] * { font-family: ${MONO_STACK}; }`,
-  ].join("\n");
+  style.textContent = fontRules(monoStack);
   document.head.appendChild(style);
 
   return () => {

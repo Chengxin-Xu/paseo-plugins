@@ -18,6 +18,7 @@ import { isLatestTaskUpdate, resolveExpansion, resolveTaskUpdateExpansion, toolC
 import { useActivityDetails } from "./activity-lazy";
 import { usePendingPermissions } from "./attention";
 import { densityMetrics, useDensity, useFoldRow, type DensityMetrics } from "./density";
+import { typeset, useTypography } from "./typography";
 import { foldRuntime } from "./fold-runtime";
 import { aria, Button } from "./kit";
 import { createLatestRows, forgetWith } from "./latest-rows";
@@ -142,8 +143,9 @@ export function usePalette(theme: Theme): ActivityPalette {
 }
 
 export function useActivityStyles(theme: Theme, palette: ActivityPalette, metrics: DensityMetrics) {
+  const type = useTypography();
   return useMemo(
-    () => ({
+    () => typeset({
       card: {
         marginHorizontal: 0,
         marginTop: metrics.marginTop,
@@ -873,8 +875,8 @@ export function useActivityStyles(theme: Theme, palette: ActivityPalette, metric
         fontWeight: "600",
         lineHeight: 15,
       } satisfies TextStyle,
-    }),
-    [metrics, palette, theme],
+    }, type),
+    [metrics, palette, theme, type],
   );
 }
 

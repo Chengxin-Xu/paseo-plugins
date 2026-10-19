@@ -14,6 +14,16 @@ export function browserProxy(env:NodeJS.ProcessEnv=process.env):string|undefined
  return value;
 }
 /**
+ * Where Playwright puts its headless shell inside a chromium_headless_shell-<build> folder, per platform and CPU
+ * (playwright-core registry). Unknown platforms get none and fall back to Playwright's own Chromium.
+ */
+export function headlessShellExecutable(platform:NodeJS.Platform=process.platform,arch:string=process.arch):string|undefined{
+ if(platform==='linux')return arch==='arm64'?'chrome-headless-shell-linux-arm64/chrome-headless-shell':arch==='x64'?'chrome-headless-shell-linux64/chrome-headless-shell':undefined;
+ if(platform==='darwin')return arch==='arm64'?'chrome-headless-shell-mac-arm64/chrome-headless-shell':arch==='x64'?'chrome-headless-shell-mac-x64/chrome-headless-shell':undefined;
+ if(platform==='win32')return arch==='x64'||arch==='arm64'?'chrome-headless-shell-win64/chrome-headless-shell.exe':undefined;
+ return undefined;
+}
+/**
  * Chromium's own sandbox. auto (unset): on, and if Chromium cannot start with it, off with a warning in page diagnostics.
  * PASEO_SERVER_BROWSER_SANDBOX=1 always on (start fails where unsupported); 0 always off.
  */

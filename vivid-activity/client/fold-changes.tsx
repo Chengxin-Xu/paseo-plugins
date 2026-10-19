@@ -9,6 +9,7 @@ import { extractApplyPatchEdits, isApplyPatchTool, normalizeToolCallDetail, spli
 import { DiffBlocks, Glyph } from "./diffstat";
 import { hue } from "./kit";
 import { cuiTextEscape } from "./web";
+import { typesetStyle, useTypography } from "./typography";
 
 type Item = Extract<ToolCallTimelineItem, { type: "tool_call" }>;
 
@@ -62,10 +63,11 @@ export function FoldChanges({ theme, lineHeight, indent, cwd, files: fileCount, 
     const command = failedCommand(item(fail.key), cwd);
     return command ? [{ ...fail, command }] : [];
   }), [cwd, failed, item]);
+  const type = useTypography();
   const more = Math.max(0, fileCount - files.length);
   if (files.length === 0 && fails.length === 0 && more === 0 && uncounted === 0) return null;
   const line: ViewStyle = { flexDirection: "row", alignItems: "center", gap: 6, minHeight: lineHeight + 2, minWidth: 0 };
-  const mono: TextStyle = { fontFamily: "monospace", fontSize: 12, lineHeight };
+  const mono: TextStyle = typesetStyle({ fontFamily: "monospace", fontSize: 12, lineHeight }, type);
   const number: TextStyle = { fontSize: 12, lineHeight, fontWeight: "700", fontVariant: ["tabular-nums"], flexShrink: 0 };
   return (
     <View style={{ marginLeft: indent, marginRight: 6, marginTop: 2, marginBottom: 2, paddingVertical: 4, paddingHorizontal: 8, gap: 1, borderRadius: 8, backgroundColor: theme.colors.surface1, borderLeftWidth: 2, borderLeftColor: hue(theme, "green", "line") }}>

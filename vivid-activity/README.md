@@ -68,6 +68,7 @@ The Vivid Activity settings page offers:
 | Pin this turn's question | on (default), off |
 | Palette | vivid (default), follow theme, soft, high contrast |
 | Running animation | spinner (default), sparkle, orb, dot grid: snake, dot grid: twinkle, with live previews |
+| Code font | font family (web and desktop; fonts installed on the viewing device, falling back to the default stack), text size small / standard (default) / large / larger (11 to 16 px), line spacing compact / standard (default) / relaxed |
 | Expansion | per row kind: always, newest only, collapsed |
 
 Settings are stored in Paseo's plugin settings on the daemon, so every connected device uses the same ones.
