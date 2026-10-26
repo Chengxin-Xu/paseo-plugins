@@ -56,7 +56,9 @@ function NativeChild({ child, parentAgent, theme, inset, onBack, header }: { chi
 }
 
 type SubtaskRow = { kind: "section"; id: string; label: string; count: number; action?: ReactNode } | { kind: "managed"; id: string; item: AgentRecord; depth: number } | { kind: "native"; id: string; item: ProviderSubagent; depth: number; children: number; broken: boolean };
-export function SubtasksView({ agent, agents, theme, inset, onSelectAgent, header }: { agent: AgentRecord; agents: AgentRecord[]; theme: PluginTheme; inset: number; onSelectAgent: (id: string) => void; header?: ReactNode }) {
+export function SubtasksView({ agent, agents, theme, inset, onSelectAgent, onViewParent, header }: { agent: AgentRecord; agents: AgentRecord[]; theme: PluginTheme; inset: number; onSelectAgent: (id: string) => void;
+  /** 查看上级 Agent: here, or in Paseo when the parent runs on another host; absent: it cannot be opened from here. */
+  onViewParent?: () => void; header?: ReactNode }) {
   const fetch = useRpc(providerSubagentsRpc), [selected, setSelected] = useState<string | null>(null), [collapsed, setCollapsed] = useState<Set<string>>(new Set()), foreground = useForeground();
   const { colors } = theme;
   const query = useQuery({ queryKey: ["observatory-provider-subagents", agent.id], queryFn: async () => { const result = await fetch({ parentAgentId: agent.id }); if (result.error) throw new Error(result.error); return result; }, enabled: foreground, refetchInterval: foreground ? 15000 : false, staleTime: 5000, retry: 1 });
@@ -73,7 +75,7 @@ export function SubtasksView({ agent, agents, theme, inset, onSelectAgent, heade
   const indent = (depth: number) => depth ? { marginLeft: 16 + (Math.min(depth, 3) - 1) * 22, paddingLeft: 6, borderLeftWidth: hairline, borderLeftColor: colors.border } : undefined;
   return <FlatList data={rows} keyExtractor={row => row.id} style={{ flex: 1, minHeight: 0 }} initialNumToRender={12} windowSize={5} contentContainerStyle={{ paddingHorizontal: inset, paddingBottom: space.xxl }}
     ListHeaderComponent={<View style={{ gap: space.md, paddingBottom: space.xs }}>{header}
-      {agent.parentAgentId ? <View style={{ alignItems: "flex-start", marginLeft: -space.sm, marginTop: header ? 0 : space.md }}><Button theme={theme} label={t("secondarySubtasksView.viewParentAgent")} icon="CornerLeftUp" variant="ghost" size="sm" onPress={() => onSelectAgent(agent.parentAgentId!)} /></View> : null}
+      {agent.parentAgentId && onViewParent ? <View style={{ alignItems: "flex-start", marginLeft: -space.sm, marginTop: header ? 0 : space.md }}><Button theme={theme} label={t("secondarySubtasksView.viewParentAgent")} icon="CornerLeftUp" variant="ghost" size="sm" onPress={onViewParent} /></View> : null}
       {query.error ? <Banner theme={theme} tone="danger" message={query.error.message} action={{ label: t("secondarySubtasksView.retry"), onPress: () => void query.refetch() }} /> : null}
     </View>}
     renderItem={({ item: row }) => {

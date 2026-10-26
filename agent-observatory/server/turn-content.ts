@@ -60,19 +60,23 @@ function changedLines(detail: Extract<ToolCallDetail, { type: "edit" | "write" }
 }
 
 /**
- * Extract the new suffix of a whole in-memory timeline. The caller persists only lastKey,
- * counters and tool names; message text, commands, output and file paths never leave this function.
+ * Extract the new suffix of a timeline: the whole in-memory conversation (Paseo 0.12), or the end of it read at turn end
+ * (0.13, see lifecycle-hub.ts), where `positions` are the rows' sequence numbers, so keys stay the same from one read to
+ * the next, and `partial` says the window does not reach the start of the conversation. The caller persists only
+ * lastKey, counters and tool names; message text, commands, output and file paths never leave this function.
  */
-export function extractTurnContent(timeline: readonly AgentTimelineItem[], lastKey: string | null): {
+export function extractTurnContent(timeline: readonly AgentTimelineItem[], lastKey: string | null,
+  window: { positions?: readonly number[]; partial?: boolean } = {}): {
   metrics: StatsMetrics; tools: StatsTool[]; lastKey: string | null;
 } {
   const metrics = emptyStatsMetrics(), tools = new Map<string, StatsTool>(), files = new Set<string>();
-  const nextKey = timeline.length ? itemKey(timeline[timeline.length - 1], timeline.length - 1) : null;
+  const position = (index: number) => window.positions?.[index] ?? index;
+  const nextKey = timeline.length ? itemKey(timeline[timeline.length - 1], position(timeline.length - 1)) : null;
   let start = -1;
   if (lastKey !== null) {
     // Searching from the tail also chooses the last match if a provider repeats an ID.
     for (let index = timeline.length - 1; index >= 0; index--) {
-      if ((index === timeline.length - 1 ? nextKey : itemKey(timeline[index], index)) === lastKey) {
+      if ((index === timeline.length - 1 ? nextKey : itemKey(timeline[index], position(index))) === lastKey) {
         start = index + 1;
         break;
       }
@@ -83,6 +87,8 @@ export function extractTurnContent(timeline: readonly AgentTimelineItem[], lastK
       if (timeline[index].type === "user_message") { start = index; break; }
     }
   }
+  // A turn longer than the window read: count what was read rather than nothing.
+  if (start < 0 && window.partial) start = 0;
   if (start >= 0) for (let index = start; index < timeline.length; index++) {
     const item = timeline[index];
     switch (item.type) {
@@ -116,5 +122,6 @@ export function extractTurnContent(timeline: readonly AgentTimelineItem[], lastK
     }
   }
   metrics.filesChanged = files.size;
-  return { metrics, tools: [...tools.values()], lastKey: nextKey };
+  // Nothing read (a failed read on 0.13) keeps the place, so the next turn is not counted from scratch.
+  return { metrics, tools: [...tools.values()], lastKey: nextKey ?? lastKey };
 }

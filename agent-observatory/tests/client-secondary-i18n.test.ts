@@ -14,11 +14,12 @@ import { answering, outgoingMessage } from "../client/send-check";
 // Render the same native components the web host uses, with only host-owned APIs stubbed.
 const loader = Module as unknown as { _resolveFilename(request: string, ...rest: unknown[]): string; _cache: Record<string, unknown> };
 const web = require("react-native-web");
+const hosts = [{ serverId: "srv_mac", label: "MacBook", status: "online" }];
 const stubs: Record<string, unknown> = {
   "react-native": web,
   "@getpaseo/plugin/client/react-native": { Icon: ({ name }: { name: string }) => createElement("i", { "data-icon": name }), Modal: Object.assign(() => null, { Content: () => null }),
     ScrollView: web.ScrollView, TextInput: web.TextInput, FlatList: web.FlatList, copyText: async () => {}, useToast: () => ({ show() {}, error() {} }) },
-  "@getpaseo/plugin/client": { usePaseo: () => ({}), useRpc: () => async () => ({}) },
+  "@getpaseo/plugin/client": { usePaseo: () => ({}), useRpc: () => async () => ({}), useHosts: () => hosts },
   "@getpaseo/plugin/client/ui": { SidebarRow: ({ label }: { label: string }) => createElement("div", { "aria-label": label }, label) },
 };
 for (const [name, value] of Object.entries(stubs)) loader._cache[`\0secondary-i18n:${name}`] = { id: `\0secondary-i18n:${name}`, filename: `\0secondary-i18n:${name}`, loaded: true, exports: value };
@@ -76,6 +77,27 @@ test("the archive sidebar renders the selected language and user catalog fallbac
     assert.match(render(), /aria-label="Archived sessions"/);
     bindTranslator(createTranslator("ko", [{ boot: { archivesTitle: "보관된 세션" } }, en, kitEn]));
     assert.match(render(), /aria-label="보관된 세션"/);
+  } finally { useChinese(); }
+});
+
+test("a row delegated from another connected host names that host (Paseo 0.13)", async () => {
+  const { SessionList } = await import("../client/session-list");
+  const { buildAgentForest, normalizeAgent } = await import("../shared/model");
+  const parent = (server: string) => ({ "paseo.parent-agent-id": "parent", "paseo.parent-server-id": server });
+  const row = (id: string, labels: Record<string, string>) => {
+    const [node] = buildAgentForest([normalizeAgent({ id, title: id, status: "idle", labels })]);
+    return { kind: "row" as const, key: id, row: { node: node!, depth: 0, context: false }, childUnread: 0, childAttention: 0, childPhase: null, childRunning: 0, snoozed: false };
+  };
+  const render = () => renderToString(createElement(SessionList, { items: [row("named", parent("srv_mac")), row("unnamed", parent("srv_other")), row("local", parent("srv_linux"))], theme, compact: false,
+    selectedId: null, expanded: new Set<string>(), now: Date.parse("2026-10-25T12:00:00Z"), signals: new Map(), serverId: "srv_linux", empty: null, onToggle() {}, onSelect() {} } as never));
+  const html = render();
+  assert.match(html, /来自 MacBook/);
+  assert.match(html, /aria-label="由 MacBook 上的 Agent 委派"/);
+  assert.match(html, /来自另一台主机/, "a host this app has not added");
+  assert.equal(html.match(/data-icon="Network"/g)?.length, 2, "the local child gets no chip");
+  try {
+    useEnglish();
+    assert.match(render(), /From MacBook/);
   } finally { useChinese(); }
 });
 

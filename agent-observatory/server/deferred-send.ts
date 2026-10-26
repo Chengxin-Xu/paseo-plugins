@@ -350,6 +350,8 @@ const errorText = (error: unknown) => {
 };
 /** A send failure for the user: known causes in the plugin's words, anything else as the host's own words after a label. */
 const failureText = (error: unknown): string => {
+  // Paseo 0.13 says "Transport not connected" for a send while the plugin's connection is down; both versions set this code.
+  if ((error as { code?: unknown } | null)?.code === "DAEMON_CONNECTION_LOST") return note("disconnected");
   const text = errorText(error);
   const start = /did not start within (\d+) seconds/.exec(text);
   if (start) return note("noStart", { seconds: start[1] });
@@ -362,6 +364,8 @@ const failureText = (error: unknown): string => {
 };
 const requestOutcome = (error: unknown) => {
   if (error instanceof OutcomeUnknown) return true;
+  // Paseo 0.13's client marks a request whose frame went out before the connection dropped (`outcome: "unknown"`).
+  if ((error as { outcome?: unknown } | null)?.outcome === "unknown") return true;
   const code = (error as { code?: unknown } | null)?.code;
   const text = `${typeof code === "string" ? code : ""} ${errorText(error)}`;
   return /agent_request_outcome_unknown|agent_request_key_conflict/.test(text);

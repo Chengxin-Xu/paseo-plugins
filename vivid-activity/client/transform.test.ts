@@ -298,6 +298,21 @@ describe("colorful activity timeline transforms", () => {
     );
   });
 
+  it("leaves Paseo's own agent messages to Paseo", () => {
+    const result = transformToolCall({
+      phase: "complete",
+      item: {
+        type: "tool_call",
+        callId: "paseo-agent-message:m1",
+        name: "agent_message",
+        detail: { type: "plain_text", text: "Agent 子任务 finished.", icon: "bot" },
+        status: "completed",
+        error: null,
+      } as never,
+    });
+    expect(result).toBeUndefined();
+  });
+
   it("preserves native speak tool calls with text input", () => {
     const result = transformToolCall({
       phase: "complete",

@@ -25,7 +25,8 @@ const css = (web ? StyleSheet.create({
   growX: { animationKeyframes: [{ "0%": { transform: "scaleX(0)" }, "100%": { transform: "scaleX(1)" } }], animationDuration: "0.6s", animationTimingFunction: "cubic-bezier(0.2, 0.8, 0.2, 1)", animationFillMode: "backwards" },
   paused: { animationPlayState: "paused" },
 } as never) : {}) as Record<"spin" | "spinSlow" | "ping" | "breathe" | "slide" | "flash" | "pop" | "enter" | "growY" | "growX" | "paused", StyleProp<ViewStyle>>;
-const shared = StyleSheet.create({ overlay: { ...StyleSheet.absoluteFillObject, pointerEvents: "none" } });
+// Spelled out: React Native 0.86 (the Paseo 0.13 phone app) removed StyleSheet.absoluteFillObject, and spreading it gave nothing.
+const shared = StyleSheet.create({ overlay: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0, pointerEvents: "none" } });
 
 // One system subscription shared by every animated mark: a long list would otherwise add a listener per row.
 let reduced = false;

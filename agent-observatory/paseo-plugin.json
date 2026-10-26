@@ -11,5 +11,11 @@
   ],
   "requirements": {
     "paseo": ">=0.11.1"
+  },
+  "translations": {
+    "zh-CN": {
+      "name": "Agent 观测台",
+      "description": "所有 Paseo Agent 与子 Agent 的结果优先看板：未读队列、时间线、用量与 Token 统计、定时运行、可选的智能分析与每轮小结，以及提醒和定时发送。支持英文、简体中文和用户自定义语言。"
+    }
   }
 }

@@ -613,6 +613,20 @@ export function normalizeAgent(source: AgentSource, options: { workspaceName?: s
   };
 }
 
+/** Paseo 0.13: the server of the parent of an Agent delegated across connected hosts (absent: the same host). */
+export const PARENT_SERVER_LABEL = "paseo.parent-server-id";
+
+/**
+ * The server the parent Agent runs on when that is another host, else null. Paseo 0.13 lets an Agent create Agents on a
+ * connected host, and labels the child with its parent and the parent's server. Paseo still treats such a child as
+ * delegated (it raises no notification for it; the parent hears when it finishes), and so does this plugin: only
+ * showing and opening the parent differ, since the parent is not in this host's list and Paseo opens it on its own host.
+ */
+export function parentServerOf(agent: Pick<AgentRecord, "parentAgentId" | "labels">, serverId: string | null | undefined): string | null {
+  const parentServer = agent.parentAgentId ? text(agent.labels[PARENT_SERVER_LABEL]) : null;
+  return parentServer && serverId && parentServer !== serverId ? parentServer : null;
+}
+
 /** The latest turn's stop reason, unless a newer prompt has started another turn since. */
 function currentStop(agent: AgentRecord, lifecycle: LifecycleOutcome): ObservedStop | null {
   const stop = lifecycle.stop, at = timestamp(stop?.at);

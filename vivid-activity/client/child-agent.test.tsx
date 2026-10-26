@@ -252,3 +252,76 @@ describe("child summaries after a catalog change", () => {
     }
   });
 });
+
+describe("a child created on another host (Paseo 0.13 connected hosts, 0.9.1)", () => {
+  const remote = (status: string, text?: string, host = "MacBook"): ChildSummaryOutput => ({
+    status: status === "closed" ? "closed" : "ok", agent: { status }, host,
+    rows: text ? [{ k: "1", i: "MessageSquare", t: "Agent", x: text, c: "communication" }] : [],
+  });
+  beforeEach(() => { state.agents.clear(); input = ["child", true, "visible", "srv_mac"]; });
+
+  it("asks the server where an unlisted child runs instead of calling it missing, then reads it there", async () => {
+    render(); await advance(0);
+    expect(state.requests.map((request) => request.input)).toEqual([{ agentId: "child", manual: false, statusOnly: true, serverId: "srv_mac" }]);
+    state.requests[0]!.resolve(remote("running")); await settle(); await advance(0);
+    expect(view.hold).toBeNull();
+    expect(state.requests[1]!.input).toEqual({ agentId: "child", manual: false, statusOnly: false, serverId: "srv_mac" });
+    state.requests[1]!.resolve(remote("running", "working there")); await settle();
+    expect(view.view).toMatchObject({ host: "MacBook", offline: false });
+    expect(view.view.entries[0]!.x).toBe("working there");
+    // No host updates arrive from there: the quiet spell keeps reading a running child (a timer set inside another fires 1 ms later).
+    await advance(9_999); expect(state.requests).toHaveLength(2);
+    await advance(2); expect(state.requests).toHaveLength(3);
+    expect(state.requests[2]!.input.statusOnly).toBe(false);
+  });
+
+  it("asks after an idle remote child every half minute while on screen, and reads it once it runs again", async () => {
+    render(); await advance(0);
+    state.requests[0]!.resolve(remote("idle")); await settle(); await advance(0);
+    state.requests[1]!.resolve(remote("idle", "done")); await settle();
+    expect(state.requests).toHaveLength(2);
+    await advance(29_999); expect(state.requests).toHaveLength(2);
+    await advance(2); expect(state.requests).toHaveLength(3);
+    expect(state.requests[2]!.input).toMatchObject({ statusOnly: true, serverId: "srv_mac" });
+    // It started again: the change reads it, no sooner than five seconds after the last read.
+    state.requests[2]!.resolve(remote("running")); await settle();
+    await advance(4_998); expect(state.requests).toHaveLength(3);
+    await advance(3); expect(state.requests).toHaveLength(4);
+    expect(state.requests[3]!.input.statusOnly).toBe(false);
+    state.requests[3]!.resolve(remote("running", "started again")); await settle();
+    expect(view.view.entries[0]!.x).toBe("started again");
+    // Off screen, nothing is asked or read.
+    input = ["child", true, "hidden", "srv_mac"]; render();
+    await advance(60_000);
+    expect(state.requests).toHaveLength(4);
+  });
+
+  it("says when the child's host cannot be reached, and reads it again once the host answers", async () => {
+    render(); await advance(0);
+    state.requests[0]!.resolve({ status: "offline", agent: null, rows: [], host: "MacBook" }); await settle();
+    expect(view.view).toMatchObject({ offline: true, host: "MacBook", heard: true });
+    expect(view.hold).toBe("unknown");
+    await advance(30_001); expect(state.requests).toHaveLength(2);
+    expect(state.requests[1]!.input).toMatchObject({ statusOnly: true, serverId: "srv_mac" });
+    state.requests[1]!.resolve(remote("idle")); await settle(); await advance(0);
+    expect(view.view.offline).toBe(false);
+    expect(view.hold).toBeNull();
+    expect(state.requests[2]!.input.statusOnly).toBe(false);
+  });
+
+  it("does not keep asking after a child its host no longer has", async () => {
+    render(); await advance(0);
+    state.requests[0]!.resolve({ status: "missing", agent: null, rows: [], host: "MacBook" }); await settle();
+    expect(view.hold).toBe("unknown");
+    await advance(120_000);
+    expect(state.requests).toHaveLength(1);
+  });
+
+  it("leaves a listed child on this host as before: its first read is the read, with the host the server checks", async () => {
+    agent("child", "running", 1); input = ["child", true, "visible", "srv_linux"];
+    render(); await advance(0);
+    expect(state.requests.map((request) => request.input)).toEqual([{ agentId: "child", manual: false, statusOnly: false, serverId: "srv_linux" }]);
+    state.requests[0]!.resolve(response("running", "local")); await settle();
+    expect(view.view.host).toBeNull();
+  });
+});

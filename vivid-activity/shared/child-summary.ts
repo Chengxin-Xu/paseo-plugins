@@ -18,12 +18,19 @@ export const childSummaryRpc = defineRpc({
     /** Explicit user action may load a closed child's history, as in 0.5.0. */
     manual: z.boolean().optional(),
     statusOnly: z.boolean().optional(),
+    /** Paseo 0.13: the host `create_agent` put the child on (its result's `serverId`); this host's own id reads here. */
+    serverId: z.string().min(1).max(256).optional(),
   }),
   output: z.object({
-    /** 0.6.0: unconfirmed: the daemon's status check failed, so whether the child is loaded is unknown and nothing was read. */
-    status: z.enum(["ok", "missing", "closed", "unconfirmed"]),
+    /**
+     * 0.6.0: unconfirmed: the daemon's status check failed, so whether the child is loaded is unknown and nothing was read.
+     * 0.9.1: offline: the child runs on another host this daemon cannot reach now.
+     */
+    status: z.enum(["ok", "missing", "closed", "unconfirmed", "offline"]),
     agent: z.object({ status: z.string().max(30) }).nullable(),
     rows: z.array(childSummaryRowSchema).max(3),
+    /** 0.9.1: the name of the other host the child runs on (Paseo 0.13 connected hosts); absent for a child on this host. */
+    host: z.string().max(120).optional(),
   }),
 });
 export type ChildSummaryInput = z.input<typeof childSummaryRpc.input>;

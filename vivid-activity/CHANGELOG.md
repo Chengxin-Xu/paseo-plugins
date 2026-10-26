@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1 (2026-10-25)
+
+- **Paseo 0.13 support** (0.12 keeps working):
+  - Paseo's own agent messages (a sub-agent's report or finish notice) are left to Paseo, which shows who sent them and why (finished, errored, waiting for approval, closed) instead of a row of raw text. 0.13 delivers several together, re-sends them after a daemon restart and adds a `Server:` paragraph to finish notices. They split segments like messages.
+  - Notification rows also end a segment from 0.13 (getpaseo/paseo#7582), so the tool rows before one fold right away; 0.12 rejects that item type and nothing changes there.
+  - Motion overlays spell out absolute positioning: the 0.13 phone app's React Native 0.86 removed `StyleSheet.absoluteFillObject`.
+  - Connected hosts: a child created on another host is read on that host, so its live activity card works as for a local child and names the host it runs on (it used to say the child is missing from the agent list). The plugin's server borrows that host's API through Paseo's host connection and reads by the same rules (loaded children only; status checks load nothing), returning the connection after a minute without reads. That host sends no updates here, so while the card is on screen a running child is read every 10 seconds and an idle or closed one has its status checked every 30 seconds; when the host cannot be reached the card says so and reads again once it is back.
+- Chinese listing for the plugin registry (Paseo 0.13): the manifest carries `translations.zh-CN` (name and description) and the package ships `OVERVIEW.zh-CN.md`; older daemons ignore the field.
+
 ## 0.9.0 (2026-10-18)
 
 - **Code font** (issue #3): a new Code font section in settings changes

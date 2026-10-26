@@ -14,6 +14,8 @@ import { fitInsightReport, InsightStorage, retainInsightJobs, summarizeInsight, 
 
 import { AUTO_RUNNER_LABEL, BUILTIN_INSIGHT_RUNNER, InsightRunnerRegistry, NO_RUNNER_ERROR, cleanupInsightAgents, grokPlan, runPaseoStructured } from "./insight-runner";
 import { isInsightAgent, isKnownInsightAgent, markInsightAgent } from "./insight-runner-lifecycle";
+import { turnRead } from "./lifecycle-hub";
+import { turnTimeline } from "./turn-timeline";
 import { getInsightOverview, getInsightSuggestions, startInsightSuggestions, cancelInsightSuggestions, setActionFeedback,
   suggestionReportSchema, type OverviewDays, type SuggestionJob, type ActionFeedback } from "../shared/insight-overview";
 import { buildInsightOverview, getSuggestionTiming, summarizeSuggestion } from "./insight-overview";
@@ -436,10 +438,15 @@ export class InsightManager {
     this.activity[agentId] = { turns: state.turns + 1, generation: state.generation + 1, latestTurnAt: this.iso() }; this.changed(true);
   }
   turnEnded(agentId: string, labels?: Record<string, string>) { if (this.closed) return; if (isKnownInsightAgent(agentId) || labels?.["observatory.role"] === "insight") { markInsightAgent(agentId); return; } if (!this.initialized) { this.deferredLifecycle.push({ id: agentId, started: false }); return; } const state = this.activity[agentId] ?? { turns: 0, generation: 0, latestTurnAt: null }; this.activity[agentId] = { ...state, generation: state.generation + 1 }; this.changed(true); }
-  async scheduleAuto(paseo: PaseoApi, agentId: string, observedUserTurns: number, observedTools: number, labels?: Record<string, string>) {
+  /** `deeper` counts further back than the hook's window (Paseo 0.13 reads only the end of the conversation), only when asked. */
+  async scheduleAuto(paseo: PaseoApi, agentId: string, observedUserTurns: number, observedTools: number, labels?: Record<string, string>,
+    deeper?: (minTurns: number, minTools: number) => Promise<{ users: number; tools: number }>) {
     if (this.closed) return;
     if (isKnownInsightAgent(agentId) || labels?.["observatory.role"] === "insight") { markInsightAgent(agentId); return; }
-    await this.ready; if (this.closed || !this.settings.autoEnabled || observedUserTurns < this.settings.minTurns || observedTools < this.settings.minTools) return;
+    await this.ready; if (this.closed || !this.settings.autoEnabled) return;
+    let users = observedUserTurns, tools = observedTools;
+    if (deeper && (users < this.settings.minTurns || tools < this.settings.minTools)) ({ users, tools } = await deeper(this.settings.minTurns, this.settings.minTools));
+    if (this.closed || users < this.settings.minTurns || tools < this.settings.minTools) return;
     const old = this.autoTimers.get(agentId); if (old) clearTimeout(old);
     const timer = setTimeout(() => { this.autoTimers.delete(agentId); this.autoDue.delete(agentId); void this.start(paseo, agentId, "auto").catch(() => {}); }, 90000);
     timer.unref(); this.autoTimers.set(agentId, timer); this.autoDue.set(agentId, this.now() + 90000); this.changed(true);
@@ -458,6 +465,20 @@ export class InsightManager {
     await this.persist(); await this.storage.close(); await this.suggestionStorage.close();
   }
 }
+
+/** User messages and distinct tool calls, the two thresholds of automatic analysis. */
+function conversationCounts(items: readonly { type: string; callId?: unknown }[]): { users: number; tools: number } {
+  return { users: items.filter(item => item.type === "user_message").length,
+    tools: new Set(items.filter(item => item.type === "tool_call").map(item => item.callId)).size };
+}
+
+/** Reads back from the end only as far as the thresholds need (at most 1000 rows). */
+async function deeperCounts(paseo: PaseoApi, agentId: string, minTurns: number, minTools: number): Promise<{ users: number; tools: number }> {
+  const read = await turnTimeline(paseo, agentId, [] as { type: string; callId?: unknown }[], {
+    maxRows: 1000, enough: items => { const counts = conversationCounts(items); return counts.users >= minTurns && counts.tools >= minTools; } });
+  return conversationCounts(read.items);
+}
+
 /**
  * `options.zone`: the zone a client reported last (index.server.ts passes `() => zones.device()`), for the day windows
  * of suggestions queued without a client's clock (grok-F3). Without it those windows are UTC days and say so.
@@ -486,8 +507,9 @@ export function registerInsights(server: PluginServerContext, options: { zone?: 
   const removers = [server.on("agent.turn_started", ({ agent }, { paseo }) => observe(paseo, agent, () => manager.turnStarted(agent.id))),
     server.on("agent.turn_ended", (event, { paseo }) => observe(paseo, event.agent, () => {
       manager.turnEnded(event.agent.id); if (event.outcome.kind === "canceled") return;
-      return manager.scheduleAuto(paseo, event.agent.id, event.timeline.filter(item => item.type === "user_message").length,
-        new Set(event.timeline.filter(item => item.type === "tool_call").map(item => item.callId)).size);
+      const { users, tools } = conversationCounts(event.timeline), read = turnRead(event);
+      return manager.scheduleAuto(paseo, event.agent.id, users, tools, undefined,
+        read && !read.complete ? (minTurns, minTools) => deeperCounts(paseo, event.agent.id, minTurns, minTools) : undefined);
     }))];
   return async () => { removers.forEach(remove => remove()); await manager.close(); };
 }

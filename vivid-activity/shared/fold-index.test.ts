@@ -52,6 +52,11 @@ describe("fold index rows", () => {
     expect(wireRowFromEntry(entry(8, call("ExitPlanMode", { type: "plan", text: "## plan" })))).toMatchObject({ k: "b", w: "plan" });
     expect(wireRowFromEntry(entry(9, call("speak", { type: "unknown", input: "你好" })))).toMatchObject({ k: "b", w: "speak" });
     expect(claimsToolCall({ name: "speak", detail: { type: "unknown", input: "  " } })).toBe(true);
+    // Paseo's agent messages (a child's report or finish notice) stay Paseo's rows and split segments like messages.
+    const message = call("agent_message", { type: "plain_text", text: "Agent 子任务 finished.", icon: "bot" }, { callId: "paseo-agent-message:m1" });
+    expect(wireRowFromEntry(entry(10, message))).toMatchObject({ k: "b", w: "agent-message" });
+    expect(claimsToolCall(message)).toBe(false);
+    expect(claimsToolCall({ ...message, callId: "toolu_agent_message" })).toBe(true);
   });
 
   it("mirrors how Paseo turns task-list tools into task rows or drops them", () => {

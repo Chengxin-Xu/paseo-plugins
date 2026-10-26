@@ -136,7 +136,11 @@
     "waitingForApproval": "等待审批",
     "countsFromWhenThePluginBeganObserving": "从插件开始观察后累计，不是会话的终身总量。",
     "agentLabels": "Agent 标签",
-    "tokenCount": "{tokens} tokens"
+    "tokenCount": "{tokens} tokens",
+    "couldNotOpenParent": "上级 Agent 打开失败：{value1}",
+    "parentOnHost": "在 {host} 上，用 Paseo 打开",
+    "anotherHost": "另一台主机",
+    "parentHost": "上级 Agent 所在主机"
   },
   "coreAgentDigest": {
     "modelTimeShare": "{fraction} 的时间模型在思考和写回复。",
@@ -1372,7 +1376,11 @@
     "message": "：{value1}",
     "backgroundSubtasksRunning": "后台子任务 {value1} 个在执行{value2}",
     "collapseSubagents": "收起 {name} 的子 agent",
-    "expandSubagents": "展开 {name} 的子 agent"
+    "expandSubagents": "展开 {name} 的子 agent",
+    "fromHost": "来自 {host}",
+    "fromAnotherHost": "来自另一台主机",
+    "delegatedFromHost": "由 {host} 上的 Agent 委派",
+    "delegatedFromAnotherHost": "由另一台主机上的 Agent 委派"
   },
   "secondaryStatsBoard": {
     "message": "{value1}月{value2}日 {value3}",

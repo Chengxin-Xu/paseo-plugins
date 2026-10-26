@@ -20,6 +20,12 @@ export const CHILD_EVENT_READ_DELAY_MS = 5_000;
  */
 export const CHILD_QUIET_READ_MS = 10_000;
 
+/**
+ * 0.9.1: how often the card asks after a child on another host (Paseo 0.13 connected hosts) that is not running. That host
+ * sends this app nothing about it, so only a status check (it loads nothing) can tell that it started again.
+ */
+export const CHILD_REMOTE_POLL_MS = 30_000;
+
 export interface TimelineEntryPosition {
   seqStart: number;
   seqEnd: number;
@@ -141,6 +147,8 @@ export type ChildFeedEvent =
   | { type: "quiet" }
   /** The user asked to read the child (「查看动态」). */
   | { type: "manual" }
+  /** 0.9.1: time to ask after a child on another host, which sends no updates here: only its status, never a read. */
+  | { type: "poll" }
   /** A read finished; `version` is the state's version when it started. */
   | { type: "read"; version: number };
 
@@ -182,6 +190,8 @@ export function childFeedStep(state: ChildFeedState, event: ChildFeedEvent): Chi
       return { state, read: state.hold === null, verify: true, check: false };
     case "manual":
       return { state, read: true, verify: false, check: false };
+    case "poll":
+      return { state, read: false, verify: false, check: true };
     case "read":
       return { state: { ...state, readVersion: Math.max(state.readVersion, event.version) }, ...NOTHING };
   }

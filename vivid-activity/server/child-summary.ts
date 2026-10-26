@@ -5,6 +5,7 @@ import { childLoaded, childReadable, CHILD_TIMELINE_PAGE_SIZE, recentChildTimeli
 import type { ChildSummaryInput, ChildSummaryOutput, ChildSummaryRow } from "../shared/child-summary";
 import { formatReasoningText, resolveToolCallPresentation } from "../shared/presentation";
 import { zh } from "../shared/vivid-model";
+import { hostRoute } from "./host-routes";
 
 const LEVELS: Record<string, MessageId> = { info: "childSummary.notification", warning: "childSummary.warning", warn: "childSummary.warning", error: "childSummary.error", success: "childSummary.success" };
 
@@ -55,19 +56,37 @@ function cardStatus(agent: ChildRecord): string | null {
 }
 
 /**
- * Reads locally; the phone receives only the three compact rows it actually draws. 0.6.0 merge: the card's 0.6.0 rules
- * for reading a child (loaded by its record, fail closed when the status check fails) moved here with the reading.
+ * Reads where the child runs; the phone receives only the three compact rows it actually draws. 0.6.0 merge: the card's
+ * 0.6.0 rules for reading a child (loaded by its record, fail closed when the status check fails) moved here with the
+ * reading. 0.9.1: a child `create_agent` put on another host (Paseo 0.13) is read there by the same rules (host-routes.ts).
  */
 export async function handleChildSummary(input: ChildSummaryInput, context: PluginHandlerContext): Promise<ChildSummaryOutput> {
-  const missing: ChildSummaryOutput = { status: "missing", agent: null, rows: [] };
-  if (input.agentId.startsWith("provider:")) return missing;
-  const handle = context.paseo.agents.ref(input.agentId);
+  if (input.agentId.startsWith("provider:")) return { status: "missing", agent: null, rows: [] };
+  const route = await hostRoute(context.paseo, input.serverId);
+  if (route.kind === "local") return summarize(input, context.paseo, null);
+  if (route.kind === "offline") return { status: "offline", agent: null, rows: [], host: route.host };
+  let broken = true;
+  try {
+    const output = await summarize(input, route.api, route.host);
+    broken = output.status === "offline";
+    return output;
+  } finally {
+    route.release(broken);
+  }
+}
+
+async function summarize(input: ChildSummaryInput, paseo: PluginHandlerContext["paseo"], host: string | null): Promise<ChildSummaryOutput> {
+  const where = host ? { host } : {};
+  const missing: ChildSummaryOutput = { status: "missing", agent: null, rows: [], ...where };
+  const handle = paseo.agents.ref(input.agentId);
   // `fetch_agent` reads the stored record of an Agent that is not loaded and never loads it.
   let agent: ChildRecord | null | undefined;
   try {
     agent = (await handle.refresh())?.agent ?? null;
   } catch (error) {
     if (/not found/i.test(error instanceof Error ? error.message : String(error))) return missing;
+    // 0.9.1: on another host a failed check most often means the way there went away; the next read connects again.
+    if (host) return { status: "offline", agent: null, rows: [], host };
     // 0.6.0 (grok-F9, pi-F2): no answer, so no telling whether reading would load the child: read nothing by itself.
     // The user's own read still goes ahead, as it would for a closed child.
     if (!input.manual) return { status: "unconfirmed", agent: null, rows: [] };
@@ -76,14 +95,15 @@ export async function handleChildSummary(input: ChildSummaryInput, context: Plug
   if (agent === null) return missing;
   const status = agent ? cardStatus(agent) : null;
   const current = status ? { status } : null;
-  if (!input.manual && !childReadable(status)) return { status: "closed", agent: current, rows: [] };
-  if (input.statusOnly) return { status: "ok", agent: current, rows: [] };
+  if (!input.manual && !childReadable(status)) return { status: "closed", agent: current, rows: [], ...where };
+  if (input.statusOnly) return { status: "ok", agent: current, rows: [], ...where };
   const page = await handle.timeline.refetch({ direction: "tail", limit: CHILD_TIMELINE_PAGE_SIZE, projection: "projected" });
   const after = page.agent ? cardStatus(page.agent) : status;
   const output: ChildSummaryOutput = {
     status: "ok",
     agent: after ? { status: after } : null,
     rows: recentChildTimelineEntries(page.entries).slice(-3).map(childSummaryRow),
+    ...where,
   };
   // Keep even three long tool summaries below ~10 KiB/min (12 responses plus RPC envelopes and 4/3 relay expansion).
   // Sequence start is stable for an updated entry; the revision sequence need not cross the wire just to key a row.

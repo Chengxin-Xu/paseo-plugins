@@ -2,7 +2,7 @@ Vivid Activity redraws an agent's thinking and tool-call rows in the chat as com
 
 A finished run of thinking and tool steps folds into one summary row with the number of steps, a count per kind, failures, the total time and what it changed, such as `3 files +12 −4` with a five-block diffstat; tap it to list each file and failed command, then the steps. While the agent is still working, only the running, waiting and failed steps and the two most recent ones stay visible. Under the last summary of a turn you watched, the turn's input, cached and output tokens appear. Every row shows its step's time, counting up live while it runs. In a long turn, your question stays pinned above the newest stretch of activity.
 
-The interface supports English, Simplified Chinese and user-defined languages. Based on Colorful Agent Activity by Matt Cowger; the change summary adapts code from paseo-chat-polish by Hieu Le.
+Based on Colorful Agent Activity by Matt Cowger; the change summary adapts code from paseo-chat-polish by Hieu Le.
 
 ## What the rows show
 
@@ -29,9 +29,9 @@ Settings live on the daemon and apply to every connected device. Agent output, p
 - To fold and time rows, the plugin's server part reads the timeline of the agent you are viewing inside the daemon and sends the app a compact index: each row's position, end time, kind, status and category, tool call and turn ids, text lengths, a short hash of thinking text, lines added and removed with a short hash of each file's path, failed commands' exit codes, and the token figures of turns you watched. No text, path, command or tool output is part of it. For the pinned question it sends that message's text.
 - Token figures come from the agent record Paseo keeps. To read them by provider, the server part reads the daemon's `config.json`, keeping only each custom provider's `extends`, and while a Codex-based turn runs it subscribes inside the daemon to running agents' updates to add up every request.
 - To preview an image the agent read, it reads only a regular file of at most 3 MB inside that agent's working directory or the system temp directory, resolving links first. A file that is not an image is not read past its first 32 bytes.
-- For Paseo's create agent row, the server part sends three short rows from the new agent's last 8 timeline entries while the app is in front and the row on screen; a closed or archived agent is read only when you press Show activity, since reading loads it.
+- For Paseo's create agent row, the server part sends three short rows from the new agent's last 8 timeline entries while the app is in front and the row on screen, asking another connected host for an agent running there; a closed or archived agent is read only when you press Show activity, since reading loads it.
 - While a running row is on screen and the app is in front, it subscribes to running agents' updates, so a row turns amber when approval is requested.
-- It makes no network requests, starts no processes and reads no credentials; it writes only language templates and state in its plugin data folder. Of the environment it uses PASEO_HOME and HOME for that folder and the daemon config, and TMPDIR and HOME for image checks.
+- It makes no network requests of its own, starts no processes and reads no credentials; it writes only language templates and state in its plugin data folder. Of the environment it uses PASEO_HOME and HOME for that folder and the daemon config, and TMPDIR and HOME for image checks.
 - Installing from Git runs a preparation step that installs two packages from the public npm registry, pinned by the lockfile: Paseo's protocol package and Prism for highlighting.
 
 ## Known limits

@@ -14,7 +14,8 @@ const shell = (callId: string, exitCode?: number | null, status: ToolCallTimelin
 
 test("empty or unanchored timelines count nothing while advancing the saved marker", () => {
   assert.deepEqual(extractTurnContent([], null), { metrics: emptyStatsMetrics(), tools: [], lastKey: null });
-  assert.deepEqual(extractTurnContent([], "old"), { metrics: emptyStatsMetrics(), tools: [], lastKey: null });
+  // Nothing read (a failed read on Paseo 0.13) keeps the place.
+  assert.deepEqual(extractTurnContent([], "old"), { metrics: emptyStatsMetrics(), tools: [], lastKey: "old" });
   const result = extractTurnContent([assistant("historical", "a"), shell("old")], null);
   assert.deepEqual(result.metrics, emptyStatsMetrics());
   assert.deepEqual(result.tools, []);
@@ -185,4 +186,20 @@ test("extraction does not mutate the timeline or its nested tool details", () =>
   const result = extractTurnContent(timeline, null);
   assert.equal(result.metrics.edits, 1);
   assert.equal(JSON.stringify(timeline), serialized);
+});
+
+test("Paseo 0.13 windows: row positions keep keys stable between reads, and a turn longer than the window still counts", () => {
+  const notice = (text: string): AgentTimelineItem => ({ type: "error", message: text } as AgentTimelineItem);
+  // Turn 1 read as rows 10..12; its last row has no id, so its key carries the row's sequence number.
+  const first = extractTurnContent([user("go"), shell("a"), notice("boom")], null, { positions: [10, 11, 12] });
+  assert.equal(first.metrics.toolCalls, 1);
+  // Turn 2's window starts elsewhere (rows 11..15), yet the marker is found at row 12: only the new rows count.
+  const second = extractTurnContent([shell("a"), notice("boom"), user("next"), shell("b"), assistant("ok")], first.lastKey, { positions: [11, 12, 13, 14, 15] });
+  assert.equal(second.metrics.userMessages, 1);
+  assert.equal(second.metrics.toolCalls, 1);
+  assert.equal(second.metrics.errors, 0, "the old error is not counted again");
+  // A long autonomous turn whose window reaches neither the marker nor a user message: what was read counts.
+  const long = extractTurnContent([shell("x"), shell("y")], "msg:gone", { positions: [500, 501], partial: true });
+  assert.equal(long.metrics.toolCalls, 2);
+  assert.equal(extractTurnContent([shell("x"), shell("y")], "msg:gone").metrics.toolCalls, 0, "a whole conversation without an anchor still counts nothing");
 });

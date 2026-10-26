@@ -141,6 +141,13 @@ export default function contribute(client: PluginClientContext) {
         client.addTimelineTransformer({ id: `fold-${itemType.replace(/_/g, "-")}`, query: { itemType }, transform: observeBoundary } as Parameters<typeof client.addTimelineTransformer>[0]),
       ),
     ];
+    // Paseo 0.13 lets a transformer watch notifications too (getpaseo/paseo#7582), so a segment folds as soon as one
+    // arrives. Paseo 0.12 rejects the item type before registering anything, which tells the two apart.
+    try {
+      removals.push(client.addTimelineTransformer({ id: "fold-notification", query: { itemType: "notification" }, transform: observeBoundary } as Parameters<typeof client.addTimelineTransformer>[0]));
+    } catch {
+      // Older host: the fold index still splits segments at notifications, just later.
+    }
     return () => {
       for (const remove of removals) remove();
     };

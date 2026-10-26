@@ -120,16 +120,20 @@ type ToolItem = {
 
 /**
  * Tool calls this plugin leaves to others, mirroring `client/transform.ts`: plans (Paseo's approval cards), the `speak`
- * shape Paseo renders as a spoken message, and (0.5.0) the calls Bots turns into cards (shared/plugin-cards.ts).
+ * shape Paseo renders as a spoken message, Paseo's own agent messages, and (0.5.0) the calls Bots turns into cards
+ * (shared/plugin-cards.ts).
  */
-export function claimsToolCall(item: { name: string; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): boolean {
+export function claimsToolCall(item: { name: string; callId?: unknown; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): boolean {
   return disclaimed(item) === null;
 }
 
 /** Why the plugin leaves a tool call alone (the boundary kind the fold index records), or null when it draws it. */
-function disclaimed(item: { name: string; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): string | null {
+function disclaimed(item: { name: string; callId?: unknown; status?: unknown; detail?: { type?: unknown; input?: unknown } | null }): string | null {
   if (item.detail?.type === "plan") return "plan";
   if (item.name === "speak" && item.detail?.type === "unknown" && typeof item.detail.input === "string" && item.detail.input.trim()) return "speak";
+  // A report or finish notice from another agent (Paseo 0.13 delivers several together): Paseo's own row says who sent it
+  // and why (finished, errored, waiting for approval), which a takeover loses, since the host keeps that part to itself.
+  if (item.name === "agent_message" && typeof item.callId === "string" && item.callId.startsWith("paseo-agent-message:")) return "agent-message";
   return pluginCardOf(item);
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDashboardRows, needsAttention } from "../shared/dashboard-model";
-import { acknowledgement, applyArchiveReadOrigin, applyReadReceipt, applyTelemetry, buildAgentForest, classifyAgentStatus, completionReadState, filterAgentForest, flattenAgentForest, formatDuration, formatRelativeTime, formatTokens, heldBySnooze, isUnreadCompletion, knownCompletionAt, normalizeAgent, observedRound, preserveCompletionEvidence, resultSource, sameResultSource, stopUnseen, type AgentRecord, type LifecycleOutcome } from "../shared/model";
+import { acknowledgement, applyArchiveReadOrigin, applyReadReceipt, applyTelemetry, buildAgentForest, classifyAgentStatus, completionReadState, filterAgentForest, flattenAgentForest, formatDuration, formatRelativeTime, formatTokens, heldBySnooze, isUnreadCompletion, knownCompletionAt, normalizeAgent, observedRound, parentServerOf, preserveCompletionEvidence, resultSource, sameResultSource, stopUnseen, type AgentRecord, type LifecycleOutcome } from "../shared/model";
 import { isCompletionSnoozed } from "../shared/preferences";
 
 const time = "2026-09-16T12:00:00.000Z";
@@ -60,6 +60,21 @@ test("normalization preserves missing metrics and parent labels without inventin
   assert.equal(agent.usage.contextTotal, null);
   const counted = normalizeAgent({ id: "x", lastUsage: { inputTokens: 200, cachedInputTokens: 100, outputTokens: 50 } });
   assert.equal(counted.usage.totalTokens, 250, "cached input must not be counted twice");
+});
+
+test("an Agent delegated from another connected host (Paseo 0.13) stays a delegated child whose parent is elsewhere", () => {
+  const labels = (server?: string) => ({ "paseo.parent-agent-id": "parent", ...(server === undefined ? {} : { "paseo.parent-server-id": server }) });
+  const remote = normalizeAgent({ id: "child", status: "idle", labels: labels(" srv_mac ") });
+  // Paseo raises no notification for a delegated Agent and tells its parent instead, wherever the parent runs.
+  assert.equal(remote.parentAgentId, "parent");
+  assert.equal(parentServerOf(remote, "srv_linux"), "srv_mac");
+  assert.equal(parentServerOf(normalizeAgent({ id: "local", labels: labels("srv_linux") }), "srv_linux"), null, "0.13 labels local children with this host");
+  assert.equal(parentServerOf(normalizeAgent({ id: "old", labels: labels() }), "srv_linux"), null, "no parent server: the same host");
+  assert.equal(parentServerOf(remote, undefined), null, "this host unknown: treated as before");
+  assert.equal(parentServerOf(normalizeAgent({ id: "root", labels: { "paseo.parent-server-id": "srv_mac" } }), "srv_linux"), null, "a server without a parent names nothing");
+  // A parent that is not in this host's list is a root here, as before.
+  const [root] = buildAgentForest([remote]);
+  assert.equal(root!.agent.id, "child");
 });
 
 test("renamed project identity remains distinct from a workspace title and worktree slug", () => {

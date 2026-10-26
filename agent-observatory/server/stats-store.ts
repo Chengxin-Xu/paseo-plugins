@@ -73,7 +73,7 @@ function legacyAgentHour(day: string, lastActiveAt: string): string | null {
 
 export type StatsObservation =
   | { type: "turn_started"; agentId: string }
-  | { type: "turn_ended"; agentId: string; outcome: TurnOutcome; timeline: readonly AgentTimelineItem[] }
+  | { type: "turn_ended"; agentId: string; outcome: TurnOutcome; timeline: readonly AgentTimelineItem[]; positions?: readonly number[]; partial?: boolean }
   | { type: "permission_requested" | "permission_resolved"; agentId: string; requestId: string };
 export interface StatsStoreOptions {
   directory?: string; now?: () => number;
@@ -188,7 +188,7 @@ export class StatsStore {
           this.ended.delete(agentId); this.ended.set(agentId, at);
           while (this.ended.size > MAX_AGENTS) this.ended.delete(this.ended.keys().next().value!);
           this.add(agentId, at, delta);
-          const content = extractTurnContent(observation.timeline, state.lastKey);
+          const content = extractTurnContent(observation.timeline, state.lastKey, { positions: observation.positions, partial: observation.partial });
           state.lastKey = content.lastKey;
           this.add(agentId, at, content.metrics);
           this.addTools(at, content.tools);

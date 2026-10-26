@@ -139,6 +139,35 @@ test("an unknown outcome holds the message for the user and does not block the n
   assert.match(dropped?.note ?? "", /可能已经送达/);
 });
 
+test("Paseo 0.13: a connection lost after the frame went out is an unknown outcome, never a plain failure", async () => {
+  const h = host({ a: idle() });
+  const { deferred } = await queue(h);
+  // DaemonConnectionError of @getpaseo/client 0.13 for a submitted request; 0.12 sends the same error without `outcome`.
+  h.failures.push(Object.assign(new Error("Connection lost"), { code: "DAEMON_CONNECTION_LOST", outcome: "unknown" }));
+  await deferred.enqueue({ agentId: "a", text: "one", messageId: "msg-lost-1" }, h.paseo);
+  await deferred.flush();
+  const held = (await deferred.list()).find((view) => view.messageId === "msg-lost-1");
+  assert.equal(held?.state, "held");
+  assert.match(held?.note ?? "", /可能已经送达/);
+  assert.equal((await deferred.cancel("msg-lost-1"))?.state, "maybe-sent");
+});
+
+test("Paseo 0.13: a send while the connection is down is told as disconnected, not in the host's English", async () => {
+  const h = host({ a: idle() });
+  const { deferred } = await queue(h);
+  for (let index = 0; index < 6; index++) h.failures.push(Object.assign(new Error("Transport not connected"), { code: "DAEMON_CONNECTION_LOST" }));
+  await deferred.enqueue({ agentId: "a", text: "one", messageId: "msg-down-1" }, h.paseo);
+  for (let index = 0; index < 6; index++) {
+    h.tick(61_000);
+    await deferred.flush();
+  }
+  const held = (await deferred.list()).find((view) => view.messageId === "msg-down-1");
+  assert.equal(held?.state, "held");
+  assert.match(held?.note ?? "", /多次发送失败/);
+  assert.match(held?.note ?? "", /和宿主的连接断了/);
+  assert.doesNotMatch(held?.note ?? "", /Transport not connected/);
+});
+
 test("failed sends retry with backoff under the same id and are held after six tries", async () => {
   const h = host({ a: idle() });
   const { deferred } = await queue(h);

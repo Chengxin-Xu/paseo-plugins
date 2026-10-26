@@ -10,5 +10,11 @@
   ],
   "requirements": {
     "paseo": ">=0.11.0"
+  },
+  "translations": {
+    "zh-CN": {
+      "name": "Terracotta 主题",
+      "description": "十二套配色主题（六深六浅），出自同一条感知明度阶梯，另有一个用滑杆实时调色的自定义主题。支持英文、简体中文和用户自定义语言。"
+    }
   }
 }

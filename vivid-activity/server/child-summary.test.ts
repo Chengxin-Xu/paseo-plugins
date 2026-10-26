@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { childSummaryRpc } from "../shared/child-summary";
 import { childSummaryRow, handleChildSummary } from "./child-summary";
+import { hostRoute } from "./host-routes";
 
 // fetch_agent records Paseo 0.11.1 itself builds: live (loaded, with `activeTurn`) and stored (not loaded).
 const records = JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../test-fixtures/child-records-0.11.1.json"), "utf8")) as Record<string, Record<string, unknown>>;
@@ -120,5 +121,111 @@ describe("compact child summaries", () => {
     expect(rows[2]).toMatchObject({ c: "failed" });
     expect(rows[3]).toMatchObject({ c: "failed" });
     expect(JSON.stringify(rows)).not.toContain("x".repeat(100));
+  });
+});
+
+describe("a child on another host (Paseo 0.13 connected hosts, 0.9.1)", () => {
+  /** A daemon on `self` that reaches the hosts listed; `client` lends `remote`'s API (and counts lends and disposals). */
+  function connected(remote: PluginHandlerContext["paseo"], options: { listed?: Array<{ serverId: string; label: string | null }>; connect?: () => Promise<void>; local?: PluginHandlerContext["paseo"] } = {}) {
+    const log = { lends: 0, disposed: 0, lists: 0 };
+    const local = options.local ?? fake("idle").context.paseo;
+    const paseo = Object.assign(Object.create(null), local, { hosts: {
+      list: async () => { log.lists++; return { self: { serverId: "srv_linux" }, hosts: options.listed ?? [{ serverId: "srv_mac", label: "MacBook" }] }; },
+      client: async () => { log.lends++; await options.connect?.(); return Object.assign(Object.create(null), remote, { dispose: async () => { log.disposed++; } }); },
+    } });
+    return { context: { paseo } as unknown as PluginHandlerContext, log };
+  }
+
+  it("reads the child where it runs, by the same rules, and names that host; the borrowed API serves later reads", async () => {
+    const there = fake("running");
+    const { context, log } = connected(there.context.paseo);
+    const output = await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, context);
+    expect(childSummaryRpc.output.parse(output)).toEqual(output);
+    expect(output).toMatchObject({ status: "ok", host: "MacBook" });
+    expect(output.rows).toHaveLength(3);
+    expect(there.calls).toEqual(["child", { direction: "tail", limit: 8, projection: "projected" }]);
+    await handleChildSummary({ agentId: "child", serverId: "srv_mac", statusOnly: true }, context);
+    expect(log).toMatchObject({ lends: 1, disposed: 0 });
+    // Closed or stored there: nothing is read by itself, as here.
+    const closed = connected(fake("closed").context.paseo);
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, closed.context)).toEqual({ status: "closed", agent: { status: "closed" }, rows: [], host: "MacBook" });
+  });
+
+  it("reads here a child named by this host's own id, or on a daemon without connected hosts", async () => {
+    const here = fake("running");
+    const { context, log } = connected(fake("running").context.paseo, { local: here.context.paseo });
+    const output = await handleChildSummary({ agentId: "child", serverId: "srv_linux" }, context);
+    expect(output.host).toBeUndefined();
+    expect(here.calls[0]).toBe("child");
+    expect(log.lends).toBe(0);
+    const older = fake("running");
+    expect((await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, older.context)).status).toBe("ok");
+    expect(older.calls[0]).toBe("child");
+  });
+
+  it("says a host this daemon does not reach, or cannot reach now, is offline, and connects again on the next read", async () => {
+    const unknown = connected(fake("running").context.paseo, { listed: [] });
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_far" }, unknown.context)).toEqual({ status: "offline", agent: null, rows: [], host: "srv_far" });
+    expect(unknown.log.lends).toBe(0);
+    let fail = true;
+    const flaky = connected(fake("running").context.paseo, { connect: async () => { if (fail) throw Object.assign(new Error("Host srv_mac is offline"), { code: "host_offline" }); } });
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, flaky.context)).toMatchObject({ status: "offline", host: "MacBook" });
+    fail = false;
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, flaky.context)).toMatchObject({ status: "ok", host: "MacBook" });
+    expect(flaky.log.lends).toBe(2);
+  });
+
+  it("lets a route that broke go, so the next read connects again", async () => {
+    const lost = connected(fake("running", null, { fail: "route closed" }).context.paseo);
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, lost.context)).toEqual({ status: "offline", agent: null, rows: [], host: "MacBook" });
+    await Promise.resolve();
+    expect(lost.log).toMatchObject({ lends: 1, disposed: 1 });
+    await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, lost.context);
+    expect(lost.log.lends).toBe(2);
+    // A child its host no longer has is missing there, and the route stays.
+    const gone = connected(fake(null).context.paseo);
+    expect(await handleChildSummary({ agentId: "child", serverId: "srv_mac" }, gone.context)).toEqual({ status: "missing", agent: null, rows: [], host: "MacBook" });
+    expect(gone.log.disposed).toBe(0);
+  });
+});
+
+describe("borrowed host APIs (host-routes.ts)", () => {
+  it("gives a borrowed API back after a minute without reads, and keeps it while reads go on", async () => {
+    vi.useFakeTimers();
+    try {
+      let disposed = 0, lends = 0;
+      const paseo = { hosts: {
+        list: async () => ({ self: { serverId: "srv_linux" }, hosts: [{ serverId: "srv_mac", label: null }] }),
+        client: async () => { lends++; return { agents: {}, dispose: async () => { disposed++; } }; },
+      } } as unknown as PluginHandlerContext["paseo"];
+      const first = await hostRoute(paseo, "srv_mac");
+      expect(first).toMatchObject({ kind: "remote", host: "srv_mac" });
+      if (first.kind === "remote") first.release(false);
+      await vi.advanceTimersByTimeAsync(59_000);
+      const second = await hostRoute(paseo, "srv_mac");
+      if (second.kind === "remote") second.release(false);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect({ lends, disposed }).toEqual({ lends: 1, disposed: 0 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(disposed).toBe(1);
+      await hostRoute(paseo, "srv_mac");
+      expect(lends).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("gives up on a host that does not answer in time, and returns the late API at once", async () => {
+    vi.useFakeTimers();
+    try {
+      let disposed = 0, answer: (() => void) | null = null;
+      const paseo = { hosts: {
+        list: async () => ({ self: { serverId: "srv_linux" }, hosts: [{ serverId: "srv_mac", label: "MacBook" }] }),
+        client: () => new Promise((resolve) => { answer = () => resolve({ agents: {}, dispose: async () => { disposed++; } }); }),
+      } } as unknown as PluginHandlerContext["paseo"];
+      const pending = hostRoute(paseo, "srv_mac", { connectMs: 8_000 });
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(await pending).toEqual({ kind: "offline", host: "MacBook" });
+      answer!(); await vi.advanceTimersByTimeAsync(0);
+      expect(disposed).toBe(1);
+    } finally { vi.useRealTimers(); }
   });
 });

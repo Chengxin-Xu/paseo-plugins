@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.2 - 2026-10-25
+
+- 适配 Paseo 0.13：动效浮层（kit motion）改为写明的绝对定位：Paseo 0.13 的手机 App 升到 React Native 0.86，删掉了 `StyleSheet.absoluteFillObject`，原来的写法在手机上会让 Ping / Flash 浮层失去定位、把排版顶开。
+- 插件市场中文介绍（Paseo 0.13）：公开版清单带 `translations.zh-CN`（中文名称和简介），并附 `OVERVIEW.zh-CN.md` 中文介绍页；旧版 daemon 忽略这个字段，安装和运行不受影响。
+- 在隔离的 Paseo 0.13.0 和 0.12.0 daemon 上加载全部插件、跑同一组脚本回合并打开网页端：插件全部运行，网页端没有页面错误和插件报错。
+
 ## 0.13.1 - 2026-10-18
 
 - 修复 Linux ARM64 主机找不到 Chromium（issue #2）：自动查找 Playwright 缓存时写死了 x86-64 的目录名

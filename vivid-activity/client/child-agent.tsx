@@ -14,6 +14,7 @@ import { useCardVisibility } from "./visibility";
 import { useForeground } from "./use-foreground";
 import {
   CHILD_QUIET_READ_MS,
+  CHILD_REMOTE_POLL_MS,
   childFeedHold,
   childStatus,
   childFeedStart,
@@ -40,6 +41,10 @@ interface ChildTimelineState {
   error: string | null;
   /** 0.6.0: the daemon could not say whether the child is loaded (its status check failed), so nothing was read. */
   unconfirmed: boolean;
+  /** 0.9.1: the other host the child runs on (Paseo 0.13 connected hosts), as the server named it; null: this host. */
+  host: string | null;
+  /** 0.9.1: that host cannot be reached now. */
+  offline: boolean;
 }
 
 const EMPTY_STATE: ChildTimelineState = {
@@ -49,6 +54,8 @@ const EMPTY_STATE: ChildTimelineState = {
   loading: false,
   error: null,
   unconfirmed: false,
+  host: null,
+  offline: false,
 };
 
 /** 0.5.0: what the card says while it does not read on its own (shared/child-agent.ts childFeedHold). */
@@ -61,11 +68,14 @@ const unconfirmedNote = () => t("ui.theSubagentSLoadedState");
 
 export function ChildAgentTimeline({
   agentId,
+  serverId,
   theme,
   palette,
   styles,
 }: {
   agentId: string;
+  /** The host `create_agent` reported (Paseo 0.13), so a child on another host is read there. */
+  serverId?: string;
   theme: Theme;
   palette: ActivityPalette;
   styles: ActivityStyles;
@@ -73,16 +83,24 @@ export function ChildAgentTimeline({
   const rootRef = useRef<View>(null);
   const visibility = useCardVisibility(rootRef);
   const foreground = useForeground();
-  const feed = useChildFeed(agentId, foreground, visibility);
+  const feed = useChildFeed(agentId, foreground, visibility, serverId);
   const entries = feed.view.entries;
   const status = feed.status;
   const statusColor = status ? childStatusColor(status, palette) : palette.categoryColors.agent;
-  const note = feed.hold ? ASLEEP_NOTES[feed.hold] : feed.view.unconfirmed ? unconfirmedNote() : undefined;
+  // A child this app does not list may run on another host: until its server says, it is being looked up, not missing.
+  const lookingUp = !!serverId && !feed.view.heard && feed.hold === "unknown";
+  const note = feed.view.offline ? t("ui.childHostOffline", { host: feed.view.host ?? "" })
+    : feed.hold && !lookingUp ? ASLEEP_NOTES[feed.hold] : feed.view.unconfirmed ? unconfirmedNote() : undefined;
 
   return (
     <View ref={rootRef} style={styles.childTimelineSection}>
       <View style={styles.childTimelineHeader}>
-        <Text style={styles.detailLabel}>{t("ui.liveSubagentActivity")}</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, minWidth: 0 }}>
+          <Text style={styles.detailLabel}>{t("ui.liveSubagentActivity")}</Text>
+          {feed.view.host ? (
+            <Text numberOfLines={1} style={[styles.paseoListItemMeta, { flexShrink: 1 }]}>{t("ui.childOnHost", { host: feed.view.host })}</Text>
+          ) : null}
+        </View>
         {status ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             {status === "running" || status === "initializing" ? (
@@ -134,7 +152,7 @@ export function ChildAgentTimeline({
 }
 
 /** Reads compact summaries, driven by the host's Agent updates; never subscribes to a child timeline. */
-export function useChildFeed(agentId: string, foreground: boolean, visibility: CardVisibility) {
+export function useChildFeed(agentId: string, foreground: boolean, visibility: CardVisibility, serverId?: string) {
   useI18n();
   const catalog = translator();
   const rpc = useRpc(childSummaryRpc);
@@ -144,13 +162,20 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
   const listed = useAgent(agentId, (agent) => agent.status);
   const stamp = useAgent(agentId, (agent) => `${agent.status}|${agent.updatedAt}|${agent.lastActivityAt}`);
   const [view, setView] = useState<ChildTimelineState>(EMPTY_STATE);
+  // 0.9.1: a child on another host is not in this app's list for this host, so its updates never arrive here: what the
+  // card's own reads found stands in for them.
+  const remote = view.host !== null;
+  const listedSignal = remote ? null : listed;
+  const stampSignal = remote ? `remote|${view.agent?.status ?? ""}` : stamp;
+  const listedRef = useRef(listed);
+  listedRef.current = listed;
   const status = childStatus({ heard: view.heard, agent: view.agent, listed });
   const hold = childFeedHold({ foreground, visibility, status });
   const holdRef = useRef(hold);
   holdRef.current = hold;
   const runningRef = useRef(false);
   const dispatchRef = useRef<((event: ChildFeedEvent) => void) | null>(null);
-  const previousSignal = useRef({ agentId, listed, stamp });
+  const previousSignal = useRef({ agentId, listed: listedSignal, stamp: stampSignal, remote });
   const previousAgent = useRef(agentId);
 
   useEffect(() => {
@@ -162,7 +187,7 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
     const sameAgent = previousAgent.current === agentId;
     previousAgent.current = agentId;
     setView((current) => sameAgent
-      ? { ...EMPTY_STATE, agent: current.agent, heard: current.heard, unconfirmed: current.unconfirmed }
+      ? { ...EMPTY_STATE, agent: current.agent, heard: current.heard, unconfirmed: current.unconfirmed, host: current.host, offline: current.offline }
       : EMPTY_STATE);
     const refresh = createChildRefresh({
       allowed: () => holdRef.current === null,
@@ -175,7 +200,7 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
         const version = state.version;
         setView((current) => ({ ...current, loading: !statusOnly, error: null }));
         try {
-          const response = await rpcRef.current({ agentId, manual, statusOnly });
+          const response = await rpcRef.current({ agentId, manual, statusOnly, ...(serverId ? { serverId } : {}) });
           if (disposed) return;
           // A newer host update already queued a catch-up. An older closed/missing answer must not close its gate
           // before it runs. Successful previews can still be shown during a continuous stream of newer updates.
@@ -189,11 +214,16 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
             setView((current) => ({ ...current, loading: false, unconfirmed: true }));
             return;
           }
+          // 0.9.1: the child's host is out of reach: keep what was read, say so, and ask again later (the remote poll).
+          if (response.status === "offline") {
+            setView((current) => ({ ...current, agent: null, heard: true, loading: false, error: null, unconfirmed: false, host: response.host ?? current.host ?? serverId ?? null, offline: true }));
+            return;
+          }
           if (!statusOnly) state = childFeedStep(state, { type: "read", version }).state;
           setView((current) => ({
             agent: response.agent, heard: true,
             entries: statusOnly || response.status !== "ok" ? current.entries : response.rows,
-            loading: false, error: null, unconfirmed: false,
+            loading: false, error: null, unconfirmed: false, host: response.host ?? null, offline: false,
           }));
         } catch (error) {
           if (!disposed) setView((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
@@ -212,8 +242,10 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
     };
     dispatchRef.current = dispatch;
     if (start.read) refresh.request({ immediate: true });
+    // 0.9.1: not in this app's list but placed on a host: ask where it runs (it may be another host) instead of giving up.
+    else if (serverId && listedRef.current == null) refresh.request({ statusOnly: true, immediate: true });
     return () => { disposed = true; dispatchRef.current = null; refresh.dispose(); };
-  }, [agentId, catalog.language, catalog.hash]);
+  }, [agentId, serverId, catalog.language, catalog.hash]);
 
   useEffect(() => {
     dispatchRef.current?.({ type: "hold", hold, running: runningRef.current });
@@ -230,13 +262,22 @@ export function useChildFeed(agentId: string, foreground: boolean, visibility: C
     if (hold !== null || !(status === "running" || status === "initializing")) return;
     const timer = setInterval(() => dispatchRef.current?.({ type: "quiet" }), CHILD_QUIET_READ_MS);
     return () => clearInterval(timer);
-  }, [hold, status, stamp]);
+  }, [hold, status, stampSignal]);
+  // 0.9.1: a child on another host that is not running (idle, closed, or its host out of reach) may start again with no
+  // word to this app. While the card is on screen, its status is asked now and then; a change reads it as usual.
+  const onScreen = foreground && visibility !== "hidden" && visibility !== "pending";
+  useEffect(() => {
+    if (!remote || !onScreen || (hold === "unknown" && !view.offline) || status === "running" || status === "initializing") return;
+    const timer = setInterval(() => dispatchRef.current?.({ type: "poll" }), CHILD_REMOTE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [remote, onScreen, hold, status, view.offline]);
   useEffect(() => {
     const previous = previousSignal.current;
-    previousSignal.current = { agentId, listed, stamp };
-    if (previous.agentId !== agentId || (previous.listed === listed && previous.stamp === stamp)) return;
-    dispatchRef.current?.({ type: "changed", immediate: previous.listed !== listed });
-  }, [agentId, listed, stamp]);
+    previousSignal.current = { agentId, listed: listedSignal, stamp: stampSignal, remote };
+    // Learning that the child runs elsewhere swaps the signals' source; that alone is no news about the child.
+    if (previous.agentId !== agentId || previous.remote !== remote || (previous.listed === listedSignal && previous.stamp === stampSignal)) return;
+    dispatchRef.current?.({ type: "changed", immediate: previous.listed !== listedSignal });
+  }, [agentId, listedSignal, stampSignal, remote]);
 
   const readNow = useCallback(() => dispatchRef.current?.({ type: "manual" }), []);
   return { view, status, hold, readNow };

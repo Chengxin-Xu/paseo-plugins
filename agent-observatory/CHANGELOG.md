@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.17.1 · 2026-10-25
+
+**Paseo 0.13 support (0.12 keeps working)**
+- From 0.13 the turn-ended hook no longer carries the conversation (getpaseo/paseo#7477). Replies awaited, quick replies, the merge or pull request a reply links, stop reasons, the dashboard's message, tool and code metrics, automatic analysis and turn summaries all relied on it and would silently go blank. The plugin's lifecycle hub now reads the end of the conversation once when a turn ends (back to the latest user message, at most 600 rows and 6 seconds) and every module shares that read; while it runs the agent's later events wait in order, so a turn that starts right away (a queued message, say) is never handled before the end of the turn before it. On 0.12 the hook's own timeline is used as before.
+- Stats place rows by their sequence numbers, so two reads agree; a turn longer than the read counts what was read instead of nothing. Automatic analysis reads further back (up to 1000 rows) only when it is on and the window falls short of its thresholds. Turn summaries use the same read and never read a session of their own.
+- Shared send ledger: on 0.13 a request whose frame went out before the connection dropped is an unknown outcome (held for you; cancelling it or its expiry says it may have been delivered), not a failure to retry; a send while the connection is down is described in your language instead of the host's English.
+- Motion overlays spell out absolute positioning: the 0.13 phone app's React Native 0.86 removed `StyleSheet.absoluteFillObject`, and spreading it left the overlays unpositioned on phones.
+- Connected hosts (Paseo 0.13): an agent delegated from another host says "From <host>" on its row, its diagnostics name the parent's host, and View parent agent opens the parent on its own host in Paseo (it used to look for an agent this host does not have). Alerts follow Paseo's rules unchanged: Paseo raises no notification for a delegated agent and tells its parent instead, so the observatory still treats it as a subagent.
+- Chinese listing for the plugin registry (Paseo 0.13): the manifest carries `translations.zh-CN` (name and description) and the package ships `OVERVIEW.zh-CN.md`; older daemons ignore the field.
+
 ## 2.17.0 · 2026-10-15
 
 **Turn summaries and AI-suggested replies (new, off by default)**

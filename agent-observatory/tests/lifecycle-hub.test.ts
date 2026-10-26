@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { lifecycleHub } from "../server/lifecycle-hub";
+import { lifecycleHub, turnRead } from "../server/lifecycle-hub";
 
 /** The host side of `server.on`, as plugin-process.js / PluginHookHandlers.invoke run it: a structuredClone per handler. */
 function fakeHost() {
@@ -62,4 +62,55 @@ test("close removes every host registration; other context methods are the host'
   assert.equal((hub.server.handle as unknown as () => unknown)(), host.server, "bound to the host context");
   hub.close();
   assert.equal(host.handlers.size, 0);
+});
+
+/** Paseo 0.13: `agent.turn_ended` arrives with `timeline: []` and the hub reads the end of the conversation itself. */
+function pagedPaseo(items: { type: string; text?: string }[], gate?: Promise<void>) {
+  const calls: unknown[] = [];
+  const paseo = { agents: { ref: (id: string) => ({ timeline: { refetch: async (request: { direction: string; cursor?: { seq: number }; limit: number }) => {
+    calls.push({ id, ...request });
+    await gate;
+    const rows = items.map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item }));
+    const end = request.direction === "tail" ? rows.length : request.cursor!.seq - 1;
+    const page = rows.slice(Math.max(0, end - request.limit), end);
+    return { epoch: "e", entries: page, startCursor: page.length ? { epoch: "e", seq: page[0]!.seqStart } : null, hasOlder: (page[0]?.seqStart ?? 1) > 1 };
+  } } }) } };
+  return { paseo, calls };
+}
+
+test("Paseo 0.13: an empty turn_ended timeline is read once and every handler gets the window", async () => {
+  const host = fakeHost(), hub = lifecycleHub(host.server);
+  const conversation = [{ type: "user_message", text: "old" }, { type: "assistant_message", text: "old reply" }, { type: "user_message", text: "go" }, { type: "assistant_message", text: "done" }];
+  const { paseo, calls } = pagedPaseo(conversation);
+  const seen: unknown[] = [], reads: unknown[] = [];
+  for (let index = 0; index < 3; index++) hub.server.on("agent.turn_ended", (input: { timeline: unknown }) => { seen.push(input.timeline); reads.push(turnRead(input as object)); });
+  const handler = [...host.handlers.get("agent.turn_ended")!][0]!;
+  await handler({ agent: { id: "a" }, turnId: "t", outcome: { kind: "completed" }, timeline: [] }, { paseo });
+  assert.equal(calls.length, 1, "one read for all handlers");
+  assert.deepEqual(seen, [conversation, conversation, conversation]);
+  assert.deepEqual(reads[0], { positions: [1, 2, 3, 4], complete: true });
+  // 0.12 still brings the whole conversation: no read, nothing recorded.
+  seen.length = 0; reads.length = 0;
+  await handler({ agent: { id: "a" }, turnId: "t2", outcome: { kind: "completed" }, timeline: conversation }, { paseo });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(reads, [null, null, null]);
+});
+
+test("Paseo 0.13: the Agent's later events wait for its turn-end read; other Agents do not", async () => {
+  const host = fakeHost(), hub = lifecycleHub(host.server);
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  const { paseo } = pagedPaseo([{ type: "user_message", text: "go" }], gate);
+  const order: string[] = [];
+  hub.server.on("agent.turn_ended", ({ agent }: { agent: { id: string } }) => { order.push(`ended ${agent.id}`); });
+  hub.server.on("agent.turn_started", ({ agent }: { agent: { id: string } }) => { order.push(`started ${agent.id}`); });
+  const ended = [...host.handlers.get("agent.turn_ended")!][0]!, started = [...host.handlers.get("agent.turn_started")!][0]!;
+  const first = ended({ agent: { id: "a" }, turnId: "1", outcome: { kind: "completed" }, timeline: [] }, { paseo });
+  const next = started({ agent: { id: "a" }, turnId: "2" }, { paseo });
+  await started({ agent: { id: "b" }, turnId: "9" }, { paseo });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(order, ["started b"], "a's next turn waits; b runs at once");
+  open();
+  await Promise.all([first, next]);
+  assert.deepEqual(order, ["started b", "ended a", "started a"]);
 });

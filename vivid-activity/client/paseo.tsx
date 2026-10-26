@@ -790,6 +790,8 @@ function AgentTool({
   switch (leaf) {
     case "create_agent": {
       const childAgentId = extractPaseoChildAgentId(outputRecord);
+      // Paseo 0.13: the host the child was created on (this one, or a connected host the parent chose).
+      const childServerId = fieldString(outputRecord, "serverId");
       const provider = fieldString(inputRecord, "provider");
       const settings = asRecord(inputRecord?.settings);
       const thinkingOptionId = fieldString(settings, "thinkingOptionId");
@@ -815,6 +817,7 @@ function AgentTool({
           {childAgentId ? (
             <ChildAgentTimeline
               agentId={childAgentId}
+              serverId={childServerId}
               theme={theme}
               palette={palette}
               styles={styles}

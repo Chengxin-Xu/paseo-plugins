@@ -3,6 +3,7 @@ import { boot as bootEn } from "./shared/locales/en.json";
 import { boot as bootZh } from "./shared/locales/zh-CN.json";
 import { t } from "./shared/text";
 import type { PluginClientContext, PluginCommandCapabilities, PluginSidebarItemProps } from "@getpaseo/plugin/client";
+import { Platform } from "react-native";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { createChunkLoader, lazySurfaces } from "./client/lazy-chunk";
 import { getClientChunk } from "./shared/ui-chunk";
@@ -48,7 +49,9 @@ export default function contribute(client: PluginClientContext) {
   }
   if (typeof client.addSidebarHeaderItem === "function") own(client.addSidebarHeaderItem({ id: "notes", title: t("boot.screenTitle"), Component: NotesSidebar }));
   else own(client.addSidebarItem({ id: "notes", title: t("boot.screenTitle"), icon: "NotebookPen", surface: "notes" }));
-  own(client.addWorkspacePanel({ id: "project-notes", title: t("boot.name"), icon: "NotebookPen", context: "workspace", locations: ["workspace", "explorer"], Component: NotesWorkspacePanel }));
+  // The Explorer only on web: Paseo 0.13 phones host Explorer tabs too, but a closed Explorer stays mounted there, so the board
+  // would keep polling out of sight.
+  own(client.addWorkspacePanel({ id: "project-notes", title: t("boot.name"), icon: "NotebookPen", context: "workspace", locations: Platform.OS === "web" ? ["workspace", "explorer"] : ["workspace"], Component: NotesWorkspacePanel }));
   own(i18n.localized(() => client.addCommandCenterItem({ id: "open-notes", title: t("boot.openNotes"), icon: "NotebookPen", context: "global", keywords: ["notes", "tasks", "prompts", "ideas", t("boot.keywordBrand"), t("boot.keywordNotes")], onSelect: openNotes })));
   own(i18n.localized(() => client.addCommandCenterItem({ id: "open-project-notes", title: t("boot.openProjects"), icon: "NotebookPen", context: "workspace", keywords: ["notes", t("boot.keywordProjects"), t("boot.keywordTasks")], onSelect({ openPanel }) { openPanel("project-notes"); } })));
   own(i18n.localized(() => client.addSlashCommand({ name: "notes", description: t("boot.notesDescription"), argumentHint: t("boot.notesArgument"), context: "workspace", async onSubmit(context) {

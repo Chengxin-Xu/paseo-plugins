@@ -317,5 +317,5 @@ export function observeBoundary(input?: { item: { type: string; messageId?: stri
   return undefined;
 }
 
-/** Item types Paseo 0.11.1 lets a transformer watch besides ours (it rejects "notification" and "plugin"). */
+/** Item types Paseo 0.11.1 lets a transformer watch besides ours (it rejects "notification" and "plugin"; 0.13 accepts "notification", see index.client.tsx). */
 export const BOUNDARY_ITEM_TYPES = ["assistant_message", "user_message", "todo", "error", "compaction"] as const;

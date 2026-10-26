@@ -148,7 +148,11 @@
     "waitingForApproval": "Waiting for approval",
     "countsFromWhenThePluginBeganObserving": "Counts from when the plugin began observing, not the session's lifetime totals.",
     "agentLabels": "Agent labels",
-    "tokenCount": "{tokens} tokens"
+    "tokenCount": "{tokens} tokens",
+    "couldNotOpenParent": "Couldn't open the parent agent: {value1}",
+    "parentOnHost": "On {host}, opens in Paseo",
+    "anotherHost": "another host",
+    "parentHost": "Parent agent's host"
   },
   "coreAgentDigest": {
     "modelTimeShare": "{fraction} of the time was spent thinking and writing replies.",
@@ -1495,7 +1499,11 @@
     "message": ": {value1}",
     "backgroundSubtasksRunning": "{value1} background subtasks running{value2}",
     "collapseSubagents": "Collapse subagents of {name}",
-    "expandSubagents": "Expand subagents of {name}"
+    "expandSubagents": "Expand subagents of {name}",
+    "fromHost": "From {host}",
+    "fromAnotherHost": "From another host",
+    "delegatedFromHost": "Delegated by an agent on {host}",
+    "delegatedFromAnotherHost": "Delegated by an agent on another host"
   },
   "secondaryStatsBoard": {
     "message": "{value1}/{value2} {value3}",

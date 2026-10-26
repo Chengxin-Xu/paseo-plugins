@@ -24,7 +24,7 @@ vi.mock("../client/kit", () => ({ hue: () => "#8833dd" }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({ SidebarRow: () => null }));
 // The window: wide unless a test turns it into a phone; `turn` stands for rotation or a resized window.
 const screen = vi.hoisted(() => ({ width: 1280, listeners: new Set<() => void>(), turn(width: number) { screen.width = width; for (const listener of screen.listeners) listener(); } }));
-vi.mock("react-native", () => ({ Dimensions: { get: () => ({ width: screen.width, height: 800 }), addEventListener: (_: string, listener: () => void) => { screen.listeners.add(listener); return { remove: () => screen.listeners.delete(listener) }; } } }));
+vi.mock("react-native", () => ({ Platform: { OS: "web" }, Dimensions: { get: () => ({ width: screen.width, height: 800 }), addEventListener: (_: string, listener: () => void) => { screen.listeners.add(listener); return { remove: () => screen.listeners.delete(listener) }; } } }));
 vi.mock("@getpaseo/plugin/client/react-native", () => ({ Icon: () => null, useToast: () => ({ show: vi.fn() }) }));
 import contribute from "../index.client";
 import { contributePromptPills } from "../client/composer-pills";

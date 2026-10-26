@@ -264,3 +264,18 @@ test("load reclassifies old completed empty reports as failed while retaining in
   try { const state = await manager.state(); assert.equal(state.jobs[0].status, "failed"); assert.match(state.jobs[0].error ?? "", /旧报告/); assert.equal(state.jobs[0].report?.summary, old.report.summary); }
   finally { await manager.close(); await rm(directory, { recursive: true, force: true }); }
 });
+test("Paseo 0.13: below the thresholds, the deeper count is asked only while automation is on", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let deeper = 0; const f = await fixture();
+  try {
+    const counted = async (minTurns: number, minTools: number) => { deeper++; assert.deepEqual([minTurns, minTools], [3, 3]); return { users: 4, tools: 5 }; };
+    await f.manager.scheduleAuto(paseo, "window", 1, 1, undefined, counted);
+    assert.equal(deeper, 0, "automation off: nothing read");
+    await f.manager.configure(true);
+    await f.manager.scheduleAuto(paseo, "enough", 3, 3, undefined, counted);
+    assert.equal(deeper, 0, "the window already meets the thresholds");
+    await f.manager.scheduleAuto(paseo, "window", 1, 1, undefined, counted);
+    assert.equal(deeper, 1);
+    assert.ok((await f.manager.list()).nextScheduledAt !== null, "the deeper count schedules the analysis");
+  } finally { await f.close(); context.mock.timers.reset(); }
+});

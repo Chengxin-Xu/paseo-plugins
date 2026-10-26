@@ -11,5 +11,11 @@
   ],
   "requirements": {
     "paseo": ">=0.11.1"
+  },
+  "translations": {
+    "zh-CN": {
+      "name": "服务器浏览器",
+      "description": "在 daemon 主机上运行的 Chromium 浏览器，由手机、电脑和专用的浏览器 Agent 共用，控制权明确交接，Agent 打开的端口一点即开。支持英文、简体中文和用户自定义语言。"
+    }
   }
 }

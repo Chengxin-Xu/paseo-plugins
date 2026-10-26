@@ -7,7 +7,7 @@ import { usePaseo, useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/clie
 import { ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginTheme } from "@getpaseo/plugin";
-import { acknowledgement, applyReadReceipt, completionReadState, formatTokens, knownCompletionAt, observedRound, ownTurnRunning, sameResultSource, stopUnseen, waitingKind, type AgentRecord } from "../shared/model";
+import { acknowledgement, applyReadReceipt, completionReadState, formatTokens, knownCompletionAt, observedRound, ownTurnRunning, parentServerOf, sameResultSource, stopUnseen, waitingKind, type AgentRecord } from "../shared/model";
 import { eventLabel, type TelemetrySnapshot } from "../shared/telemetry";
 import type { HeartbeatSummary } from "../shared/schedules";
 import { getSessionEvidence } from "../shared/history";
@@ -32,6 +32,7 @@ import { recapLook } from "../shared/recap";
 import { useRecaps } from "./use-recaps";
 import { RecapCard } from "./recap";
 import { useForeground } from "./use-foreground";
+import { useHostLabels } from "./hosts";
 import { useObservatory } from "./use-observatory";
 import { RecordedRunResult, ScheduleRunCard } from "./schedule-run-card";
 import { heartbeatsQueryKey, useScheduleRun } from "./use-schedules";
@@ -73,6 +74,9 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
   const deferredQueue = useDeferredQueue(agent.id, !agent.archivedAt);
   // 每轮小结 at the top, judged against the turn this detail shows; its 建议回复 goes under the reply.
   const recaps = useRecaps(hostId, !agent.archivedAt && !agent.parentAgentId);
+  // Paseo 0.13: an Agent delegated from another connected host has its parent there, not in this list; Paseo opens it on its host.
+  const parentServer = parentServerOf(agent, hostId), hostLabels = useHostLabels();
+  const parentHost = parentServer ? hostLabels.get(parentServer) ?? null : null;
   const recap = recaps.data?.enabled ? recapLook(recaps.data.byAgent.get(agent.id), { startedAt: agent.observedTurnStartedAt ?? null, endedAt: agent.observedTurnEndedAt ?? null, running: ownTurnRunning(agent) }) : null;
   // A heartbeat's turn leaves the prompt and an unread attention stamp as they were: its completion and round tell it apart (codex-obs-attn-F1).
   const resultKey = ["observatory-result", agent.id, agent.lastUserMessageAt, knownCompletionAt(agent), observedRound(agent)];
@@ -145,6 +149,12 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     finally { setReading(false); }
   };
   const openConversation = () => { try { Promise.resolve(navigation?.openAgent({ agentId: agent.id })).catch(error => toast.error(t("coreAgentDetail.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") }))); } catch (error) { toast.error(t("coreAgentDetail.couldNotOpenSession", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") })); } };
+  const openParent = (agentId: string, serverId: string) => {
+    const failed = (error: unknown) => toast.error(t("coreAgentDetail.couldNotOpenParent", { value1: error instanceof Error ? error.message : t("coreAgentDetail.tryAgainLater") }));
+    try { Promise.resolve(navigation?.openAgent({ agentId, serverId })).catch(failed); } catch (error) { failed(error); }
+  };
+  const viewParent = !agent.parentAgentId ? undefined : !parentServer ? () => onSelectAgent(agent.parentAgentId!)
+    : navigation ? () => openParent(agent.parentAgentId!, parentServer) : undefined;
   const archiveOriginal = async () => { setArchiving(true); try { await paseo.agents.ref(agent.id).archive(); toast.show(t("coreAgentDetail.archived"), { variant: "success" }); onClose?.(); } catch (error) { toast.error(error instanceof Error ? error.message : t("coreAgentDetail.couldNotArchiveTryAgain")); } finally { setArchiving(false); } };
   // 恢复会话 runs as a job on the server and is read every few seconds: a slow worktree rebuild outlasts the host's 30 s RPC limit (opus-F73).
   const restoring = useRestoreSession(agent.id);
@@ -175,7 +185,7 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     ...(compact && snoozeAction ? [{ key: "snooze", label: t("coreAgentDetail.snooze"), icon: "Clock3", hint: t("coreAgentDetail.remindIn1HourOrImmediatelyWhen"), onPress: snoozeAction.onPress }] : []),
     // refetch() forces a read even while the query waits, which would load an archived schedule session.
     ...(tab === "result" && !waitForTap ? [{ key: "refresh", label: t("coreAgentDetail.refreshResult"), icon: "RefreshCw", onPress: () => void result.refetch() }] : []),
-    ...(agent.parentAgentId ? [{ key: "parent", label: t("coreAgentDetail.viewParentAgent"), icon: "CornerLeftUp", onPress: () => onSelectAgent(agent.parentAgentId!) }] : []),
+    ...(viewParent ? [{ key: "parent", label: t("coreAgentDetail.viewParentAgent"), icon: "CornerLeftUp", ...(parentServer ? { hint: t("coreAgentDetail.parentOnHost", { host: parentHost ?? t("coreAgentDetail.anotherHost") }) } : {}), onPress: viewParent }] : []),
     { key: "copy-id", label: t("coreAgentDetail.copyAgentId"), icon: "Copy", onPress: () => { void copyText(agent.id).then(() => toast.show(t("coreAgentDetail.agentIdCopied"))).catch(() => toast.error(t("coreAgentDetail.couldNotCopy"))); } },
     ...extraActions,
   ];
@@ -231,13 +241,13 @@ export function AgentDetail({ hostId, agent, agents, theme, compact, navigation,
     : tab === "digest" ? <AgentDigest theme={theme} compact={compact} digest={digest.data} loading={digest.isPending} error={digest.error?.message} onRefresh={() => void digest.refetch()}
       onOpenSeq={(epoch, seq) => openEvidence(`${agent.id}:${epoch}:${seq}-${seq}`)} header={scrolled} inset={inset} />
     : tab === "timeline" ? <TimelineContent timeline={timeline} theme={theme} cacheKey={agent.id} focusRef={focusRef} header={scrolled} inset={inset} />
-    : tab === "children" ? agents ? <SubtasksView agent={agent} agents={agents} theme={theme} inset={inset} onSelectAgent={onSelectAgent} header={scrolled} />
-      : <DirectorySubtasks agent={agent} theme={theme} inset={inset} onSelectAgent={onSelectAgent} header={scrolled} />
+    : tab === "children" ? agents ? <SubtasksView agent={agent} agents={agents} theme={theme} inset={inset} onSelectAgent={onSelectAgent} onViewParent={viewParent} header={scrolled} />
+      : <DirectorySubtasks agent={agent} theme={theme} inset={inset} onSelectAgent={onSelectAgent} onViewParent={viewParent} header={scrolled} />
     : <ScrollView contentOffset={{ x: 0, y: memory.scroll }} onScroll={event => { memory.scroll = event.nativeEvent.contentOffset.y; }} scrollEventThrottle={100} contentContainerStyle={{ paddingHorizontal: inset, paddingBottom: space.xxl, gap: space.lg }}>
       {scrolled}
       <View style={{ paddingTop: compact ? 0 : space.lg }}>
         {tab === "insights" ? <InsightsPanel agent={agent} theme={theme} compact={compact} navigation={navigation} onOpenEvidence={({ ref }) => openEvidence(ref)} />
-          : <Diagnostics theme={theme} agent={agent} compact={compact} observed={observed} activity={activity} evidence={evidence.data} evidenceLoading={evidence.isPending} evidenceError={!!evidence.error} />}
+          : <Diagnostics theme={theme} agent={agent} parentHost={parentServer ? parentHost ? `${parentHost} · ${parentServer}` : parentServer : null} compact={compact} observed={observed} activity={activity} evidence={evidence.data} evidenceLoading={evidence.isPending} evidenceError={!!evidence.error} />}
       </View>
     </ScrollView>;
   const actionMenu = <ActionMenu theme={theme} title={t("coreAgentDetail.moreActions")} open={menuOpen} onClose={() => setMenuOpen(false)} actions={menu} />;
@@ -283,8 +293,10 @@ function LiveMeta({ theme, agent, totalRunMs, tools }: { theme: PluginTheme; age
 const sectionLooks: Record<string, { label: string; icon: string; tone: "blue" | "violet" | "orange" | "teal" }> = {
   context: { get label() { return t("coreAgentDetail.executionContext"); }, icon: "FolderGit2", tone: "blue" }, history: { get label() { return t("coreAgentDetail.sessionHistory"); }, icon: "History", tone: "violet" }, usage: { get label() { return t("coreAgentDetail.usage"); }, icon: "Gauge", tone: "orange" }, observation: { get label() { return t("coreAgentDetail.pluginObservations"); }, icon: "Eye", tone: "teal" }, lifecycle: { get label() { return t("coreAgentDetail.lifecycleEvents"); }, icon: "Activity", tone: "orange" },
 };
-function Diagnostics({ theme, agent, compact, observed, activity, evidence, evidenceLoading, evidenceError }: {
-  theme: PluginTheme; agent: AgentRecord; compact: boolean; observed?: TelemetrySnapshot["agents"][number]; activity: TelemetrySnapshot["events"];
+function Diagnostics({ theme, agent, parentHost, compact, observed, activity, evidence, evidenceLoading, evidenceError }: {
+  theme: PluginTheme; agent: AgentRecord;
+  /** The parent's host when it is another one (Paseo 0.13 connected hosts): its name and server id. */
+  parentHost: string | null; compact: boolean; observed?: TelemetrySnapshot["agents"][number]; activity: TelemetrySnapshot["events"];
   evidence?: { turns: number; tools: number; toolFailures: number; complete: boolean; coverageReason: string | null }; evidenceLoading: boolean; evidenceError: boolean;
 }) {
   const now = useClock(30_000);
@@ -308,6 +320,7 @@ function Diagnostics({ theme, agent, compact, observed, activity, evidence, evid
       <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.created")} value={localTime(agent.createdAt)} />
       <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.lastActive")} value={localTime(agent.lastActivityAt)} />
       {agent.parentAgentId ? <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.parentAgent")} value={agent.parentAgentId} mono /> : null}
+      {parentHost ? <KeyValue theme={theme} compact={compact} label={t("coreAgentDetail.parentHost")} value={parentHost} /> : null}
     </View>)}
     {section("history", evidenceLoading ? <Skeleton theme={theme} rows={1} /> : evidenceError ? <MetaLine theme={theme} parts={[t("coreAgentDetail.historyEvidenceIsTemporarilyUnavailableSwitchingTabs")]} /> : evidence ? <View style={{ gap: space.sm }}>
       <StatRow theme={theme} stats={[{ label: t("coreAgentDetail.userTurns"), value: String(evidence.turns) }, { label: t("coreAgentDetail.toolRuns"), value: String(evidence.tools) }, { label: t("coreAgentDetail.toolFailures"), value: String(evidence.toolFailures), tone: evidence.toolFailures ? "danger" : undefined }]} />

@@ -34,7 +34,7 @@ import { readSendCapabilities } from "./server/steerable-providers";
 import { resolvePaseoHome } from "./server/paseo-home";
 import { createInterruptGrace } from "./server/interrupts";
 import { registerQuota } from "./server/quota";
-import { lifecycleHub } from "./server/lifecycle-hub";
+import { lifecycleHub, turnRead } from "./server/lifecycle-hub";
 import { DeviceZone } from "./server/device-zone";
 import { scheduleInsightSweeps } from "./server/grok-runner";
 import { registerProfiles } from "./server/profiles";
@@ -202,9 +202,12 @@ export default function contribute(host: PluginServerContext) {
     if (statsClosed) return;
     statsRemovers.push(
       server.on("agent.turn_started", ({ agent }, { paseo }) => observeWork(paseo, agent, () => stats.record({ type: "turn_started", agentId: agent.id }))),
-      server.on("agent.turn_ended", ({ agent, turnId, outcome, timeline }, { paseo }) => {
-        const kind = outcomeOf(agent.id, turnId, outcome);
-        observeWork(paseo, agent, () => stats.record({ type: "turn_ended", agentId: agent.id, outcome: kind, timeline }));
+      server.on("agent.turn_ended", (event, { paseo }) => {
+        const { agent, turnId, outcome, timeline } = event, kind = outcomeOf(agent.id, turnId, outcome);
+        // 0.13: the hub read the end of the conversation (lifecycle-hub.ts); rows keep their keys from read to read.
+        const read = turnRead(event);
+        observeWork(paseo, agent, () => stats.record({ type: "turn_ended", agentId: agent.id, outcome: kind, timeline,
+          positions: read?.positions, partial: read ? !read.complete : false }));
       }),
       server.on("agent.permission_requested", ({ agent, request }, { paseo }) => observeWork(paseo, agent, () => stats.record({ type: "permission_requested", agentId: agent.id, requestId: request.id }))),
       server.on("agent.permission_resolved", ({ agent, requestId }, { paseo }) => observeWork(paseo, agent, () => stats.record({ type: "permission_resolved", agentId: agent.id, requestId }))),
