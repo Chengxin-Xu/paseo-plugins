@@ -6,7 +6,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { TOKEN_SOURCES, type TokenSource } from "../../shared/tokens";
 import type { TokenCall, TokenCallSource } from "../token-source";
 import type { TokenIngester } from "./ingester";
-import { initialParser, validStart } from "./parser";
+import { initialParser } from "./parser";
+import { validStart } from "./values";
 import { tailFile } from "./reader";
 import { safeError, type Candidate, type LogFile, type ParserState } from "./types";
 
@@ -54,6 +55,7 @@ function freshFile(file: LogFile): LogFile {
 }
 function copy(candidate: Candidate): Candidate { return { forked: candidate.forked, call: { ...candidate.call } }; }
 function merge(previous: Candidate, next: Candidate, contiguous = false): Candidate {
+  if (next.call.source === "kimi") return copy(next); // A corrected usage.record replaces the same request sample.
   if (previous.forked !== next.forked) return copy(previous.forked ? next : previous);
   const at = Math.max(previous.call.at, next.call.at);
   return { forked: previous.forked, call: { ...previous.call, at,
@@ -278,11 +280,11 @@ export class LocalTokenCallSource implements TokenCallSource {
     try {
       const details = await stat(file.path);
       if (!details.isFile()) { this.drop(file.path); return null; }
-      if (entry && details.dev === entry.file.dev && details.ino === entry.file.ino && details.size === entry.file.size && details.mtimeMs === entry.file.mtime) {
+      if (file.source !== "zcode" && entry && details.dev === entry.file.dev && details.ino === entry.file.ino && details.size === entry.file.size && details.mtimeMs === entry.file.mtime) {
         this.diagnostics.reused++; this.touch(entry); return entry;
       }
-      if (!entry || details.dev !== entry.file.dev || details.ino !== entry.file.ino || details.size < entry.file.size || details.size < entry.file.offset ||
-          (details.size === entry.file.size && details.mtimeMs !== entry.file.mtime)) entry = { file: freshFile(file), calls: new Map() };
+      if (!entry || details.dev !== entry.file.dev || details.ino !== entry.file.ino || (file.source !== "zcode" && (details.size < entry.file.size || details.size < entry.file.offset ||
+          (details.size === entry.file.size && details.mtimeMs !== entry.file.mtime)))) entry = { file: freshFile(file), calls: new Map() };
       const current = entry;
       let parsedState = current.file.state;
       const reconcileReset = () => {
@@ -328,8 +330,10 @@ export class LocalTokenCallSource implements TokenCallSource {
         const entry = await this.read(file);
         if (!entry) continue;
         found = true; discovered.set(file.path, entry.file.state);
-        identity.push([file.path, entry.file.dev, entry.file.ino, entry.file.size, entry.file.mtime, entry.file.offset, entry.calls.size]);
+        identity.push([file.path, entry.file.dev, entry.file.ino, entry.file.size, entry.file.mtime, entry.file.offset, entry.file.state.zcode, entry.calls.size]);
         for (const candidate of entry.calls.values()) {
+          // SQLite contains every ZCode session, not just the requested agent.
+          if (source === "zcode" && !sessionIds.includes(candidate.call.sessionId)) continue;
           const before = merged.get(candidate.call.key);
           if (!before || (before.candidate.forked && !candidate.forked)) merged.set(candidate.call.key, { candidate: copy(candidate), path: file.path });
           else if (before.path === file.path) before.candidate = merge(before.candidate, candidate);
