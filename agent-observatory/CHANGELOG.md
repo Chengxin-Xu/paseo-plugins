@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.18.0 · 2026-10-28
+
+**Looping and stuck turns (new, after Cindy's loop guard)**
+- While an agent runs, the read that fetches its todo progress also looks at the last 80 rows of the turn (it used to read 20): the same call with the same arguments and result 4 times in a row; only 2 distinct calls in the last 12, or at most 4 in rotation over 16; the same tool hitting the same kind of argument error 3 times in a row (text to replace not found, several matches, old and new text the same, a required parameter missing). Only calls less than 30 seconds apart count, and polling (waiting on a background task, `sleep`, tailing a log) never does; however slow, 30 identical calls in a row or the same result for over an hour is a loop; a newer call still running that isn't part of the pattern (moving on to run the tests, say) ends it. ACP tool calls (all named other) compare by kind and title.
+- Stuck: the turn's latest rows unchanged for 10 minutes (45 while a tool call still runs; a sub-agent tool's growing log is change) in a turn at least that old. An agent whose sub-agents or background agents are still working is waiting on them, not stuck; its clock starts when they stop.
+- The row gets a one-line reason and counts in Needs you and the sidebar badge (looping orange, stuck amber; the chime uses the failure sound, sidebar labels match), and a card at the top of the detail lists the latest calls (credentials masked) with Open session and Got it. After Got it it stays shown but no longer counts, until the pattern changes or the next turn. Memory only, no model, no provider logs; only agents this process has seen running are read; the sidebar badge's reads trigger it too, not only an open page. New RPC `observatory.live.issue.seen`; live extras carry an `issue` field (older clients ignore it).
+
+**A parent's result waits for its sub-agents (new)**
+- When a parent agent's turn has ended but a Paseo sub-agent it started (or one further down, up to 8 levels) still runs (its own provider background agents count), waits for an approval or asks a question, the parent stays running with "N subtasks in the background", as for provider background agents, and its finished alert is held until they are all done; the agent panel shows the same (from the sub-agents it started directly). The sub-agents' own approvals, questions and errors still count as before.
+
+**Fixes**
+- Reviews and turn summaries run with a profile or another model now start their temporary read-only helper in the analysed agent's workspace, labelled as its sub-agent. Created with `parent`, Paseo 0.13 wraps such a helper's first message as another agent's message with XML entities, so the helper read `&lt;` and the like.
+- Right after the daemon starts, providers are still being discovered and list no approval modes; analysis took them for unusable and cached that for a minute. It now waits up to 8 seconds for discovery.
+
 ## 2.17.1 · 2026-10-25
 
 **Paseo 0.13 support (0.12 keeps working)**
