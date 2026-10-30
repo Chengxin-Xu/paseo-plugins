@@ -82,3 +82,43 @@ test("agent directory and execution review await the same native ZCode attributi
     assert.equal(directory.agents[0]?.sessionId, "sess_mapped"); assert.deepEqual(requested, ["sess_mapped"]); assert.equal(reads, 1);
   } finally { await service.close(); }
 });
+
+test("custom ZCode attribution follows the actual provider command and home in both consumers", async () => {
+  let configReads = 0;
+  const paths: string[] = [];
+  const sessions = new TokenSessions({ home: "/host", env: {}, now: () => NOW, readText: async path => {
+    paths.push(path); return mapping(path.startsWith("/provider/") ? "sess_custom" : "sess_default");
+  } });
+  const agent = { id: "custom", cwd: "/work", createdAt: new Date(NOW).toISOString(), provider: "team-coding", status: "idle", persistence };
+  const paseo = {
+    config: { get: async () => { configReads++; return { config: { providers: {
+      "team-coding": { extends: "acp", command: ["env", "ZCODE_HOME=/provider", "zcode", "--acp"] },
+      zcode: { env: { ZCODE_HOME: "/provider" } },
+      "zcode-display-only": { extends: "acp", command: ["unrelated-cli"] },
+    } } }; } },
+    agents: { list: async () => ({ entries: [{ agent }], pageInfo: { hasMore: false } }), ref: () => ({
+      refresh: async () => ({ agent }), timeline: { refetch: async () => ({ epoch: "e", entries: [] }) },
+    }) },
+  } as unknown as PaseoApi;
+  const directory = new StatsDirectory(() => NOW, sessions);
+  let requested: readonly string[] = [];
+  const service = new DigestService({ sessions, now: () => NOW, telemetry: { snapshot: async () => ({ events: [] }) },
+    tokens: { callsForSessions: async ids => { requested = ids; return null; } } });
+  try {
+    await Promise.all([directory.refresh(paseo), service.read({ agentId: "custom" }, paseo)]);
+    assert.equal(directory.agents[0]?.sessionId, "sess_custom"); assert.deepEqual(requested, ["sess_custom"]);
+    assert.equal(configReads, 1); assert.equal(paths.filter(path => path.startsWith("/provider/")).length, 1);
+    assert.equal(await sessions.resolve("team-coding", { sessionId: "bridge" }, paseo), "sess_custom");
+    assert.equal(await sessions.resolve("zcode", persistence, paseo), "sess_custom", "the canonical provider also respects its configured home");
+    assert.equal(await sessions.resolve("zcode-display-only", persistence, paseo), persistence.sessionId, "a suggestive id cannot reinterpret another provider's persistence");
+    assert.equal(configReads, 1);
+  } finally { await service.close(); }
+});
+
+test("non-ZCode built-ins decode persistence without reading daemon provider metadata", async () => {
+  const sessions = new TokenSessions();
+  const paseo = { config: { get: async () => { assert.fail("unnecessary provider read"); } } } as unknown as PaseoApi;
+  for (const provider of ["claude", "codex", "grok", "pi", "kimi"]) {
+    assert.equal(await sessions.resolve(provider, { sessionId: "native" }, paseo), "native");
+  }
+});

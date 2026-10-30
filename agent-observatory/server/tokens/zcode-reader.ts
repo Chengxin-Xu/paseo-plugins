@@ -4,23 +4,47 @@ import { initialParser } from "./parser";
 import type { CallSink, Candidate, LogFile, ParserState } from "./types";
 import { callKey, count, object, validStart } from "./values";
 
+async function databaseDetails(path: string) {
+  const details = await lstat(path);
+  if (!details.isFile() || details.isSymbolicLink()) return null;
+  const wal = await lstat(path + "-wal").catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  return wal && (!wal.isFile() || wal.isSymbolicLink()) ? null : { details, wal };
+}
+
+/** The bounded checkpoint session list is a hint; SQLite's session primary key remains authoritative. */
+export async function zcodeSessionIds(file: LogFile, ids: readonly string[]): Promise<string[]> {
+  if (!await databaseDetails(file.path)) return [];
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(file.path, { readOnly: true });
+  try {
+    db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000");
+    const query = db.prepare("SELECT id FROM session WHERE id=?");
+    return ids.filter(id => !!query.get(id));
+  } finally { db.close(); }
+}
+
 /** Read completed model steps once. message.tokens duplicates step-finish.tokens and is never added again.
  * SQLite's read-only connection sees committed WAL rows; no checkpoint, migration, or provider write is issued.
  * A rowid cursor avoids rescanning tool output. Only allowlisted metadata and counters leave the SQL query.
  */
 export async function tailZcode(file: LogFile, sink: CallSink, onBytes?: (bytes: number) => void, onReset?: (lost: ParserState) => void): Promise<boolean> {
-  const details = await lstat(file.path);
-  if (!details.isFile() || details.isSymbolicLink()) return false;
-  const wal = await lstat(file.path + "-wal").catch(error => { if (error.code === "ENOENT") return null; throw error; });
-  if (wal && (!wal.isFile() || wal.isSymbolicLink())) return false;
+  const identity = await databaseDetails(file.path);
+  if (!identity) return false;
+  const { details, wal } = identity;
   const signature = [details.dev, details.ino, details.size, details.mtimeMs, wal?.ino ?? 0, wal?.size ?? 0, wal?.mtimeMs ?? 0].join(":");
-  if (file.state.zcode?.signature === signature) return false;
+  const saved = file.state.zcode;
+  if (saved?.signature === signature && (saved.row === 0 || saved.anchor)) return false;
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(file.path, { readOnly: true });
   try {
-    db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000");
+    // Keep the anchor and the paged reads in one read-only snapshot while the provider keeps writing its WAL.
+    db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN");
     const last = Number(db.prepare("SELECT coalesce(max(rowid),0) AS last FROM part").get()!.last);
-    if (details.dev !== file.dev || details.ino !== file.ino || last < (file.state.zcode?.row ?? 0)) {
+    const anchor = saved?.row ? db.prepare("SELECT id FROM part WHERE rowid=?").get(saved.row) : null;
+    // Deleting recent sessions can reuse rowids without lowering max(rowid). One primary-key lookup detects that;
+    // ordinary appends stay incremental, and a reset is deduplicated by stable part ids in the ledger.
+    if (details.dev !== file.dev || details.ino !== file.ino || last < (saved?.row ?? 0) ||
+        (saved?.row && (!saved.anchor || !anchor || callKey(["zcode-row", anchor.id]) !== saved.anchor))) {
       onReset?.(file.state); file.state = initialParser(file.path, null, file.source);
     }
     const cursor = file.state.zcode ?? { row: 0, signature: "" };
@@ -54,6 +78,7 @@ export async function tailZcode(file: LogFile, sink: CallSink, onBytes?: (bytes:
           }
         }
         cursor.row = Number(row.cursor);
+        cursor.anchor = callKey(["zcode-row", row.id]);
       }
       onBytes?.(Buffer.byteLength(JSON.stringify(rows))); await yieldLoop();
     }

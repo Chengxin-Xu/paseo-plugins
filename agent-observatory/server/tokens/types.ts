@@ -23,7 +23,7 @@ export interface ParserState {
    */
   threadId?: string; parentThread?: string | null;
   /** ZCode SQLite part cursor and database/WAL identity; no message content. */
-  zcode?: { row: number; signature: string };
+  zcode?: { row: number; signature: string; anchor?: string };
 }
 export interface LogRoot {
   source: TokenSource; path: string;

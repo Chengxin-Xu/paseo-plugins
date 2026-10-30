@@ -6,6 +6,8 @@ import { object } from "./tokens/values";
 
 const MAX_BYTES = 4 * 1024 * 1024, CACHE_MS = 5000;
 export interface ZcodeSessionOptions {
+  /** Homes discovered from this provider's actual environment/command/launcher, in precedence order. */
+  homes?: readonly string[];
   home?: string;
   env?: Readonly<Record<string, string | undefined>>;
   now?: () => number;
@@ -42,7 +44,7 @@ export class ZcodeSessions {
 
   constructor(options: ZcodeSessionOptions = {}) {
     const home = options.home ?? homedir(), env = options.env ?? process.env;
-    this.homes = [...new Set([env.ZCODE_HOME || join(home, ".zcode"), join(home, ".zcode")])];
+    this.homes = [...new Set([...(options.homes ?? []), env.ZCODE_HOME || join(home, ".zcode"), join(home, ".zcode")])];
     this.now = options.now ?? Date.now; this.readText = options.readText ?? readAliases;
   }
 

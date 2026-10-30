@@ -49,7 +49,7 @@ export class DigestService {
     if (this.closed || signal.aborted) throw new Error(t("serverDigestIndex.m003"));
     if (!snapshot?.agent) { this.cache.delete(agentId); throw new Error(t("serverDigestIndex.m004")); }
     const agent = snapshot.agent, previous = this.cache.get(agentId);
-    const session = this.sessions.resolve(agent.provider, agent.persistence);
+    const session = this.sessions.resolve(agent.provider, agent.persistence, paseo);
     const [history, tokenHistory, telemetry, sessionId] = await Promise.all([
       fetchHistory(options => {
         if (this.closed || signal.aborted) throw new Error(t("serverDigestIndex.m005"));

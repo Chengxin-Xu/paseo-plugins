@@ -9,6 +9,7 @@ import type { TokenIngester } from "./ingester";
 import { initialParser } from "./parser";
 import { validStart } from "./values";
 import { tailFile } from "./reader";
+import { zcodeSessionIds } from "./zcode-reader";
 import { safeError, type Candidate, type LogFile, type ParserState } from "./types";
 
 /**
@@ -316,6 +317,21 @@ export class LocalTokenCallSource implements TokenCallSource {
     for (const id of sessionIds) {
       const known = files.find(file => { const links = this.links(file, discovered); return links.ids.includes(id) || links.links.includes(id); });
       if (known) { source = known.source; break; }
+    }
+    if (!source || source === "zcode") for (const file of files) {
+      if (file.source !== "zcode") continue;
+      const indexed = this.links(file, discovered).ids;
+      const missing = sessionIds.filter(id => !indexed.includes(id));
+      if (!missing.length) continue;
+      try {
+        const matched = await zcodeSessionIds(file, missing);
+        if (!matched.length) continue;
+        discovered.set(file.path, { ...file.state, sessions: [...file.state.sessions, ...matched] });
+        source = "zcode";
+      } catch (error) {
+        const root = this.ingester.roots[file.root];
+        if (root) root.error = safeError(error);
+      }
     }
     if (!source) return null;
     const merged = new Map<string, OwnedCandidate>(), read = new Set<string>(), identity: unknown[] = [source];

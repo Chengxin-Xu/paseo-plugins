@@ -99,6 +99,62 @@ test("ZCode: unknown SQLite schema surfaces a coverage error", () => fixture(asy
   try { await s.ready; assert.ok(s.ingester.roots[0].error); assert.equal(s.data.recent.size, 0); } finally { await s.close(); }
 }));
 
+test("ZCode: execution reviews find sessions beyond the bounded checkpoint index, including after restart", () => fixture(async root => {
+  const logs = join(root, "db"), directory = join(root, "ledger"); await mkdir(logs);
+  const db = database(join(logs, "db.sqlite"));
+  const insert = db.prepare("INSERT INTO session VALUES(?,?,?,?,?)");
+  db.exec("BEGIN");
+  for (let i = 0; i < 5001; i++) {
+    const id = `sess_bulk_${i}`;
+    insert.run(id, "/work/bulk", null, at - 5000, "interactive"); step(db, `bulk_${i}`, id, at);
+  }
+  db.exec("COMMIT");
+  let store = new TokenStore({ roots: [{ source: "zcode", path: logs }], directory, now: () => NOW, poll: false });
+  try {
+    await store.ready;
+    assert.equal([...store.ingester.files.values()][0]!.state.sessions.length, 5000);
+    for (let pass = 0; pass < 2; pass++) {
+      const history = new LocalTokenCallSource(store.ingester);
+      assert.equal((await history.callsForSessions(["sess_bulk_0"]))?.calls.length, 1);
+      assert.equal((await history.callsForSessions(["sess_bulk_5000"]))?.calls.length, 1);
+      assert.equal((await history.callsForSessions(["sess_bulk_4999", "sess_bulk_5000"]))?.calls.length, 2);
+      assert.equal(await history.callsForSessions(["sess_missing"]), null);
+      if (!pass) {
+        await store.close(); store = new TokenStore({ roots: [{ source: "zcode", path: logs }], directory, now: () => NOW, poll: false }); await store.ready;
+        assert.equal(store.ingester.diagnostics.bytesRead, 0, "a persisted cursor does not need a full import to find an unindexed session");
+      }
+    }
+  } finally { await store.close(); db.close(); }
+}));
+
+for (const replacements of [1, 2]) test(`ZCode: rowid reuse with ${replacements === 1 ? "unchanged" : "larger"} max rowid preserves new usage and cached history`, () => fixture(async root => {
+  const logs = join(root, "db"), directory = join(root, "ledger"); await mkdir(logs);
+  const path = join(logs, "db.sqlite"), db = database(path);
+  step(db, "keep", "sess_a", at); step(db, "deleted", "sess_b", at + 1000);
+  let store = new TokenStore({ roots: [{ source: "zcode", path: logs }], directory, now: () => NOW, poll: false });
+  try {
+    await store.ready; await store.close();
+    store = new TokenStore({ roots: [{ source: "zcode", path: logs }], directory, now: () => NOW, poll: false }); await store.ready;
+    assert.equal(store.ingester.diagnostics.bytesRead, 0, "cursor and anchor survive restart");
+    const history = new LocalTokenCallSource(store.ingester);
+    assert.equal((await history.callsForSessions(["sess_b"]))?.calls.length, 1);
+    db.exec("DELETE FROM part WHERE session_id='sess_b'; DELETE FROM message WHERE id='deleted'");
+    for (let i = 0; i < replacements; i++) step(db, `replacement_${i}`, "sess_b", at + 2000 + i * 1000);
+    const main = await readFile(path), wal = await readFile(path + "-wal");
+    await store.poll(true);
+    assert.equal((await snapshot(store)).totals.calls, 2 + replacements, "previous usage remains recorded; replacements are counted once");
+    const current = await history.callsForSessions(["sess_b"]);
+    assert.equal(current?.calls.length, replacements); assert.ok(current?.calls.every(call => call.at >= at + 2000));
+    assert.equal((await history.callsForSessions(["sess_a"]))?.calls.length, 1);
+    assert.deepEqual(await readFile(path), main); assert.deepEqual(await readFile(path + "-wal"), wal);
+    const bytes = store.ingester.diagnostics.bytesRead;
+    await store.poll(true); assert.equal(store.ingester.diagnostics.bytesRead, bytes, "unchanged polls do not rescan");
+    step(db, "append", "sess_b", at + 5000); await store.poll(true);
+    assert.equal((await snapshot(store)).totals.calls, 3 + replacements);
+    assert.equal((await history.callsForSessions(["sess_b"]))?.calls.length, replacements + 1);
+  } finally { await store.close(); db.close(); }
+}));
+
 test("Kimi/ZCode: standard and custom roots, provider recognition, native persistence", () => {
   const roots = defaultRoots({ home: "/home/me", env: { KIMI_CODE_HOME: "/srv/kimi", ZCODE_HOME: "/srv/zcode" } });
   assert.deepEqual(roots.filter(r => r.source === "kimi").map(r => r.path), ["/srv/kimi/sessions", "/home/me/.kimi-code/sessions"]);

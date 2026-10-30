@@ -63,7 +63,7 @@ export class StatsDirectory {
         ]);
       } finally { if (timer) clearTimeout(timer); }
       const descriptors = await Promise.all(result.entries.map(async entry =>
-        descriptor(entry, await this.sessions.resolve(entry.agent.provider, entry.agent.persistence))));
+        descriptor(entry, await this.sessions.resolve(entry.agent.provider, entry.agent.persistence, paseo))));
       for (const agent of descriptors) agents.set(agent.id, agent);
       if (!result.pageInfo.hasMore) break;
       const next = result.pageInfo.nextCursor;
